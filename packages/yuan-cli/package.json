@@ -17,10 +17,10 @@
     "start": "node dist/cli.js"
   },
   "dependencies": {
-    "@yuan/core": "workspace:*",
-    "@yuan/tools": "workspace:*"
+    "commander": "^13.1.0"
   },
   "devDependencies": {
+    "@types/node": "^22.19.15",
     "typescript": "^5.7.0"
   }
 }
