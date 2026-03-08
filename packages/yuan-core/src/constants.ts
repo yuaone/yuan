@@ -1,9 +1,19 @@
 /**
  * @module constants
- * @description YUAN Agent 상수 정의
+ * @description YUAN Agent 상수 정의.
+ *
+ * 보안 관련 패턴(DANGEROUS_PATTERNS, SENSITIVE_FILE_PATTERNS, ALLOWED_EXECUTABLES)은
+ * security.ts가 SSOT이며, 여기서는 re-export만 한다.
  */
 
 import type { PlanLimits, PlanTier, LLMProvider } from "./types.js";
+
+// ─── Security SSOT re-exports ─────────────────────────────────────
+export {
+  DANGEROUS_PATTERNS,
+  SENSITIVE_FILE_PATTERNS,
+  ALLOWED_EXECUTABLES,
+} from "./security.js";
 
 /**
  * 플랜별 리소스 제한 (SSOT — 설계 문서 11.2 기준)
@@ -61,69 +71,8 @@ export const PROVIDER_BASE_URLS: Record<LLMProvider, string> = {
   google: "https://generativelanguage.googleapis.com/v1beta",
 };
 
-/**
- * 위험 명령어 패턴 — shell_exec 실행 전 Governor가 검증
- */
-export const DANGEROUS_PATTERNS: RegExp[] = [
-  /\brm\s+(-rf?|--recursive)\b/,
-  /\bsudo\b/,
-  /\bcurl\b/,
-  /\bwget\b/,
-  /\bssh\b/,
-  /\bdocker\b/,
-  /\bdd\b/,
-  /\bmkfs\b/,
-  /\bchmod\s+777\b/,
-  /\bchown\b/,
-  /\bgit\s+push\b/,
-  /\bgit\s+reset\s+--hard\b/,
-  /\bgit\s+clean\s+-f/,
-  /\bnpm\s+publish\b/,
-  /\bpip\s+install\b.*--break-system-packages/,
-  /[|&;`$]\s*\(/,       // shell metacharacter injection
-  /\$\(/,               // command substitution
-  />\s*\/dev\//,         // device writes
-];
-
-/**
- * 민감 파일 패턴 — Governor가 접근을 차단하거나 경고
- */
-export const SENSITIVE_FILE_PATTERNS: RegExp[] = [
-  /\.env(\.\w+)?$/,
-  /\.env\.local$/,
-  /credentials\.json$/,
-  /secrets?\.(json|ya?ml|toml)$/,
-  /\.pem$/,
-  /\.key$/,
-  /\.cert$/,
-  /id_rsa/,
-  /id_ed25519/,
-  /\.ssh\/config$/,
-  /\.aws\/credentials$/,
-  /\.npmrc$/,             // npm auth tokens
-  /\.pypirc$/,
-  /kubeconfig/,
-  /token\.json$/,
-  /service[_-]?account.*\.json$/,
-];
-
-/**
- * 허용된 shell 명령어 — Phase 1 서브셋
- */
-export const ALLOWED_EXECUTABLES: string[] = [
-  // Build
-  "npm", "npx", "pnpm", "yarn", "pip", "cargo", "go", "make",
-  // Test
-  "jest", "vitest", "pytest",
-  // Lint
-  "eslint", "prettier", "tsc", "mypy",
-  // Git (safe subset)
-  "git",
-  // System (read-only / search)
-  "ls", "cat", "head", "tail", "wc", "find", "grep", "which", "echo",
-  // Node
-  "node", "tsx", "ts-node",
-];
+// DANGEROUS_PATTERNS, SENSITIVE_FILE_PATTERNS, ALLOWED_EXECUTABLES
+// are now defined in security.ts (SSOT) and re-exported above.
 
 /**
  * 도구 결과 크기 제한 (바이트)

@@ -6,11 +6,11 @@
 
 import { EventEmitter } from "node:events";
 import type { PlanLimits, PlanTier, ToolCall } from "./types.js";
+import { PLAN_LIMITS } from "./constants.js";
 import {
   DANGEROUS_PATTERNS,
   SENSITIVE_FILE_PATTERNS,
-  PLAN_LIMITS,
-} from "./constants.js";
+} from "./security.js";
 import { PlanLimitError, ApprovalRequiredError } from "./errors.js";
 
 /** Governor 설정 */

@@ -17,6 +17,8 @@ import {
   type AgentEvent,
   type AgentConfig,
   type BYOKConfig,
+  type ApprovalRequest,
+  type ApprovalResponse,
 } from "@yuan/core";
 import { createDefaultRegistry } from "@yuan/tools";
 
@@ -254,11 +256,13 @@ export class InteractiveSession {
       },
     };
 
-    // Create and run AgentLoop
+    // Create and run AgentLoop with approval handler
     const loop = new AgentLoop({
       config: agentConfig,
       toolExecutor,
       governorConfig: { planTier: "FREE" },
+      approvalHandler: (request) => this.promptApproval(request),
+      autoFixConfig: { maxRetries: 3, autoLint: true, autoBuild: true, autoTest: false },
     });
 
     // Listen to events for rendering
@@ -293,6 +297,13 @@ export class InteractiveSession {
           spinner.stop();
           console.log();
           this.renderer.agentResponse(event.summary);
+          break;
+
+        case "agent:approval_needed":
+          spinner.stop();
+          this.renderer.warn(
+            `Approval required: ${event.action.description} [${event.action.risk}]`
+          );
           break;
 
         case "agent:token_usage":
@@ -343,6 +354,82 @@ export class InteractiveSession {
       this.renderer.error(`Unexpected error: ${errorMsg}`);
       this.sessionManager.addMessage(this.session, "assistant", `[ERROR] ${errorMsg}`);
     }
+  }
+
+  /**
+   * Prompt the user for approval of a dangerous action.
+   * Shows the action details and waits for Y/N/A input.
+   *
+   * @param request The approval request from ApprovalManager
+   * @returns 'approve', 'reject', or 'always_approve'
+   */
+  private async promptApproval(
+    request: ApprovalRequest,
+  ): Promise<ApprovalResponse> {
+    const riskColor =
+      request.riskLevel === "critical"
+        ? colors.red
+        : request.riskLevel === "high"
+          ? colors.yellow
+          : colors.cyan;
+
+    console.log();
+    console.log(
+      c(colors.bold + riskColor, `  [${request.riskLevel.toUpperCase()}] Approval Required`)
+    );
+    console.log(c(colors.dim, "  " + "-".repeat(50)));
+    console.log(`  ${c(colors.bold, "Tool:")}   ${c(colors.yellow, request.toolName)}`);
+    console.log(`  ${c(colors.bold, "Reason:")} ${request.reason}`);
+
+    if (request.diff) {
+      console.log(c(colors.dim, "  Preview:"));
+      const diffLines = request.diff.split("\n").slice(0, 10);
+      for (const line of diffLines) {
+        const lineColor = line.startsWith("+")
+          ? colors.green
+          : line.startsWith("-")
+            ? colors.red
+            : colors.dim;
+        console.log(`  ${c(colors.dim, "|")} ${c(lineColor, line)}`);
+      }
+      if (request.diff.split("\n").length > 10) {
+        console.log(c(colors.dim, "  | ... (truncated)"));
+      }
+    }
+
+    console.log();
+    console.log(
+      c(colors.dim, "  [Y] Approve  [N] Reject  [A] Always approve this tool")
+    );
+
+    return new Promise<ApprovalResponse>((resolve) => {
+      // Create a temporary readline interface for approval prompt
+      const approvalRl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+
+      approvalRl.question(
+        c(colors.yellow + colors.bold, "  Approve? [Y/n/a] "),
+        (answer) => {
+          approvalRl.close();
+
+          const trimmed = answer.trim().toLowerCase();
+          if (trimmed === "n" || trimmed === "no") {
+            this.renderer.info("Action rejected.");
+            resolve("reject");
+          } else if (trimmed === "a" || trimmed === "always") {
+            this.renderer.success(
+              `Always approving '${request.toolName}' for this session.`
+            );
+            resolve("always_approve");
+          } else {
+            this.renderer.success("Action approved.");
+            resolve("approve");
+          }
+        },
+      );
+    });
   }
 
   /** Stop the interactive session */

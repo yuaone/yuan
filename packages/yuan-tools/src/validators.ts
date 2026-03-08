@@ -3,10 +3,18 @@
  *
  * Security-first validators for path traversal, shell injection,
  * sensitive file detection, binary detection, and output truncation.
+ *
+ * Security rules SSOT: @yuan/core/security.ts
+ * This module delegates to the SSOT and provides tool-specific wrappers.
  */
 
 import { resolve, relative, extname } from 'node:path';
 import { readFile } from 'node:fs/promises';
+import {
+  securityValidateCommand,
+  isSensitiveFile as securityIsSensitiveFile,
+  SHELL_META_PATTERN,
+} from '@yuan/core';
 
 // ─── Path Traversal Defence ─────────────────────────────────────────
 
@@ -36,84 +44,44 @@ export function validatePath(inputPath: string, workDir: string): string {
 
 // ─── Shell Metacharacter Defence ────────────────────────────────────
 
-const SHELL_META = /[;|`$()&><]/;
-
 /**
  * Validate that neither executable nor args contain shell metacharacters.
  * Prevents shell injection when using execFile.
+ * Delegates to SHELL_META_PATTERN from @yuan/core/security (SSOT).
  */
 export function validateNoShellMeta(executable: string, args: string[]): void {
-  if (SHELL_META.test(executable)) {
+  if (SHELL_META_PATTERN.test(executable)) {
     throw new Error(`Shell metacharacter in executable: ${executable}`);
   }
   for (const arg of args) {
-    if (SHELL_META.test(arg)) {
+    if (SHELL_META_PATTERN.test(arg)) {
       throw new Error(`Shell metacharacter in arg: ${arg}`);
     }
   }
 }
 
-// ─── Blocked Commands ───────────────────────────────────────────────
-
-const BLOCKED_EXECUTABLES = new Set([
-  'sudo', 'su', 'doas',
-  'vim', 'vi', 'nano', 'emacs', 'less', 'more', 'man',
-  'ssh', 'scp', 'sftp', 'ftp', 'telnet',
-  'curl', 'wget',           // network access blocked by default
-  'dd', 'mkfs', 'fdisk', 'parted',
-  'shutdown', 'reboot', 'poweroff', 'halt',
-  'mount', 'umount',
-]);
-
-const BLOCKED_PATTERNS: Array<{ executable: string; argsPattern: RegExp; reason: string }> = [
-  { executable: 'rm', argsPattern: /-[^\s]*r[^\s]*f|--no-preserve-root/, reason: 'Destructive rm blocked' },
-  { executable: 'chmod', argsPattern: /777/, reason: 'chmod 777 blocked' },
-  { executable: 'chown', argsPattern: /.*/, reason: 'chown blocked' },
-];
+// ─── Blocked Commands (delegates to @yuan/core/security SSOT) ───────
 
 /**
  * Check whether an executable + args combination is blocked.
  * Throws with explanation if blocked.
+ * Delegates to @yuan/core/security.validateCommand (SSOT).
  */
 export function validateCommand(executable: string, args: string[]): void {
-  const base = executable.split('/').pop() ?? executable;
-
-  if (BLOCKED_EXECUTABLES.has(base)) {
-    throw new Error(`Blocked command: "${base}" is not allowed`);
-  }
-
-  const argsStr = args.join(' ');
-  for (const pattern of BLOCKED_PATTERNS) {
-    if (base === pattern.executable && pattern.argsPattern.test(argsStr)) {
-      throw new Error(`Blocked command: ${pattern.reason}`);
-    }
+  const result = securityValidateCommand(executable, args);
+  if (!result.allowed) {
+    throw new Error(result.reason ?? 'Command blocked by security policy');
   }
 }
 
-// ─── Sensitive File Detection ───────────────────────────────────────
-
-const SENSITIVE_PATTERNS = [
-  /\.env($|\.)/,
-  /credentials/i,
-  /secret/i,
-  /\.pem$/,
-  /\.key$/,
-  /\.p12$/,
-  /\.pfx$/,
-  /id_rsa/,
-  /id_ed25519/,
-  /\.kube\/config/,
-  /\.aws\/credentials/,
-  /\.npmrc$/,
-  /\.pypirc$/,
-  /token/i,
-];
+// ─── Sensitive File Detection (delegates to @yuan/core/security SSOT) ───
 
 /**
  * Check whether a file path matches known sensitive file patterns.
+ * Delegates to @yuan/core/security.isSensitiveFile (SSOT).
  */
 export function isSensitiveFile(filePath: string): boolean {
-  return SENSITIVE_PATTERNS.some((p) => p.test(filePath));
+  return securityIsSensitiveFile(filePath);
 }
 
 // ─── Binary File Detection ──────────────────────────────────────────

@@ -28,6 +28,17 @@ import {
   PlanLimitError,
   ApprovalRequiredError,
 } from "./errors.js";
+import {
+  ApprovalManager,
+  type ApprovalHandler,
+  type ApprovalRequest,
+  type AutoApprovalConfig,
+} from "./approval.js";
+import {
+  AutoFixLoop,
+  type AutoFixConfig,
+  type ValidationResult,
+} from "./auto-fix.js";
 
 /** AgentLoop 설정 */
 export interface AgentLoopOptions {
@@ -39,6 +50,12 @@ export interface AgentLoopOptions {
   governorConfig: GovernorConfig;
   /** ContextManager 설정 */
   contextConfig?: Partial<ContextManagerConfig>;
+  /** 승인 시스템 설정 */
+  approvalConfig?: Partial<AutoApprovalConfig>;
+  /** 승인 핸들러 (CLI/UI에서 등록) */
+  approvalHandler?: ApprovalHandler;
+  /** 자동 수정 루프 설정 */
+  autoFixConfig?: Partial<AutoFixConfig>;
 }
 
 /**
@@ -74,6 +91,8 @@ export class AgentLoop extends EventEmitter {
   private readonly contextManager: ContextManager;
   private readonly toolExecutor: ToolExecutor;
   private readonly config: AgentConfig;
+  private readonly approvalManager: ApprovalManager;
+  private readonly autoFixLoop: AutoFixLoop;
   private aborted = false;
   private tokenUsage: TokenUsage = {
     input: 0,
@@ -103,6 +122,15 @@ export class AgentLoop extends EventEmitter {
         options.contextConfig?.outputReserveTokens ?? 4096,
       ...options.contextConfig,
     });
+
+    // ApprovalManager 생성
+    this.approvalManager = new ApprovalManager(options.approvalConfig);
+    if (options.approvalHandler) {
+      this.approvalManager.setHandler(options.approvalHandler);
+    }
+
+    // AutoFixLoop 생성
+    this.autoFixLoop = new AutoFixLoop(options.autoFixConfig);
 
     // 시스템 프롬프트 추가
     this.contextManager.addMessage({
@@ -153,6 +181,22 @@ export class AgentLoop extends EventEmitter {
    */
   getHistory(): Message[] {
     return this.contextManager.getMessages();
+  }
+
+  /**
+   * ApprovalManager 인스턴스를 반환.
+   * CLI/UI에서 핸들러를 등록하거나 설정을 변경할 때 사용.
+   */
+  getApprovalManager(): ApprovalManager {
+    return this.approvalManager;
+  }
+
+  /**
+   * AutoFixLoop 인스턴스를 반환.
+   * 수정 시도 기록 등을 조회할 때 사용.
+   */
+  getAutoFixLoop(): AutoFixLoop {
+    return this.autoFixLoop;
   }
 
   // ─── Core Loop ───
@@ -291,6 +335,11 @@ export class AgentLoop extends EventEmitter {
 
   /**
    * 도구 호출 목록을 실행.
+   * 각 도구 호출에 대해:
+   * 1. Governor 안전성 검증
+   * 2. ApprovalManager 승인 체크 → 필요 시 대기
+   * 3. 도구 실행
+   * 4. AutoFixLoop 결과 검증 → 실패 시 에러 피드백 메시지 추가
    */
   private async executeTools(
     toolCalls: ToolCall[],
@@ -303,36 +352,38 @@ export class AgentLoop extends EventEmitter {
         this.governor.validateToolCall(toolCall);
       } catch (err) {
         if (err instanceof ApprovalRequiredError) {
-          this.emitEvent({
-            kind: "agent:approval_needed",
-            action: {
-              id: toolCall.id,
-              type: err.actionType as import("./types.js").ApprovalAction,
-              description: err.description,
-              details: toolCall.arguments,
-              risk: "high",
-              timeout: 120_000,
-            },
-          });
+          // Governor가 위험 감지 → ApprovalManager로 승인 프로세스 위임
+          const args = this.parseToolArgs(toolCall.arguments);
+          const approvalResult = await this.handleApproval(toolCall, args, err);
+          if (approvalResult) {
+            results.push(approvalResult);
+            continue;
+          }
+          // 승인됨 → 계속 실행
+        } else {
+          throw err;
+        }
+      }
 
-          // 승인 없이 결과를 에러로 반환
-          results.push({
-            tool_call_id: toolCall.id,
-            name: toolCall.name,
-            output: `[BLOCKED] ${err.message}`,
-            success: false,
-            durationMs: 0,
-          });
+      // ApprovalManager: 추가 승인 체크 (Governor가 못 잡은 규칙)
+      const args = this.parseToolArgs(toolCall.arguments);
+      const approvalRequest = this.approvalManager.checkApproval(
+        toolCall.name,
+        args,
+      );
+      if (approvalRequest) {
+        const approvalResult = await this.handleApprovalRequest(
+          toolCall,
+          approvalRequest,
+        );
+        if (approvalResult) {
+          results.push(approvalResult);
           continue;
         }
-        throw err;
+        // 승인됨 → 계속 실행
       }
 
       // 이벤트: 도구 호출
-      const args =
-        typeof toolCall.arguments === "string"
-          ? JSON.parse(toolCall.arguments)
-          : toolCall.arguments;
       this.emitEvent({
         kind: "agent:tool_call",
         tool: toolCall.name,
@@ -370,6 +421,9 @@ export class AgentLoop extends EventEmitter {
             diff: result.output,
           });
         }
+
+        // AutoFixLoop: 결과 검증
+        await this.validateAndFeedback(toolCall.name, result);
       } catch (err) {
         const durationMs = Date.now() - startTime;
         const errorMessage =
@@ -392,6 +446,139 @@ export class AgentLoop extends EventEmitter {
     }
 
     return results;
+  }
+
+  /**
+   * Governor의 ApprovalRequiredError를 ApprovalManager로 처리.
+   * 승인되면 null 반환 (실행 계속), 거부되면 ToolResult 반환 (실행 차단).
+   */
+  private async handleApproval(
+    toolCall: ToolCall,
+    args: Record<string, unknown>,
+    err: ApprovalRequiredError,
+  ): Promise<ToolResult | null> {
+    const request: ApprovalRequest = {
+      id: crypto.randomUUID(),
+      toolName: toolCall.name,
+      arguments: args,
+      riskLevel: "high",
+      reason: err.description,
+      timeout: 120_000,
+    };
+
+    return this.handleApprovalRequest(toolCall, request);
+  }
+
+  /**
+   * ApprovalRequest를 처리하고 승인/거부 결과를 반환.
+   * 승인되면 null (실행 계속), 거부되면 ToolResult (차단).
+   */
+  private async handleApprovalRequest(
+    toolCall: ToolCall,
+    request: ApprovalRequest,
+  ): Promise<ToolResult | null> {
+    const pendingAction = this.approvalManager.buildPendingAction(
+      toolCall,
+      request,
+    );
+
+    this.emitEvent({
+      kind: "agent:approval_needed",
+      action: pendingAction,
+    });
+
+    const response = await this.approvalManager.requestApproval(request);
+
+    if (response === "reject") {
+      return {
+        tool_call_id: toolCall.id,
+        name: toolCall.name,
+        output: `[REJECTED] User denied approval: ${request.reason}`,
+        success: false,
+        durationMs: 0,
+      };
+    }
+
+    // approve 또는 always_approve → 실행 허가
+    return null;
+  }
+
+  /**
+   * 도구 실행 결과를 AutoFixLoop으로 검증하고,
+   * 실패 시 수정 프롬프트를 대화 히스토리에 추가.
+   */
+  private async validateAndFeedback(
+    toolName: string,
+    result: ToolResult,
+  ): Promise<void> {
+    // file_write/file_edit만 검증 (다른 도구는 스킵)
+    if (!["file_write", "file_edit"].includes(toolName)) {
+      return;
+    }
+
+    const validation = await this.autoFixLoop.validateResult(
+      toolName,
+      result.output,
+      result.success,
+      this.config.loop.projectPath,
+    );
+
+    if (validation.passed) {
+      // 검증 통과 → 수정 시도 기록 초기화
+      this.autoFixLoop.resetAttempts();
+      return;
+    }
+
+    // 검증 실패 → 에러 피드백
+    if (!this.autoFixLoop.canRetry()) {
+      // 재시도 한도 초과 → 에러 이벤트만 emit
+      this.emitEvent({
+        kind: "agent:error",
+        message: `Auto-fix exhausted (${this.autoFixLoop.getAttempts().length} attempts): ${validation.failures[0]?.message ?? "Unknown error"}`,
+        retryable: false,
+      });
+      return;
+    }
+
+    // 수정 프롬프트 생성 → 대화 히스토리에 user 메시지로 추가
+    const errorMsg = validation.failures
+      .map((f) => `[${f.type}] ${f.message}\n${f.rawOutput}`)
+      .join("\n\n");
+
+    const fixPrompt = this.autoFixLoop.buildFixPrompt(
+      errorMsg,
+      `After ${toolName} execution on project at ${this.config.loop.projectPath}`,
+    );
+
+    // 수정 시도 기록
+    this.autoFixLoop.recordAttempt(
+      errorMsg,
+      "Requesting LLM fix",
+      false,
+      0,
+    );
+
+    // 피드백을 히스토리에 추가 (다음 LLM 호출에서 수정 시도)
+    this.contextManager.addMessage({
+      role: "user",
+      content: fixPrompt,
+    });
+  }
+
+  /**
+   * 도구 인자를 파싱하는 헬퍼.
+   */
+  private parseToolArgs(
+    args: string | Record<string, unknown>,
+  ): Record<string, unknown> {
+    if (typeof args === "string") {
+      try {
+        return JSON.parse(args) as Record<string, unknown>;
+      } catch {
+        return { raw: args };
+      }
+    }
+    return args;
   }
 
   // ─── Helpers ───

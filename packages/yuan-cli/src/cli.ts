@@ -104,21 +104,65 @@ program
   .command("resume")
   .description("Resume the last agent session")
   .option("--id <sessionId>", "Resume a specific session by ID")
-  .action(async (options: { id?: string }) => {
+  .option("--list", "List recent sessions")
+  .action(async (options: { id?: string; list?: boolean }) => {
     const configManager = new ConfigManager();
     const sessionManager = new SessionManager();
 
+    // List mode
+    if (options.list) {
+      const sessions = sessionManager.listRecent(10);
+      if (sessions.length === 0) {
+        renderer.info("No saved sessions found.");
+        process.exit(0);
+      }
+
+      console.log();
+      renderer.info("Recent Sessions:");
+      console.log("  " + "-".repeat(72));
+      for (const s of sessions) {
+        const statusIcon = {
+          running: "\u25B6",
+          paused: "\u23F8",
+          completed: "\u2713",
+          crashed: "\u2717",
+        }[s.status] ?? "?";
+        const date = new Date(s.updatedAt).toLocaleString();
+        const dir = s.workDir.length > 30
+          ? "..." + s.workDir.slice(-27)
+          : s.workDir;
+        console.log(
+          `  ${statusIcon} ${s.id.slice(0, 8)}  ${s.status.padEnd(10)} ${date}  ${dir}  (${s.messages.length} msgs, iter ${s.iteration})`
+        );
+      }
+      console.log();
+      renderer.info("Use `yuan resume --id <sessionId>` to resume a specific session.");
+      process.exit(0);
+    }
+
+    // Resume mode
     const session = options.id
       ? sessionManager.load(options.id)
       : sessionManager.loadLast();
 
     if (!session) {
       renderer.error("No session to resume. Start a new session with `yuan`.");
+      renderer.info("Use `yuan resume --list` to see available sessions.");
       process.exit(1);
     }
 
-    renderer.info(`Resuming session ${session.id.slice(0, 8)}...`);
-    renderer.info(`Messages in history: ${session.messages.length}`);
+    const statusLabel = session.status === "crashed"
+      ? " (recovering from crash)"
+      : session.status === "paused"
+        ? " (paused)"
+        : "";
+
+    renderer.info(`Resuming session ${session.id.slice(0, 8)}...${statusLabel}`);
+    renderer.info(`Status: ${session.status} | Messages: ${session.messages.length} | Iterations: ${session.iteration}`);
+    renderer.info(`Tokens used: ${session.tokenUsage.input + session.tokenUsage.output} (in: ${session.tokenUsage.input}, out: ${session.tokenUsage.output})`);
+
+    // Mark session as running
+    await sessionManager.updateStatus(session, "running");
 
     const interactive = new InteractiveSession(
       renderer,

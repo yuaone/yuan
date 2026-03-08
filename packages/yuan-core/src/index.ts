@@ -93,3 +93,52 @@ export type { PlannerConfig, FileDependency } from "./planner.js";
 // ─── System Prompt ───
 export { buildSystemPrompt } from "./system-prompt.js";
 export type { SystemPromptOptions } from "./system-prompt.js";
+
+// ─── Security (SSOT) ───
+export {
+  DANGEROUS_PATTERNS as SECURITY_DANGEROUS_PATTERNS,
+  SENSITIVE_FILE_PATTERNS as SECURITY_SENSITIVE_FILES,
+  ALLOWED_EXECUTABLES as SECURITY_ALLOWED_EXECUTABLES,
+  INTERACTIVE_COMMANDS,
+  PATH_TRAVERSAL_PATTERNS,
+  SHELL_META_PATTERN,
+  validateCommand,
+  validateCommand as securityValidateCommand,
+  validateFilePath,
+  validateFilePath as securityValidateFilePath,
+  isSensitiveFile,
+  isDangerousCommand,
+  isInteractiveCommand,
+  isBlockedExecutable,
+} from "./security.js";
+export type { SecurityValidation } from "./security.js";
+
+// ─── Session Persistence ───
+export { SessionPersistence } from "./session-persistence.js";
+export type {
+  SessionStatus,
+  SessionSnapshot,
+  SessionData as PersistentSessionData,
+  CheckpointData,
+} from "./session-persistence.js";
+
+// ─── Approval ───
+export { ApprovalManager } from "./approval.js";
+export type {
+  ApprovalRequest,
+  ApprovalResponse,
+  ApprovalHandler,
+  AutoApprovalConfig,
+} from "./approval.js";
+
+// ─── Auto-Fix ───
+export { AutoFixLoop, DEFAULT_AUTO_FIX_CONFIG } from "./auto-fix.js";
+export type {
+  AutoFixConfig,
+  ValidationResult,
+  ValidationFailure,
+  AutoFixTrigger,
+  FixAttempt,
+  LintResult,
+  BuildResult,
+} from "./auto-fix.js";

@@ -1,0 +1,412 @@
+/**
+ * @module session-persistence
+ * @description 세션 영속성 — 설계 문서 섹션 7.5 구현.
+ *
+ * 에이전트 세션 상태를 디스크에 주기적으로 저장하고,
+ * `yuan resume`으로 마지막 세션을 이어갈 수 있도록 지원.
+ *
+ * 저장 위치: ~/.yuan/sessions/<sessionId>/
+ * 저장 항목:
+ * - state.json: 세션 메타데이터 (id, 시작시간, workDir, provider, model)
+ * - messages.json: 대화 히스토리
+ * - plan.json: 현재 실행 계획
+ * - checkpoint.json: 마지막 체크포인트 (iteration, token usage)
+ *
+ * 체크포인트 주기: 매 iteration 완료 시
+ */
+
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
+import type { Message, ExecutionPlan, TokenUsage } from "./types.js";
+
+// ─── Constants ────────────────────────────────────────────────────
+
+const DEFAULT_BASE_DIR = path.join(os.homedir(), ".yuan", "sessions");
+const LAST_SESSION_FILE = path.join(os.homedir(), ".yuan", "last-session");
+const DEFAULT_MAX_AGE_DAYS = 30;
+
+// ─── Types ────────────────────────────────────────────────────────
+
+/** 세션 상태 (디스크 저장 기준) */
+export type SessionStatus = "running" | "paused" | "completed" | "crashed";
+
+/** 세션 스냅샷 — 경량 메타데이터 (목록 표시용) */
+export interface SessionSnapshot {
+  /** 세션 고유 ID */
+  id: string;
+  /** 생성 시각 (ISO 8601) */
+  createdAt: string;
+  /** 마지막 업데이트 시각 (ISO 8601) */
+  updatedAt: string;
+  /** 작업 디렉토리 */
+  workDir: string;
+  /** LLM 프로바이더 */
+  provider: string;
+  /** 사용 모델 */
+  model: string;
+  /** 세션 상태 */
+  status: SessionStatus;
+  /** 현재 iteration 수 */
+  iteration: number;
+  /** 토큰 사용량 */
+  tokenUsage: { input: number; output: number };
+  /** 대화 메시지 수 */
+  messageCount: number;
+  /** 작업 요약 (자동 생성) */
+  summary?: string;
+}
+
+/** 세션 전체 데이터 — 복구에 필요한 모든 정보 */
+export interface SessionData {
+  /** 세션 메타데이터 */
+  snapshot: SessionSnapshot;
+  /** 대화 히스토리 */
+  messages: Message[];
+  /** 현재 실행 계획 (있으면) */
+  plan: ExecutionPlan | null;
+  /** 변경된 파일 목록 */
+  changedFiles: string[];
+}
+
+/** 체크포인트 데이터 — 매 iteration 완료 시 저장 */
+export interface CheckpointData {
+  /** 현재 iteration 인덱스 */
+  iteration: number;
+  /** 누적 토큰 사용량 */
+  tokenUsage: { input: number; output: number };
+  /** 체크포인트 시각 (ISO 8601) */
+  timestamp: string;
+  /** 변경된 파일 목록 */
+  changedFiles: string[];
+  /** 마지막 도구 호출 요약 */
+  lastToolCall?: string;
+}
+
+// ─── SessionPersistence Class ─────────────────────────────────────
+
+/**
+ * SessionPersistence — 세션 저장/복구 엔진.
+ *
+ * 파일 구조:
+ * ```
+ * ~/.yuan/sessions/
+ * ├── <sessionId>/
+ * │   ├── state.json       ← SessionSnapshot
+ * │   ├── messages.json    ← Message[]
+ * │   ├── plan.json        ← ExecutionPlan | null
+ * │   └── checkpoint.json  ← CheckpointData
+ * └── last-session         ← 마지막 세션 ID
+ * ```
+ */
+export class SessionPersistence {
+  private readonly baseDir: string;
+
+  /**
+   * @param baseDir 세션 저장 기본 디렉토리 (기본: ~/.yuan/sessions/)
+   */
+  constructor(baseDir?: string) {
+    this.baseDir = baseDir ?? DEFAULT_BASE_DIR;
+    this.ensureDir(this.baseDir);
+  }
+
+  // ─── Save ───
+
+  /**
+   * 세션 전체 데이터를 디스크에 저장.
+   * state.json, messages.json, plan.json을 각각 저장하고
+   * last-session 파일을 업데이트한다.
+   *
+   * @param sessionId 세션 ID
+   * @param data 저장할 세션 데이터
+   */
+  async save(sessionId: string, data: SessionData): Promise<void> {
+    const sessionDir = this.sessionDir(sessionId);
+    this.ensureDir(sessionDir);
+
+    // 업데이트 시각 갱신
+    data.snapshot.updatedAt = new Date().toISOString();
+
+    // 병렬 저장
+    await Promise.all([
+      this.writeJson(path.join(sessionDir, "state.json"), data.snapshot),
+      this.writeJson(path.join(sessionDir, "messages.json"), data.messages),
+      this.writeJson(path.join(sessionDir, "plan.json"), data.plan),
+    ]);
+
+    // 마지막 세션 ID 기록
+    await this.setLastSessionId(sessionId);
+  }
+
+  // ─── Restore ───
+
+  /**
+   * 세션을 디스크에서 복구.
+   * state.json, messages.json, plan.json을 읽어 SessionData를 구성.
+   *
+   * @param sessionId 복구할 세션 ID
+   * @returns 세션 데이터 (없거나 손상되면 null)
+   */
+  async restore(sessionId: string): Promise<SessionData | null> {
+    const sessionDir = this.sessionDir(sessionId);
+
+    if (!fs.existsSync(sessionDir)) {
+      return null;
+    }
+
+    try {
+      const [snapshot, messages, plan] = await Promise.all([
+        this.readJson<SessionSnapshot>(path.join(sessionDir, "state.json")),
+        this.readJson<Message[]>(path.join(sessionDir, "messages.json")),
+        this.readJson<ExecutionPlan | null>(path.join(sessionDir, "plan.json")),
+      ]);
+
+      if (!snapshot) return null;
+
+      // 체크포인트에서 changedFiles 복구
+      const checkpoint = await this.readJson<CheckpointData>(
+        path.join(sessionDir, "checkpoint.json"),
+      );
+
+      return {
+        snapshot,
+        messages: messages ?? [],
+        plan: plan ?? null,
+        changedFiles: checkpoint?.changedFiles ?? [],
+      };
+    } catch {
+      // 손상된 세션 파일
+      return null;
+    }
+  }
+
+  // ─── Last Session ───
+
+  /**
+   * 마지막 세션 ID를 반환.
+   *
+   * @returns 마지막 세션 ID (없으면 null)
+   */
+  async getLastSessionId(): Promise<string | null> {
+    try {
+      if (fs.existsSync(LAST_SESSION_FILE)) {
+        const content = await fs.promises.readFile(
+          LAST_SESSION_FILE,
+          "utf-8",
+        );
+        return content.trim() || null;
+      }
+    } catch {
+      // Ignore
+    }
+    return null;
+  }
+
+  // ─── List Sessions ───
+
+  /**
+   * 저장된 세션 목록을 반환 (최근 순).
+   *
+   * @param limit 최대 반환 수 (기본 20)
+   * @returns 세션 스냅샷 배열
+   */
+  async listSessions(limit = 20): Promise<SessionSnapshot[]> {
+    const snapshots: SessionSnapshot[] = [];
+
+    try {
+      const entries = await fs.promises.readdir(this.baseDir, {
+        withFileTypes: true,
+      });
+
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+
+        const stateFile = path.join(
+          this.baseDir,
+          entry.name,
+          "state.json",
+        );
+        const snapshot = await this.readJson<SessionSnapshot>(stateFile);
+        if (snapshot) {
+          snapshots.push(snapshot);
+        }
+      }
+    } catch {
+      // Sessions dir doesn't exist yet
+    }
+
+    // 최근 순 정렬
+    snapshots.sort(
+      (a, b) =>
+        new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+    );
+
+    return snapshots.slice(0, limit);
+  }
+
+  // ─── Checkpoint ───
+
+  /**
+   * 체크포인트를 저장 (매 iteration 완료 시 호출).
+   * 경량 저장 — checkpoint.json과 state.json만 업데이트.
+   *
+   * @param sessionId 세션 ID
+   * @param checkpoint 체크포인트 데이터
+   */
+  async checkpoint(
+    sessionId: string,
+    checkpoint: CheckpointData,
+  ): Promise<void> {
+    const sessionDir = this.sessionDir(sessionId);
+    this.ensureDir(sessionDir);
+
+    // 체크포인트 저장
+    await this.writeJson(
+      path.join(sessionDir, "checkpoint.json"),
+      checkpoint,
+    );
+
+    // state.json의 iteration과 tokenUsage도 업데이트
+    const stateFile = path.join(sessionDir, "state.json");
+    const snapshot = await this.readJson<SessionSnapshot>(stateFile);
+    if (snapshot) {
+      snapshot.iteration = checkpoint.iteration;
+      snapshot.tokenUsage = checkpoint.tokenUsage;
+      snapshot.updatedAt = checkpoint.timestamp;
+      await this.writeJson(stateFile, snapshot);
+    }
+  }
+
+  // ─── Cleanup ───
+
+  /**
+   * 오래된 세션을 정리.
+   *
+   * @param maxAgeDays 최대 보존 기간 (일, 기본 30)
+   * @returns 삭제된 세션 수
+   */
+  async cleanup(maxAgeDays = DEFAULT_MAX_AGE_DAYS): Promise<number> {
+    let deleted = 0;
+    const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
+
+    try {
+      const entries = await fs.promises.readdir(this.baseDir, {
+        withFileTypes: true,
+      });
+
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+
+        const stateFile = path.join(
+          this.baseDir,
+          entry.name,
+          "state.json",
+        );
+        const snapshot = await this.readJson<SessionSnapshot>(stateFile);
+
+        if (!snapshot) {
+          // 손상된 세션 디렉토리 — 삭제
+          await fs.promises.rm(
+            path.join(this.baseDir, entry.name),
+            { recursive: true, force: true },
+          );
+          deleted++;
+          continue;
+        }
+
+        const updatedAt = new Date(snapshot.updatedAt).getTime();
+        if (updatedAt < cutoff) {
+          await fs.promises.rm(
+            path.join(this.baseDir, entry.name),
+            { recursive: true, force: true },
+          );
+          deleted++;
+        }
+      }
+    } catch {
+      // Ignore
+    }
+
+    return deleted;
+  }
+
+  // ─── Status Management ───
+
+  /**
+   * 세션 상태를 업데이트.
+   *
+   * @param sessionId 세션 ID
+   * @param status 새 상태
+   */
+  async updateStatus(
+    sessionId: string,
+    status: SessionStatus,
+  ): Promise<void> {
+    const stateFile = path.join(this.sessionDir(sessionId), "state.json");
+    const snapshot = await this.readJson<SessionSnapshot>(stateFile);
+    if (snapshot) {
+      snapshot.status = status;
+      snapshot.updatedAt = new Date().toISOString();
+      await this.writeJson(stateFile, snapshot);
+    }
+  }
+
+  /**
+   * 크래시된 세션을 감지.
+   * status가 'running'이면서 마지막 업데이트가 5분 이상 전인 세션.
+   *
+   * @returns 크래시로 판단되는 세션 목록
+   */
+  async detectCrashedSessions(): Promise<SessionSnapshot[]> {
+    const crashed: SessionSnapshot[] = [];
+    const threshold = Date.now() - 5 * 60 * 1000; // 5분
+
+    const sessions = await this.listSessions(100);
+    for (const session of sessions) {
+      if (
+        session.status === "running" &&
+        new Date(session.updatedAt).getTime() < threshold
+      ) {
+        crashed.push(session);
+      }
+    }
+
+    return crashed;
+  }
+
+  // ─── Helpers ───
+
+  private sessionDir(sessionId: string): string {
+    return path.join(this.baseDir, sessionId);
+  }
+
+  private ensureDir(dir: string): void {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+  }
+
+  private async setLastSessionId(sessionId: string): Promise<void> {
+    const dir = path.dirname(LAST_SESSION_FILE);
+    this.ensureDir(dir);
+    await fs.promises.writeFile(LAST_SESSION_FILE, sessionId, "utf-8");
+  }
+
+  private async writeJson(filePath: string, data: unknown): Promise<void> {
+    await fs.promises.writeFile(
+      filePath,
+      JSON.stringify(data, null, 2),
+      "utf-8",
+    );
+  }
+
+  private async readJson<T>(filePath: string): Promise<T | null> {
+    try {
+      if (!fs.existsSync(filePath)) return null;
+      const raw = await fs.promises.readFile(filePath, "utf-8");
+      return JSON.parse(raw) as T;
+    } catch {
+      return null;
+    }
+  }
+}
