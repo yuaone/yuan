@@ -150,36 +150,41 @@ export class BYOKClient {
       let outputTokens = 0;
 
       for await (const chunk of stream as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>) {
-        const delta = chunk.choices[0]?.delta;
+        try {
+          const delta = chunk.choices[0]?.delta;
 
-        // Text delta
-        if (delta?.content) {
-          yield { type: "text", text: delta.content };
-        }
-
-        // Tool call deltas
-        if (delta?.tool_calls) {
-          for (const tc of delta.tool_calls) {
-            const idx = tc.index;
-            if (!toolCallAccumulators.has(idx)) {
-              toolCallAccumulators.set(idx, {
-                id: tc.id ?? "",
-                name: tc.function?.name ?? "",
-                arguments: "",
-              });
-            }
-            const acc = toolCallAccumulators.get(idx)!;
-            if (tc.id) acc.id = tc.id;
-            if (tc.function?.name) acc.name = tc.function.name;
-            if (tc.function?.arguments)
-              acc.arguments += tc.function.arguments;
+          // Text delta
+          if (delta?.content) {
+            yield { type: "text", text: delta.content };
           }
-        }
 
-        // Usage (final chunk)
-        if (chunk.usage) {
-          inputTokens = chunk.usage.prompt_tokens ?? 0;
-          outputTokens = chunk.usage.completion_tokens ?? 0;
+          // Tool call deltas
+          if (delta?.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              const idx = tc.index;
+              if (!toolCallAccumulators.has(idx)) {
+                toolCallAccumulators.set(idx, {
+                  id: tc.id ?? "",
+                  name: tc.function?.name ?? "",
+                  arguments: "",
+                });
+              }
+              const acc = toolCallAccumulators.get(idx)!;
+              if (tc.id) acc.id = tc.id;
+              if (tc.function?.name) acc.name = tc.function.name;
+              if (tc.function?.arguments)
+                acc.arguments += tc.function.arguments;
+            }
+          }
+
+          // Usage (final chunk)
+          if (chunk.usage) {
+            inputTokens = chunk.usage.prompt_tokens ?? 0;
+            outputTokens = chunk.usage.completion_tokens ?? 0;
+          }
+        } catch (chunkErr) {
+          // Skip malformed chunks to preserve accumulated tool calls
+          console.warn("[BYOKClient] Skipping bad stream chunk:", chunkErr);
         }
       }
 
@@ -454,14 +459,22 @@ export class BYOKClient {
         content.push({ type: "text", text: msg.content });
       }
       for (const tc of msg.tool_calls) {
+        let input: unknown;
+        if (typeof tc.arguments === "string") {
+          try {
+            input = JSON.parse(tc.arguments);
+          } catch {
+            // If arguments is malformed JSON, pass raw string as-is
+            input = tc.arguments;
+          }
+        } else {
+          input = tc.arguments;
+        }
         content.push({
           type: "tool_use",
           id: tc.id,
           name: tc.name,
-          input:
-            typeof tc.arguments === "string"
-              ? JSON.parse(tc.arguments)
-              : tc.arguments,
+          input,
         });
       }
       return { role: "assistant", content };
