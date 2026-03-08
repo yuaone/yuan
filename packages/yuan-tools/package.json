@@ -13,9 +13,11 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@yuan/core": "workspace:*"
+    "@yuan/core": "workspace:*",
+    "fast-glob": "^3.3.3"
   },
   "devDependencies": {
+    "@types/node": "^25.3.5",
     "typescript": "^5.7.0"
   }
 }
