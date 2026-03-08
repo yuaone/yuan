@@ -1,8 +1,8 @@
 /**
  * @yuan/tools — git_ops tool
  *
- * Git operations: status, diff, log, add, commit.
- * - commit requires approval (riskLevel dynamically elevated)
+ * Git operations: status, diff, log, add, commit, create_branch, stash, restore.
+ * - commit/create_branch require approval (riskLevel dynamically elevated)
  * - Uses execFile (no shell interpretation)
  */
 
@@ -15,8 +15,8 @@ const GIT_TIMEOUT = 15_000; // 15s
 export class GitOpsTool extends BaseTool {
   readonly name = 'git_ops';
   readonly description =
-    'Perform git operations: status, diff, log, add, commit. ' +
-    'commit operation requires user approval.';
+    'Perform git operations: status, diff, log, add, commit, create_branch, stash, restore. ' +
+    'commit and create_branch operations require user approval.';
   readonly riskLevel: RiskLevel = 'medium';
 
   readonly parameters: Record<string, ParameterDef> = {
@@ -24,7 +24,7 @@ export class GitOpsTool extends BaseTool {
       type: 'string',
       description: 'Git operation to perform',
       required: true,
-      enum: ['status', 'diff', 'log', 'add', 'commit'],
+      enum: ['status', 'diff', 'log', 'add', 'commit', 'create_branch', 'stash', 'restore'],
     },
     message: {
       type: 'string',
@@ -43,6 +43,11 @@ export class GitOpsTool extends BaseTool {
       required: false,
       default: 10,
     },
+    branch: {
+      type: 'string',
+      description: 'Branch name (for create_branch operation)',
+      required: false,
+    },
   };
 
   async execute(args: Record<string, unknown>, workDir: string): Promise<ToolResult> {
@@ -53,7 +58,7 @@ export class GitOpsTool extends BaseTool {
       return this.fail(toolCallId, 'Missing required parameter: operation');
     }
 
-    const validOps = ['status', 'diff', 'log', 'add', 'commit'];
+    const validOps = ['status', 'diff', 'log', 'add', 'commit', 'create_branch', 'stash', 'restore'];
     if (!validOps.includes(operation)) {
       return this.fail(toolCallId, `Invalid operation: ${operation}. Must be one of: ${validOps.join(', ')}`);
     }
@@ -70,6 +75,12 @@ export class GitOpsTool extends BaseTool {
           return await this.gitAdd(toolCallId, workDir, args.files as string[] | undefined);
         case 'commit':
           return await this.gitCommit(toolCallId, workDir, args.message as string | undefined, args.files as string[] | undefined);
+        case 'create_branch':
+          return await this.gitCreateBranch(toolCallId, workDir, args.branch as string | undefined);
+        case 'stash':
+          return await this.gitStash(toolCallId, workDir, args.message as string | undefined);
+        case 'restore':
+          return await this.gitRestore(toolCallId, workDir);
         default:
           return this.fail(toolCallId, `Unknown operation: ${operation}`);
       }
@@ -145,6 +156,35 @@ export class GitOpsTool extends BaseTool {
 
     const result = await runGit(['commit', '-m', message], cwd);
     return this.ok(toolCallId, result.stdout || 'Commit created.', { operation: 'commit' });
+  }
+
+  private async gitCreateBranch(toolCallId: string, cwd: string, branch?: string): Promise<ToolResult> {
+    if (!branch) {
+      return this.fail(toolCallId, 'Missing required parameter: branch (for create_branch operation)');
+    }
+
+    // Validate branch name: no spaces, no shell metacharacters
+    if (!/^[a-zA-Z0-9._\-/]+$/.test(branch)) {
+      return this.fail(toolCallId, `Invalid branch name: "${branch}". Use alphanumeric, dots, hyphens, underscores, and slashes only.`);
+    }
+
+    const result = await runGit(['checkout', '-b', branch], cwd);
+    return this.ok(toolCallId, result.stdout || `Branch "${branch}" created and checked out.`, { operation: 'create_branch' });
+  }
+
+  private async gitStash(toolCallId: string, cwd: string, message?: string): Promise<ToolResult> {
+    const gitArgs = ['stash', 'push'];
+    if (message) {
+      gitArgs.push('-m', message);
+    }
+
+    const result = await runGit(gitArgs, cwd);
+    return this.ok(toolCallId, result.stdout || 'Changes stashed.', { operation: 'stash' });
+  }
+
+  private async gitRestore(toolCallId: string, cwd: string): Promise<ToolResult> {
+    const result = await runGit(['stash', 'pop'], cwd);
+    return this.ok(toolCallId, result.stdout || 'Stash applied and dropped.', { operation: 'restore' });
   }
 }
 

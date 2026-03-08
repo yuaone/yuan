@@ -143,6 +143,8 @@ import { ShellExecTool } from './shell-exec.js';
 import { GrepTool } from './grep.js';
 import { GlobTool } from './glob.js';
 import { GitOpsTool } from './git-ops.js';
+import { TestRunTool } from './test-run.js';
+import { CodeSearchTool } from './code-search.js';
 
 /**
  * Create a ToolRegistry pre-loaded with all built-in YUAN tools.
@@ -157,6 +159,8 @@ export function createDefaultRegistry(): ToolRegistry {
     new GrepTool(),
     new GlobTool(),
     new GitOpsTool(),
+    new TestRunTool(),
+    new CodeSearchTool(),
   ]);
   return registry;
 }

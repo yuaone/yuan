@@ -125,16 +125,60 @@ export type GitOperation =
   | 'diff'
   | 'log'
   | 'add'
-  | 'commit';
+  | 'commit'
+  | 'create_branch'
+  | 'stash'
+  | 'restore';
 
 export interface GitOpsInput {
   operation: GitOperation;
   message?: string;
   files?: string[];
   count?: number;
+  branch?: string;
 }
 
 export interface GitOpsOutput {
   result: string;
   success: boolean;
+}
+
+// test_run
+export interface TestRunInput {
+  testPath?: string;
+  framework?: 'jest' | 'vitest' | 'pytest' | 'auto';
+  coverage?: boolean;
+}
+
+export interface TestRunOutput {
+  passed: number;
+  failed: number;
+  skipped: number;
+  coverage?: number;
+  failedTests: Array<{ name: string; error: string }>;
+  stdout: string;
+}
+
+// code_search
+export type CodeSearchMode = 'symbol' | 'reference' | 'definition';
+
+export interface CodeSearchInput {
+  query: string;
+  mode?: CodeSearchMode;
+  path?: string;
+  language?: string;
+  maxResults?: number;
+}
+
+export interface CodeSearchResult {
+  file: string;
+  line: number;
+  column: number;
+  content: string;
+  kind: string;
+}
+
+export interface CodeSearchOutput {
+  results: CodeSearchResult[];
+  totalCount: number;
 }
