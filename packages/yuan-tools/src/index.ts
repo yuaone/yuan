@@ -5,13 +5,18 @@
  * file_read, file_write, file_edit, shell_exec, grep, glob, git_ops
  */
 
-// Types
+// Core types (re-exported from @yuan/core via types.ts)
 export type {
-  ParameterDef,
-  RiskLevel,
   ToolDefinition,
   ToolCall,
   ToolResult,
+  ToolParameterSchema,
+} from '@yuan/core';
+
+// Tool-local types
+export type {
+  ParameterDef,
+  RiskLevel,
   FileReadInput,
   FileReadOutput,
   FileWriteInput,

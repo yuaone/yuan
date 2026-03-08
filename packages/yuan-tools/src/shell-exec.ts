@@ -142,15 +142,11 @@ export class ShellExecTool extends BaseTool {
       output += `\n[exit code: ${result.exitCode}] [duration: ${durationMs}ms]`;
 
       return {
-        toolCallId,
+        tool_call_id: toolCallId,
+        name: this.name,
         success: result.exitCode === 0 && !result.timedOut,
         output: this.truncateOutput(output),
-        error: result.exitCode !== 0 ? `Process exited with code ${result.exitCode}` : undefined,
-        metadata: {
-          exitCode: result.exitCode,
-          timedOut: result.timedOut,
-          durationMs,
-        },
+        durationMs,
       };
     } catch (err) {
       const durationMs = Date.now() - startTime;

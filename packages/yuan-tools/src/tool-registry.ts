@@ -5,9 +5,10 @@
  * - Register/retrieve tools by name
  * - Generate LLM-ready tool definitions
  * - Execute tools by name
+ * - toExecutor() bridges to @yuan/core's ToolExecutor interface
  */
 
-import type { ToolDefinition, ToolResult } from './types.js';
+import type { ToolDefinition, ToolResult, ToolCall, ToolExecutor } from '@yuan/core';
 import type { BaseTool } from './base-tool.js';
 
 export class ToolRegistry {
@@ -43,13 +44,13 @@ export class ToolRegistry {
     return [...this.tools.keys()];
   }
 
-  /** Generate tool definitions for LLM consumption. */
+  /** Generate tool definitions for LLM consumption (core-compatible JSON Schema). */
   toDefinitions(): ToolDefinition[] {
     return [...this.tools.values()].map((t) => t.toDefinition());
   }
 
   /**
-   * Execute a tool by name.
+   * Execute a tool by name (internal use).
    * @param name - Tool name
    * @param args - Tool arguments (must include _toolCallId)
    * @param workDir - Project working directory
@@ -62,14 +63,69 @@ export class ToolRegistry {
     const tool = this.tools.get(name);
     if (!tool) {
       return {
-        toolCallId: (args._toolCallId as string) ?? '',
+        tool_call_id: (args._toolCallId as string) ?? '',
+        name,
         success: false,
-        output: '',
-        error: `Unknown tool: ${name}. Available tools: ${this.listNames().join(', ')}`,
+        output: `Error: Unknown tool: ${name}. Available tools: ${this.listNames().join(', ')}`,
+        durationMs: 0,
       };
     }
 
     return tool.execute(args, workDir);
+  }
+
+  /**
+   * Create a ToolExecutor adapter that implements @yuan/core's ToolExecutor interface.
+   *
+   * The adapter:
+   * - Provides tool definitions in JSON Schema format
+   * - Parses ToolCall.arguments (string → object if needed)
+   * - Injects _toolCallId into args
+   * - Measures execution duration
+   * - Returns core-compatible ToolResult
+   *
+   * @param workDir - Project working directory for tool execution
+   */
+  toExecutor(workDir: string): ToolExecutor {
+    const registry = this;
+    const definitions = this.toDefinitions();
+
+    return {
+      definitions,
+
+      async execute(call: ToolCall): Promise<ToolResult> {
+        // Parse arguments: core ToolCall.arguments can be string or object
+        let args: Record<string, unknown>;
+        if (typeof call.arguments === 'string') {
+          try {
+            args = JSON.parse(call.arguments) as Record<string, unknown>;
+          } catch {
+            return {
+              tool_call_id: call.id,
+              name: call.name,
+              output: `Error: Failed to parse tool arguments as JSON: ${call.arguments}`,
+              success: false,
+              durationMs: 0,
+            };
+          }
+        } else {
+          args = { ...call.arguments };
+        }
+
+        // Inject toolCallId for BaseTool.execute
+        args._toolCallId = call.id;
+
+        const startTime = Date.now();
+        const result = await registry.execute(call.name, args, workDir);
+        const durationMs = Date.now() - startTime;
+
+        // Ensure result has correct durationMs
+        return {
+          ...result,
+          durationMs,
+        };
+      },
+    };
   }
 
   /** Get the number of registered tools. */

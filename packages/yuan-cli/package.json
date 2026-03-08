@@ -10,13 +10,15 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && chmod +x dist/cli.js",
     "dev": "tsc --watch",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "start": "node dist/cli.js"
   },
   "dependencies": {
+    "@yuan/core": "workspace:*",
+    "@yuan/tools": "workspace:*",
     "commander": "^13.1.0"
   },
   "devDependencies": {

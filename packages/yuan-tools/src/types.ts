@@ -1,12 +1,19 @@
 /**
- * @yuan/tools — Tool-specific type definitions
+ * @yuan/tools — Type definitions
  *
- * Self-contained types for the YUAN tool system.
- * Will be replaced with @yuan/core types during integration.
+ * Core types (ToolDefinition, ToolCall, ToolResult, etc.) are re-exported from @yuan/core.
+ * Tool-specific I/O types remain here.
  */
 
-// ─── Parameter Definition ────────────────────────────────────────────
+// ─── Re-export core types ───────────────────────────────────────────
+export type {
+  ToolDefinition,
+  ToolCall,
+  ToolResult,
+  ToolParameterSchema,
+} from '@yuan/core';
 
+// ─── Parameter Definition (tools-local, used by BaseTool subclasses) ─
 export interface ParameterDef {
   type: 'string' | 'number' | 'boolean' | 'array' | 'object';
   description: string;
@@ -16,33 +23,7 @@ export interface ParameterDef {
   items?: ParameterDef;
 }
 
-// ─── Tool Definition ─────────────────────────────────────────────────
-
 export type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
-
-export interface ToolDefinition {
-  name: string;
-  description: string;
-  parameters: Record<string, ParameterDef>;
-  requiresApproval: boolean;
-  riskLevel: RiskLevel;
-}
-
-// ─── Tool Call / Result ──────────────────────────────────────────────
-
-export interface ToolCall {
-  id: string;
-  name: string;
-  arguments: Record<string, unknown>;
-}
-
-export interface ToolResult {
-  toolCallId: string;
-  success: boolean;
-  output: string;
-  error?: string;
-  metadata?: Record<string, unknown>;
-}
 
 // ─── Tool-specific I/O types ─────────────────────────────────────────
 

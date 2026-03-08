@@ -47,18 +47,22 @@ export interface LLMStreamChunk {
 export class BYOKClient {
   private readonly config: BYOKConfig;
   private readonly model: string;
-  private readonly openaiClient: OpenAI;
+  private readonly openaiClient: OpenAI | null;
 
   constructor(config: BYOKConfig) {
     this.config = config;
     this.model = config.model ?? MODEL_DEFAULTS[config.provider];
 
-    // Anthropic과 Google도 OpenAI-compatible 엔드포인트를 통해 호출
-    this.openaiClient = new OpenAI({
-      apiKey: config.apiKey,
-      baseURL: config.baseUrl ?? this.getBaseUrl(config.provider),
-      defaultHeaders: this.getDefaultHeaders(config.provider),
-    });
+    // Anthropic uses native fetch — skip OpenAI SDK instance
+    if (config.provider === "anthropic") {
+      this.openaiClient = null;
+    } else {
+      this.openaiClient = new OpenAI({
+        apiKey: config.apiKey,
+        baseURL: config.baseUrl ?? this.getBaseUrl(config.provider),
+        defaultHeaders: this.getDefaultHeaders(config.provider),
+      });
+    }
   }
 
   /**
@@ -74,6 +78,10 @@ export class BYOKClient {
     try {
       if (this.config.provider === "anthropic") {
         return await this.chatAnthropic(messages, tools);
+      }
+
+      if (!this.openaiClient) {
+        throw new LLMError(this.config.provider, "OpenAI client not initialized for this provider");
       }
 
       const params: OpenAI.Chat.ChatCompletionCreateParams = {
@@ -116,6 +124,10 @@ export class BYOKClient {
       if (this.config.provider === "anthropic") {
         yield* this.chatStreamAnthropic(messages, tools);
         return;
+      }
+
+      if (!this.openaiClient) {
+        throw new LLMError(this.config.provider, "OpenAI client not initialized for this provider");
       }
 
       const params: OpenAI.Chat.ChatCompletionCreateParams = {
