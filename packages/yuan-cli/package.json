@@ -1,0 +1,26 @@
+{
+  "name": "yuan",
+  "version": "0.1.0",
+  "description": "YUAN — Autonomous Coding Agent CLI",
+  "license": "AGPL-3.0",
+  "type": "module",
+  "bin": {
+    "yuan": "dist/cli.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist",
+    "lint": "tsc --noEmit",
+    "start": "node dist/cli.js"
+  },
+  "dependencies": {
+    "@yuan/core": "workspace:*",
+    "@yuan/tools": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

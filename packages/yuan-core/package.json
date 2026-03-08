@@ -1,0 +1,19 @@
+{
+  "name": "@yuan/core",
+  "version": "0.1.0",
+  "description": "YUAN Agent Core Runtime",
+  "license": "AGPL-3.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}
