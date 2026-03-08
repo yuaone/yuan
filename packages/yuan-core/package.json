@@ -12,7 +12,9 @@
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit"
   },
-  "dependencies": {},
+  "dependencies": {
+    "openai": "^6.27.0"
+  },
   "devDependencies": {
     "typescript": "^5.7.0"
   }
