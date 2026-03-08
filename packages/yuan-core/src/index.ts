@@ -52,14 +52,11 @@ export {
   ApprovalRequiredError,
 } from "./errors.js";
 
-// ─── Constants ───
+// ─── Constants (non-security) ───
 export {
   PLAN_LIMITS,
   MODEL_DEFAULTS,
   PROVIDER_BASE_URLS,
-  DANGEROUS_PATTERNS,
-  SENSITIVE_FILE_PATTERNS,
-  ALLOWED_EXECUTABLES,
   TOOL_RESULT_LIMITS,
   HISTORY_COMPACTION,
   YUAN_MD_SEARCH_PATHS,
@@ -94,18 +91,16 @@ export type { PlannerConfig, FileDependency } from "./planner.js";
 export { buildSystemPrompt } from "./system-prompt.js";
 export type { SystemPromptOptions } from "./system-prompt.js";
 
-// ─── Security (SSOT) ───
+// ─── Security (SSOT — single source for all security constants) ───
 export {
-  DANGEROUS_PATTERNS as SECURITY_DANGEROUS_PATTERNS,
-  SENSITIVE_FILE_PATTERNS as SECURITY_SENSITIVE_FILES,
-  ALLOWED_EXECUTABLES as SECURITY_ALLOWED_EXECUTABLES,
+  DANGEROUS_PATTERNS,
+  SENSITIVE_FILE_PATTERNS,
+  ALLOWED_EXECUTABLES,
   INTERACTIVE_COMMANDS,
   PATH_TRAVERSAL_PATTERNS,
   SHELL_META_PATTERN,
   validateCommand,
-  validateCommand as securityValidateCommand,
   validateFilePath,
-  validateFilePath as securityValidateFilePath,
   isSensitiveFile,
   isDangerousCommand,
   isInteractiveCommand,

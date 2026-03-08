@@ -11,7 +11,7 @@
 import { resolve, relative, extname } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import {
-  securityValidateCommand,
+  validateCommand as coreValidateCommand,
   isSensitiveFile as securityIsSensitiveFile,
   SHELL_META_PATTERN,
 } from '@yuan/core';
@@ -68,7 +68,7 @@ export function validateNoShellMeta(executable: string, args: string[]): void {
  * Delegates to @yuan/core/security.validateCommand (SSOT).
  */
 export function validateCommand(executable: string, args: string[]): void {
-  const result = securityValidateCommand(executable, args);
+  const result = coreValidateCommand(executable, args);
   if (!result.allowed) {
     throw new Error(result.reason ?? 'Command blocked by security policy');
   }

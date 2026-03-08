@@ -8,12 +8,9 @@
 
 import type { PlanLimits, PlanTier, LLMProvider } from "./types.js";
 
-// ─── Security SSOT re-exports ─────────────────────────────────────
-export {
-  DANGEROUS_PATTERNS,
-  SENSITIVE_FILE_PATTERNS,
-  ALLOWED_EXECUTABLES,
-} from "./security.js";
+// Security constants (DANGEROUS_PATTERNS, SENSITIVE_FILE_PATTERNS, ALLOWED_EXECUTABLES)
+// are defined in security.ts (SSOT) and exported directly from index.ts.
+// Do NOT re-export them here to avoid duplicate export paths.
 
 /**
  * 플랜별 리소스 제한 (SSOT — 설계 문서 11.2 기준)
@@ -70,9 +67,6 @@ export const PROVIDER_BASE_URLS: Record<LLMProvider, string> = {
   anthropic: "https://api.anthropic.com",
   google: "https://generativelanguage.googleapis.com/v1beta",
 };
-
-// DANGEROUS_PATTERNS, SENSITIVE_FILE_PATTERNS, ALLOWED_EXECUTABLES
-// are now defined in security.ts (SSOT) and re-exported above.
 
 /**
  * 도구 결과 크기 제한 (바이트)

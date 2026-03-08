@@ -7,7 +7,9 @@
  */
 
 import * as readline from "node:readline";
+import { execSync } from "node:child_process";
 import { TerminalRenderer, colors } from "./renderer.js";
+import { DiffRenderer } from "./diff-renderer.js";
 import { SessionManager, type SessionData } from "./session.js";
 import { ConfigManager } from "./config.js";
 import {
@@ -44,11 +46,15 @@ const SLASH_COMMANDS: Record<string, string> = {
  */
 export class InteractiveSession {
   private renderer: TerminalRenderer;
+  private diffRenderer: DiffRenderer;
   private sessionManager: SessionManager;
   private configManager: ConfigManager;
   private session: SessionData;
   private rl: readline.Interface | null = null;
   private isRunning = false;
+  private isStreaming = false;
+  /** Track files changed during the session for /diff and /undo */
+  private changedFiles: string[] = [];
 
   constructor(
     renderer: TerminalRenderer,
@@ -57,6 +63,7 @@ export class InteractiveSession {
     existingSession?: SessionData
   ) {
     this.renderer = renderer;
+    this.diffRenderer = new DiffRenderer();
     this.sessionManager = sessionManager;
     this.configManager = configManager;
 
@@ -155,11 +162,11 @@ export class InteractiveSession {
         return true;
 
       case "/undo":
-        this.renderer.warn("Undo is not yet implemented");
+        this.handleUndo();
         return true;
 
       case "/diff":
-        this.renderer.warn("Diff view is not yet implemented");
+        this.handleDiff();
         return true;
 
       case "/quit":
@@ -208,6 +215,85 @@ export class InteractiveSession {
     console.log(`  Messages : ${c(colors.dim, String(s.messages.length))}`);
     console.log(`  Work Dir : ${c(colors.dim, s.workDir)}`);
     console.log();
+  }
+
+  /**
+   * Handle /undo command.
+   * Reverts the last file change using git checkout or .yuan-backup files.
+   */
+  private handleUndo(): void {
+    if (this.changedFiles.length === 0) {
+      this.renderer.warn("No file changes to undo in this session.");
+      return;
+    }
+
+    const lastFile = this.changedFiles[this.changedFiles.length - 1];
+    try {
+      // Try git checkout first (most reliable)
+      execSync(`git checkout -- "${lastFile}"`, {
+        cwd: this.session.workDir,
+        stdio: "pipe",
+      });
+      this.changedFiles.pop();
+      this.renderer.success(`Reverted: ${lastFile}`);
+    } catch {
+      // If git checkout fails, try .yuan-backup
+      try {
+        const backupPath = `${lastFile}.yuan-backup`;
+        execSync(`mv "${backupPath}" "${lastFile}"`, {
+          cwd: this.session.workDir,
+          stdio: "pipe",
+        });
+        this.changedFiles.pop();
+        this.renderer.success(`Restored from backup: ${lastFile}`);
+      } catch {
+        this.renderer.error(
+          `Cannot undo: ${lastFile} — not in git and no backup found.`
+        );
+      }
+    }
+  }
+
+  /**
+   * Handle /diff command.
+   * Shows git diff for files changed during this session.
+   */
+  private handleDiff(): void {
+    try {
+      // Show git diff of working directory changes
+      const diffOutput = execSync("git diff", {
+        cwd: this.session.workDir,
+        stdio: "pipe",
+        encoding: "utf-8",
+        maxBuffer: 1024 * 1024,
+      });
+
+      if (!diffOutput.trim()) {
+        // Also check staged changes
+        const stagedOutput = execSync("git diff --cached", {
+          cwd: this.session.workDir,
+          stdio: "pipe",
+          encoding: "utf-8",
+          maxBuffer: 1024 * 1024,
+        });
+
+        if (!stagedOutput.trim()) {
+          this.renderer.info("No file changes detected (working tree clean).");
+          return;
+        }
+
+        console.log();
+        console.log(c(colors.bold, "  Staged Changes"));
+        this.diffRenderer.renderRawDiff(stagedOutput);
+        return;
+      }
+
+      console.log();
+      console.log(c(colors.bold, "  Working Directory Changes"));
+      this.diffRenderer.renderRawDiff(diffOutput);
+    } catch {
+      this.renderer.warn("Not a git repository or git not available. Cannot show diff.");
+    }
   }
 
   /**
@@ -267,19 +353,37 @@ export class InteractiveSession {
 
     // Listen to events for rendering
     const spinner = this.renderer.thinking();
+    this.isStreaming = false;
 
     loop.on("event", (event: AgentEvent) => {
       switch (event.kind) {
         case "agent:thinking":
-          spinner.update(event.content);
+          if (!this.isStreaming) {
+            spinner.update(event.content);
+          }
+          break;
+
+        case "agent:text_delta":
+          // Real-time streaming: stop spinner, write tokens directly
+          if (!this.isStreaming) {
+            spinner.stop();
+            this.isStreaming = true;
+            console.log(); // blank line before streaming output
+          }
+          this.renderer.streamToken(event.text);
           break;
 
         case "agent:tool_call":
-          spinner.stop();
+          if (this.isStreaming) {
+            this.renderer.endStream();
+            this.isStreaming = false;
+          } else {
+            spinner.stop();
+          }
           this.renderer.toolCall(
             event.tool,
             typeof event.input === "string"
-              ? event.input
+              ? event.input.slice(0, 100)
               : JSON.stringify(event.input, null, 0).slice(0, 100)
           );
           break;
@@ -288,19 +392,43 @@ export class InteractiveSession {
           this.renderer.toolResult(event.output);
           break;
 
+        case "agent:file_change":
+          // Track changed files for /undo and /diff
+          if (!this.changedFiles.includes(event.path)) {
+            this.changedFiles.push(event.path);
+          }
+          break;
+
         case "agent:error":
-          spinner.stop();
+          if (this.isStreaming) {
+            this.renderer.endStream();
+            this.isStreaming = false;
+          } else {
+            spinner.stop();
+          }
           this.renderer.error(event.message);
           break;
 
         case "agent:completed":
-          spinner.stop();
-          console.log();
-          this.renderer.agentResponse(event.summary);
+          if (this.isStreaming) {
+            this.renderer.endStream();
+            this.isStreaming = false;
+          } else {
+            spinner.stop();
+          }
+          // If we already streamed the content, don't duplicate it
+          if (!this.isStreaming) {
+            console.log();
+          }
           break;
 
         case "agent:approval_needed":
-          spinner.stop();
+          if (this.isStreaming) {
+            this.renderer.endStream();
+            this.isStreaming = false;
+          } else {
+            spinner.stop();
+          }
           this.renderer.warn(
             `Approval required: ${event.action.description} [${event.action.risk}]`
           );
@@ -318,7 +446,11 @@ export class InteractiveSession {
     try {
       const result = await loop.run(message);
 
-      // Ensure spinner is stopped
+      // Ensure spinner/stream is stopped
+      if (this.isStreaming) {
+        this.renderer.endStream();
+        this.isStreaming = false;
+      }
       spinner.stop();
 
       // Handle non-completed results
@@ -349,6 +481,10 @@ export class InteractiveSession {
           : `[${result.reason}]`;
       this.sessionManager.addMessage(this.session, "assistant", summary);
     } catch (err) {
+      if (this.isStreaming) {
+        this.renderer.endStream();
+        this.isStreaming = false;
+      }
       spinner.stop();
       const errorMsg = err instanceof Error ? err.message : String(err);
       this.renderer.error(`Unexpected error: ${errorMsg}`);

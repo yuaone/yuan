@@ -94,19 +94,36 @@ export async function runOneshot(
   });
 
   const spinner = renderer.thinking();
+  let isStreaming = false;
 
   loop.on("event", (event: AgentEvent) => {
     switch (event.kind) {
       case "agent:thinking":
-        spinner.update(event.content);
+        if (!isStreaming) {
+          spinner.update(event.content);
+        }
+        break;
+
+      case "agent:text_delta":
+        if (!isStreaming) {
+          spinner.stop();
+          isStreaming = true;
+          console.log();
+        }
+        renderer.streamToken(event.text);
         break;
 
       case "agent:tool_call":
-        spinner.stop();
+        if (isStreaming) {
+          renderer.endStream();
+          isStreaming = false;
+        } else {
+          spinner.stop();
+        }
         renderer.toolCall(
           event.tool,
           typeof event.input === "string"
-            ? event.input
+            ? event.input.slice(0, 100)
             : JSON.stringify(event.input, null, 0).slice(0, 100)
         );
         break;
@@ -116,14 +133,25 @@ export async function runOneshot(
         break;
 
       case "agent:error":
-        spinner.stop();
+        if (isStreaming) {
+          renderer.endStream();
+          isStreaming = false;
+        } else {
+          spinner.stop();
+        }
         renderer.error(event.message);
         break;
 
       case "agent:completed":
-        spinner.stop();
-        console.log();
-        renderer.agentResponse(event.summary);
+        if (isStreaming) {
+          renderer.endStream();
+          isStreaming = false;
+        } else {
+          spinner.stop();
+        }
+        if (!isStreaming) {
+          console.log();
+        }
         break;
 
       default:
@@ -133,6 +161,10 @@ export async function runOneshot(
 
   try {
     const result = await loop.run(prompt);
+    if (isStreaming) {
+      renderer.endStream();
+      isStreaming = false;
+    }
     spinner.stop();
 
     if (result.reason === "GOAL_ACHIEVED") {
@@ -159,6 +191,9 @@ export async function runOneshot(
     renderer.info(`Session ${session.id.slice(0, 8)} saved. Run \`yuan resume\` to continue.`);
     return 1;
   } catch (err) {
+    if (isStreaming) {
+      renderer.endStream();
+    }
     spinner.stop();
     const errorMsg = err instanceof Error ? err.message : String(err);
     renderer.error(`Unexpected error: ${errorMsg}`);

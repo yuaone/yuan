@@ -18,7 +18,7 @@ import type {
   ToolExecutor,
   TokenUsage,
 } from "./types.js";
-import { BYOKClient, type LLMResponse } from "./llm-client.js";
+import { BYOKClient, type LLMResponse, type LLMStreamChunk } from "./llm-client.js";
 import { Governor, type GovernorConfig } from "./governor.js";
 import { ContextManager, type ContextManagerConfig } from "./context-manager.js";
 import {
@@ -224,7 +224,7 @@ export class AgentLoop extends EventEmitter {
       // 1. 컨텍스트 준비
       const messages = this.contextManager.prepareForLLM();
 
-      // 2. LLM 호출
+      // 2. LLM 호출 (streaming)
       this.emitEvent({
         kind: "agent:thinking",
         content: `Iteration ${iteration}...`,
@@ -232,10 +232,7 @@ export class AgentLoop extends EventEmitter {
 
       let response: LLMResponse;
       try {
-        response = await this.llmClient.chat(
-          messages,
-          this.config.loop.tools,
-        );
+        response = await this.callLLMStreaming(messages);
       } catch (err) {
         if (err instanceof LLMError) {
           return { reason: "ERROR", error: err.message };
@@ -334,6 +331,62 @@ export class AgentLoop extends EventEmitter {
   }
 
   /**
+   * LLM을 스트리밍 모드로 호출하여 text delta를 실시간 emit.
+   * 텍스트 청크는 `agent:text_delta` 이벤트로, tool_call은 누적 후 완료 시 반환.
+   */
+  private async callLLMStreaming(messages: Message[]): Promise<LLMResponse> {
+    let content = "";
+    const toolCalls: ToolCall[] = [];
+    let usage = { input: 0, output: 0 };
+    let finishReason = "stop";
+
+    const stream = this.llmClient.chatStream(
+      messages,
+      this.config.loop.tools,
+    );
+
+    for await (const chunk of stream) {
+      if (this.aborted) break;
+
+      switch (chunk.type) {
+        case "text":
+          if (chunk.text) {
+            content += chunk.text;
+            this.emitEvent({
+              kind: "agent:text_delta",
+              text: chunk.text,
+            });
+          }
+          break;
+
+        case "tool_call":
+          if (chunk.toolCall) {
+            toolCalls.push(chunk.toolCall);
+            this.emitEvent({
+              kind: "agent:tool_call",
+              tool: chunk.toolCall.name,
+              input: chunk.toolCall.arguments,
+            });
+          }
+          break;
+
+        case "done":
+          if (chunk.usage) {
+            usage = chunk.usage;
+          }
+          break;
+      }
+    }
+
+    return {
+      content: content || null,
+      toolCalls,
+      usage,
+      finishReason,
+    };
+  }
+
+  /**
    * 도구 호출 목록을 실행.
    * 각 도구 호출에 대해:
    * 1. Governor 안전성 검증
@@ -382,13 +435,6 @@ export class AgentLoop extends EventEmitter {
         }
         // 승인됨 → 계속 실행
       }
-
-      // 이벤트: 도구 호출
-      this.emitEvent({
-        kind: "agent:tool_call",
-        tool: toolCall.name,
-        input: args,
-      });
 
       // 도구 실행
       const startTime = Date.now();

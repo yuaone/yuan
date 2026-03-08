@@ -210,9 +210,14 @@ export class TerminalRenderer {
     process.stdout.write(c(colors.cyan + colors.bold, "\n❯ "));
   }
 
-  /** Stream a token (no newline) */
+  /** Stream a token (no newline, real-time output) */
   streamToken(token: string): void {
     process.stdout.write(token);
+  }
+
+  /** End a streaming sequence (newline + reset) */
+  endStream(): void {
+    process.stdout.write("\n");
   }
 
   /** Create a spinner with custom message */

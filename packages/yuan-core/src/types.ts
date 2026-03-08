@@ -156,6 +156,7 @@ export type AgentEvent =
   | { kind: "agent:error"; message: string; retryable: boolean }
   | { kind: "agent:approval_needed"; action: PendingAction }
   | { kind: "agent:completed"; summary: string; filesChanged: string[] }
+  | { kind: "agent:text_delta"; text: string }
   | { kind: "agent:token_usage"; input: number; output: number };
 
 // ─── Session ───
