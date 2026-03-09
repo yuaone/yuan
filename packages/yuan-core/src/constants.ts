@@ -56,6 +56,14 @@ export const PLAN_LIMITS: Record<PlanTier, PlanLimits> = {
     sessionTtlMs: 8 * 60 * 60 * 1000, // 8시간
     concurrentSessions: 20,
   },
+  MAX: {
+    dailyExecutions: Infinity,
+    maxIterations: 200,
+    maxParallelAgents: Infinity,
+    tokensPerRequest: Infinity,
+    sessionTtlMs: 24 * 60 * 60 * 1000, // 24시간
+    concurrentSessions: Infinity,
+  },
 };
 
 /**
