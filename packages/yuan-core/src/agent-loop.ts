@@ -1207,6 +1207,26 @@ export class AgentLoop extends EventEmitter {
       allTools,
     );
 
+    // 텍스트 버퍼링 — 1토큰씩 emit하지 않고 청크 단위로 모아서 emit
+    let textBuffer = "";
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    const FLUSH_INTERVAL_MS = 80;        // 80ms마다 flush
+    const FLUSH_SIZE_THRESHOLD = 40;     // 40자 이상이면 즉시 flush
+    const SENTENCE_BREAKS = /[.!?\n。！？\n]\s*$/;  // 문장 경계에서도 flush
+
+    const flushTextBuffer = () => {
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+      if (textBuffer.length > 0) {
+        this.emitEvent({ kind: "agent:text_delta", text: textBuffer });
+        textBuffer = "";
+      }
+    };
+
+    const scheduleFlush = () => {
+      if (flushTimer) return;
+      flushTimer = setTimeout(flushTextBuffer, FLUSH_INTERVAL_MS);
+    };
+
     for await (const chunk of stream) {
       if (this.aborted) break;
 
@@ -1214,14 +1234,20 @@ export class AgentLoop extends EventEmitter {
         case "text":
           if (chunk.text) {
             content += chunk.text;
-            this.emitEvent({
-              kind: "agent:text_delta",
-              text: chunk.text,
-            });
+            textBuffer += chunk.text;
+
+            // 문장 경계 또는 크기 임계값 도달 시 즉시 flush
+            if (textBuffer.length >= FLUSH_SIZE_THRESHOLD || SENTENCE_BREAKS.test(textBuffer)) {
+              flushTextBuffer();
+            } else {
+              scheduleFlush();
+            }
           }
           break;
 
         case "tool_call":
+          // tool_call 전에 남은 텍스트 flush
+          flushTextBuffer();
           if (chunk.toolCall) {
             toolCalls.push(chunk.toolCall);
             this.emitEvent({
@@ -1239,6 +1265,9 @@ export class AgentLoop extends EventEmitter {
           break;
       }
     }
+
+    // 스트림 종료 후 남은 버퍼 flush
+    flushTextBuffer();
 
     return {
       content: content || null,
