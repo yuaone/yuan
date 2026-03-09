@@ -77,11 +77,34 @@ export interface SlashCommand {
   aliases?: string[];
 }
 
+/** Agent status — extended for indicator */
+export type AgentStatus =
+  | "idle"
+  | "thinking"
+  | "streaming"
+  | "tool_running"
+  | "awaiting_approval"
+  | "error"
+  | "completed"
+  | "interrupted";
+
 /** Agent stream state */
 export interface AgentStreamState {
-  status: "idle" | "thinking" | "streaming" | "tool_running" | "awaiting_approval";
+  status: AgentStatus;
   streamBuffer: string;
   messages: TUIMessage[];
   tokensPerSecond: number;
   totalTokensUsed: number;
+  /** Real-time elapsed ms since agent started (ticks while running) */
+  elapsedMs: number;
+  /** Frozen elapsed time from last completed run (persisted) */
+  lastElapsedMs: number | null;
+  /** Current tool name being executed */
+  currentToolName: string | null;
+  /** Current tool args summary */
+  currentToolArgs: string | null;
+  /** Error message (for error indicator) */
+  lastError: string | null;
+  /** Files changed count in this turn */
+  filesChangedCount: number;
 }
