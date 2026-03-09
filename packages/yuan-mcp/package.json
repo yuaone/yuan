@@ -1,6 +1,6 @@
 {
   "name": "@yuaone/mcp-server",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "YUAN Coding Agent MCP Server",
   "license": "AGPL-3.0",
   "type": "module",
