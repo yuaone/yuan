@@ -1453,60 +1453,158 @@ const SLASH_COMMANDS: SlashCommand[] = [
 
 ---
 
-## 11. Color Palette & Theme
+## 11. Design Tokens & Theme
 
-All colors use standard ANSI 16-color codes for maximum terminal compatibility, with optional 256-color enhancements for terminals that support them.
+YUAN uses a **monochrome gray + white** palette — minimal, clean, no color noise.
+Differentiated from Claude Code's purple/cyan tone. YUAN identity = professional, quiet, fast.
+
+All colors use standard ANSI 16-color codes for maximum terminal compatibility.
+
+### Design Tokens
+
+```typescript
+// tui/lib/tokens.ts
+export const TOKENS = {
+  // ─── Brand ───
+  brand: {
+    prefix: "◆",           // diamond (not asterisk like Claude)
+    name: "yuan",
+    prompt: "▸",           // triangle prompt (not > like Claude)
+    userPrefix: "●",       // filled circle
+  },
+
+  // ─── Colors (ANSI) ───
+  color: {
+    primary: "white",       // main text, important elements
+    secondary: "gray",      // dim text, borders, metadata
+    accent: "white",        // bold white for emphasis (no cyan/purple)
+    success: "green",       // ✓ indicators only
+    error: "red",           // ✗ indicators only
+    warning: "yellow",      // warnings only
+    diffAdd: "green",       // diff additions
+    diffDel: "red",         // diff deletions
+    muted: "dim",           // very low priority text
+  },
+
+  // ─── Spinner ───
+  spinner: {
+    frames: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+    interval: 80,           // ms per frame
+    style: "dim",           // gray spinner, not flashy
+  },
+
+  // ─── Thinking Dots ───
+  dots: {
+    frames: ["·", "··", "···", "····", "·····"],
+    interval: 150,
+    style: "dim",
+  },
+
+  // ─── Box Drawing ───
+  box: {
+    topLeft: "╭",
+    topRight: "╮",
+    bottomLeft: "╰",
+    bottomRight: "╯",
+    horizontal: "─",
+    vertical: "│",
+    style: "dim",           // gray borders
+  },
+
+  // ─── Tree ───
+  tree: {
+    branch: "├─",
+    last: "└─",
+    pipe: "│ ",
+    style: "dim",           // gray tree lines
+  },
+
+  // ─── Layout ───
+  layout: {
+    compact: 80,
+    normal: 120,
+    padding: 2,
+  },
+} as const;
+```
 
 ### Base Colors
 
-| Element | Foreground | Background | Style |
-|---------|-----------|------------|-------|
-| Default text | Terminal default | Terminal default | Normal |
-| User message prefix (`● you`) | White (#FFFFFF) | - | Bold |
-| User message content | Terminal default | - | Normal |
-| Agent message prefix (`✻ yuan`) | Cyan (#00D7FF) | - | Bold |
-| Agent message content | Terminal default | - | Normal |
-| System message | Blue (#5F87FF) | - | Normal |
-| Error text | Red (#FF5F5F) | - | Normal |
-| Warning text | Yellow (#FFAF00) | - | Normal |
-| Success indicator (`✓`) | Green (#5FFF5F) | - | Bold |
-| Error indicator (`✗`) | Red (#FF5F5F) | - | Bold |
-| Dim/secondary text | Gray (#808080) | - | Dim |
+| Element | Color | Style |
+|---------|-------|-------|
+| Default text | Terminal default | Normal |
+| User prefix (`● you`) | White | Bold |
+| User content | Terminal default | Normal |
+| Agent prefix (`◆ yuan`) | White | Bold |
+| Agent content | Terminal default | Normal |
+| System message | Gray | Dim |
+| Error text | Red | Normal |
+| Warning text | Yellow | Normal |
+| Success `✓` | Green | Bold |
+| Error `✗` | Red | Bold |
+| Metadata (timestamps, sizes) | Gray | Dim |
 
 ### Diff Colors
 
 | Element | Foreground | Background |
 |---------|-----------|------------|
-| Addition line | Green (#5FFF5F) | Dim green (256: color 22) |
-| Deletion line | Red (#FF5F5F) | Dim red (256: color 52) |
-| Addition `+` prefix | Green | - |
-| Deletion `-` prefix | Red | - |
-| Context line | Dim gray | - |
-| Hunk header (`@@`) | Cyan | - |
-| Line numbers | Dim gray | - |
+| Addition line | Green | Dim green (256: color 22) |
+| Deletion line | Red | Dim red (256: color 52) |
+| Context line | Gray | - |
+| Hunk header (`@@`) | White | - |
+| Line numbers | Gray dim | - |
 
 ### UI Chrome
 
-| Element | Foreground | Background | Style |
-|---------|-----------|------------|-------|
-| Status bar text | Black | White | Inverse |
-| Status bar (alt) | Dim white | - | Dim |
-| Box borders (`╭─╮│╰─╯`) | Dim gray | - | - |
-| Tree connectors (`├─ ╰─ │`) | Dim gray | - | - |
-| Input prompt (`>`) | Bright green | - | Bold |
-| Spinner (braille) | Cyan | - | - |
-| Thinking dots (`...`) | Dim gray | - | - |
-| Footer hints (keys) | White | - | Bold |
-| Footer hints (descriptions) | Dim gray | - | Dim |
-| Slash menu selected | Terminal default | Inverse | Inverse |
-| Slash menu unselected | Dim gray | - | - |
-| Code block text | Green | - | - |
-| Code block border | Dim gray | - | - |
-| Inline code | Yellow | - | - |
+| Element | Color | Style |
+|---------|-------|-------|
+| Status bar | White on gray | Dim inverse |
+| Box borders (`╭─╮│╰─╯`) | Gray | Dim |
+| Tree connectors (`├─ └─ │`) | Gray | Dim |
+| Input prompt (`▸`) | White | Bold |
+| Spinner (braille) | Gray | Dim |
+| Thinking dots (`·····`) | Gray | Dim |
+| Footer hints (keys) | White | Bold |
+| Footer hints (descriptions) | Gray | Dim |
+| Slash menu selected | White | Inverse |
+| Slash menu unselected | Gray | Dim |
+| Code block | Terminal default | Normal |
+| Code block border | Gray | Dim |
+
+### Mouse & Clipboard Support
+
+**Critical UX requirement:** Terminal-native text selection and clipboard MUST work.
+
+- **Do NOT enable mouse capture mode** (`\x1b[?1003h`) — this breaks text selection
+- Mouse wheel scrolling: use **mouse wheel reporting** only (`\x1b[?1000h` button events)
+  - Detect scroll up/down events → scroll message area
+  - But do NOT capture mouse movement/drag → user can still select text normally
+- **Copy/paste**: Since we don't capture mouse movement, terminal's native selection works:
+  - Click + drag to select text → terminal handles it
+  - Cmd+C / Ctrl+Shift+C to copy → terminal handles it
+  - Cmd+V / Ctrl+Shift+V to paste → terminal routes to our InputBox
+- **Alternate screen buffer** caveat: Some terminals don't support selection in alt screen.
+  Add `Ctrl+S` toggle to temporarily exit alt screen for copying.
+
+```typescript
+// Mouse mode: button-only tracking (not motion tracking)
+// This allows scroll wheel events while preserving text selection
+const MOUSE_ENABLE = "\x1b[?1000h\x1b[?1006h";   // button + SGR extended
+const MOUSE_DISABLE = "\x1b[?1000l\x1b[?1006l";
+// Explicitly do NOT use: \x1b[?1003h (motion tracking — breaks selection)
+```
+
+### Scroll Support
+
+- **PageUp / PageDown**: Scroll message area by terminal height
+- **Mouse wheel**: Scroll message area by 3 lines per tick
+- **Scroll indicator**: Right edge shows scroll position bar when not at bottom
+- **Auto-scroll**: When new content arrives and user is at bottom, auto-scroll down
+- **Sticky bottom**: If user scrolled up, new content does NOT auto-scroll (show "↓ New" badge)
 
 ### YSpinner Integration
 
-The existing `YSpinner` in `y-spinner.ts` uses 256-color for the glowing Y effect. In the TUI, this is used for the initial loading screen and can be optionally shown during long operations. The standard braille spinner is used for inline tool call progress.
+The existing `YSpinner` in `y-spinner.ts` uses 256-color for the glowing Y effect. In the TUI, this is used for the initial loading screen only. The standard braille spinner (gray, dim) is used for inline progress.
 
 ---
 
