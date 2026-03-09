@@ -9,3 +9,5 @@ dist/
 *.swp
 *.swo
 .claude/
+CLAUDE.md
+.claude-auto-prompt.md
