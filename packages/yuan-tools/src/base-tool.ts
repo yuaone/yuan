@@ -26,8 +26,13 @@ export abstract class BaseTool {
     return this.riskLevel !== 'low';
   }
 
-  /** Execute the tool with the given arguments and workDir. */
-  abstract execute(args: Record<string, unknown>, workDir: string): Promise<ToolResult>;
+  /**
+   * Execute the tool with the given arguments and workDir.
+   * @param args - Tool arguments
+   * @param workDir - Working directory
+   * @param abortSignal - Optional AbortSignal for interrupt-based cancellation
+   */
+  abstract execute(args: Record<string, unknown>, workDir: string, abortSignal?: AbortSignal): Promise<ToolResult>;
 
   /** Validate and resolve a path within workDir. Throws on traversal. */
   protected validatePath(path: string, workDir: string): string {

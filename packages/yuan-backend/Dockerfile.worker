@@ -1,0 +1,18 @@
+FROM node:20-slim
+
+WORKDIR /app
+
+# Copy built packages
+COPY packages/yuan-core/dist ./packages/yuan-core/dist
+COPY packages/yuan-core/package.json ./packages/yuan-core/
+COPY packages/yuan-tools/dist ./packages/yuan-tools/dist
+COPY packages/yuan-tools/package.json ./packages/yuan-tools/
+COPY packages/yuan-backend/dist ./packages/yuan-backend/dist
+COPY packages/yuan-backend/package.json ./packages/yuan-backend/
+COPY node_modules ./node_modules
+
+# Security: non-root user
+RUN useradd -m -s /bin/bash yuan-worker
+USER yuan-worker
+
+ENTRYPOINT ["node", "packages/yuan-backend/dist/agent/worker.js"]

@@ -6,7 +6,7 @@
 // ─── BYOK (Bring Your Own Key) ───
 
 /** LLM provider 식별자 */
-export type LLMProvider = "openai" | "anthropic" | "google";
+export type LLMProvider = "openai" | "anthropic" | "google" | "yua" | "deepseek";
 
 /** BYOK 설정 — 사용자가 직접 제공하는 API 키 */
 export interface BYOKConfig {
@@ -265,6 +265,387 @@ export interface TokenUsage {
 export interface ToolExecutor {
   /** 도구 정의 목록 */
   definitions: ToolDefinition[];
-  /** 도구 실행 */
-  execute(call: ToolCall): Promise<ToolResult>;
+  /**
+   * 도구 실행.
+   * @param call - 실행할 도구 호출
+   * @param abortSignal - 인터럽트 시 실행을 취소하기 위한 AbortSignal (선택)
+   */
+  execute(call: ToolCall, abortSignal?: AbortSignal): Promise<ToolResult>;
+}
+
+// ─── Phase 2: Parallel Agent Orchestration ───
+
+/** 태스크 복잡도 레벨 */
+export type TaskComplexity = "simple" | "moderate" | "complex" | "massive";
+
+/** Governor의 분석 결과 — 복잡도, 실행 모드, 실행 계획 */
+export interface GovernorDecision {
+  complexity: TaskComplexity;
+  mode: "single" | "parallel";
+  plan: AgentPlan;
+}
+
+/** 병렬 에이전트 실행 계획 */
+export interface AgentPlan {
+  /** 실행할 태스크 목록 */
+  tasks: PlannedTask[];
+  /** 태스크 간 의존성 [from, to] */
+  dependencies: [string, string][];
+  /** 예상 총 토큰 사용량 */
+  estimatedTokens: number;
+  /** 예상 총 실행 시간 (ms) */
+  estimatedDurationMs: number;
+  /** 최대 동시 에이전트 수 */
+  maxParallelAgents: number;
+}
+
+/** 계획된 개별 태스크 */
+export interface PlannedTask {
+  /** 태스크 고유 ID */
+  id: string;
+  /** 태스크 목표 설명 */
+  goal: string;
+  /** 작업 대상 파일 */
+  targetFiles: string[];
+  /** 참조용 파일 (읽기 전용) */
+  readFiles: string[];
+  /** 필요한 도구 목록 */
+  tools: string[];
+  /** 예상 반복 횟수 */
+  estimatedIterations: number;
+  /** 우선순위 (0–10, 높을수록 우선) */
+  priority: number;
+  /** 태스크별 BYOK 설정 오버라이드 (미지정 시 배치/실행자 기본값 사용) */
+  byokOverride?: BYOKConfig;
+}
+
+/** 태스크 실행 상태 (discriminated union) */
+export type TaskStatus =
+  | { status: "pending" }
+  | { status: "blocked"; waitingFor: string[] }
+  | { status: "running"; agentId: string; iteration: number }
+  | { status: "completed"; result: TaskResult; tokensUsed: number }
+  | { status: "failed"; error: string; retryCount: number }
+  | { status: "skipped"; reason: string };
+
+/** 태스크 실행 결과 */
+export interface TaskResult {
+  /** 태스크 ID */
+  taskId: string;
+  /** 실행 요약 */
+  summary: string;
+  /** 변경된 파일 목록 (diff 포함) */
+  changedFiles: { path: string; diff: string }[];
+  /** 사용된 토큰 수 */
+  tokensUsed: number;
+  /** 반복 횟수 */
+  iterations: number;
+}
+
+/** DAG 실행 상태 (실시간 추적용) */
+export interface DAGExecutionState {
+  /** DAG 실행 고유 ID */
+  dagId: string;
+  /** 태스크별 상태 맵 */
+  tasks: Map<string, TaskStatus>;
+  /** 완료된 태스크 ID 목록 */
+  completedTasks: string[];
+  /** 실행 중인 태스크 ID 목록 */
+  runningTasks: string[];
+  /** 대기 중인 태스크 ID 목록 */
+  pendingTasks: string[];
+  /** 실패한 태스크 ID 목록 */
+  failedTasks: string[];
+  /** 사용된 총 토큰 */
+  totalTokensUsed: number;
+  /** 토큰 예산 한도 */
+  totalTokenBudget: number;
+  /** 경과 시간 (ms) */
+  wallTimeMs: number;
+  /** 실행 시간 제한 (ms) */
+  wallTimeLimit: number;
+}
+
+/** DAG 실행 최종 결과 */
+export interface DAGResult {
+  /** DAG 실행 고유 ID */
+  dagId: string;
+  /** 전체 성공 여부 */
+  success: boolean;
+  /** 완료된 태스크 결과 목록 */
+  completedTasks: TaskResult[];
+  /** 실패한 태스크 목록 */
+  failedTasks: { taskId: string; error: string }[];
+  /** 건너뛴 태스크 목록 */
+  skippedTasks: { taskId: string; reason: string }[];
+  /** 사용된 총 토큰 */
+  totalTokens: number;
+  /** 총 실행 시간 (ms) */
+  totalDurationMs: number;
+}
+
+/** 서브 에이전트에게 전달되는 실행 컨텍스트 */
+export interface SubAgentContext {
+  /** 전체 목표 */
+  overallGoal: string;
+  /** 이 태스크의 세부 목표 */
+  taskGoal: string;
+  /** 작업 대상 파일 */
+  targetFiles: string[];
+  /** 참조용 파일 */
+  readFiles: string[];
+  /** 프로젝트 구조 요약 */
+  projectStructure: string;
+  /** 선행 태스크 결과 (의존성에 의해 전달) */
+  dependencyResults?: {
+    taskId: string;
+    summary: string;
+    changedFiles: { path: string; diff: string }[];
+  }[];
+  /** 관련 파일 내용 (미리 로드) */
+  relevantFileContents?: { path: string; content: string }[];
+  /** 경고 메시지 */
+  warnings?: string[];
+}
+
+// ─── Phase 2: Event Bus, Roles, Contracts, Reflection ───
+
+/** 실패 유형 (재시도 정책용) */
+export type FailureType =
+  | "TRANSIENT"
+  | "TOOL_MISUSE"
+  | "LOGIC_ERROR"
+  | "CONTEXT_LOSS"
+  | "SPEC_MISMATCH"
+  | "VALIDATION_FAIL";
+
+/** 고정 에이전트 역할 (8개 슬롯) */
+export type FixedAgentRole =
+  | "orchestrator"
+  | "coder"
+  | "reviewer"
+  | "memory"
+  | "search"
+  | "security"
+  | "data"
+  | "automation";
+
+/** 동적 에이전트 역할 (모델이 생성) */
+export interface DynamicAgentRole {
+  name: string;
+  description: string;
+  systemPrompt: string;
+  allowedTools: string[];
+  createdBy: "model";
+  reason: string;
+}
+
+/** 에이전트 역할 — 고정 또는 동적 */
+export type AgentRole = FixedAgentRole | DynamicAgentRole;
+
+/** 에이전트 진행 상황 (대시보드용) */
+export interface AgentProgress {
+  agentId: string;
+  role: AgentRole;
+  status: "idle" | "running" | "done" | "error" | "waiting_approval";
+  currentFile?: string;
+  detail: string;
+  progress: number;
+  tokensUsed: number;
+}
+
+/** 대시보드 통계 */
+export interface DashboardStats {
+  filesChanged: number;
+  tokensUsed: number;
+  elapsedMs: number;
+  activeAgents: number;
+  totalAgents: number;
+}
+
+/** Progress 이벤트 — 상태 변경 */
+export interface ProgressStatusEvent {
+  kind: "progress:status";
+  agentId: string;
+  role: AgentRole;
+  status: "planning" | "coding" | "reviewing" | "testing" | "waiting";
+  detail: string;
+}
+
+/** Progress 이벤트 — 파일 작업 */
+export interface ProgressFileEvent {
+  kind: "progress:file";
+  agentId: string;
+  file: string;
+  action: "reading" | "writing" | "analyzing";
+  progress?: number;
+}
+
+/** Progress 이벤트 — 사고 과정 */
+export interface ProgressThinkingEvent {
+  kind: "progress:thinking";
+  agentId: string;
+  delta: string;
+}
+
+/** Progress 이벤트 — 대시보드 스냅샷 */
+export interface ProgressDashboardEvent {
+  kind: "progress:dashboard";
+  agents: AgentProgress[];
+  stats: DashboardStats;
+}
+
+/** Progress 이벤트 통합 타입 */
+export type ProgressEvent =
+  | ProgressStatusEvent
+  | ProgressFileEvent
+  | ProgressThinkingEvent
+  | ProgressDashboardEvent;
+
+/** 팀 이벤트 (팀 모드용) */
+export type TeamEvent =
+  | { kind: "team:member_joined"; userId: number; name: string }
+  | { kind: "team:member_left"; userId: number }
+  | { kind: "team:feedback"; userId: number; message: string; targetAgentId?: string }
+  | { kind: "team:approval_delegated"; userId: number; actionId: string; response: "approve" | "reject" };
+
+/** 인터럽트 이벤트 */
+export type InterruptEvent =
+  | { kind: "interrupt:soft"; feedback?: string }
+  | { kind: "interrupt:hard" }
+  | { kind: "interrupt:pause" }
+  | { kind: "interrupt:resume" };
+
+/** 통합 이벤트 버스 이벤트 타입 */
+export type BusEvent =
+  | AgentEvent
+  | ProgressEvent
+  | TeamEvent
+  | InterruptEvent;
+
+/** 태스크 계약 — 에이전트에게 부여되는 구체적 작업 명세 */
+export interface TaskContract {
+  /** 태스크 고유 ID */
+  id: string;
+  /** 태스크 목표 */
+  goal: string;
+  /** 담당 역할 */
+  assignedRole: AgentRole;
+  /** 의존하는 태스크 ID 목록 */
+  dependencies: string[];
+  /** 입력 스키마 */
+  inputSchema: { files: string[]; context: string };
+  /** 출력 스키마 */
+  outputSchema: { expectedFiles: string[]; successCriteria: string[] };
+  /** 사용 가능 도구 */
+  allowedTools: string[];
+  /** 부수효과 레벨 */
+  sideEffectLevel: "none" | "read" | "write" | "execute" | "destructive";
+  /** 재시도 정책 */
+  retryPolicy: { maxRetries: number; backoffMs: number; failureTypes: FailureType[] };
+  /** 토큰 예산 */
+  tokenBudget: number;
+  /** 타임아웃 (ms) */
+  timeoutMs: number;
+}
+
+/** 인터럽트 시그널 — CLI/Web/팀에서 에이전트에 전달 */
+export interface InterruptSignal {
+  type: "soft" | "hard" | "pause" | "resume";
+  feedback?: string;
+  source: "cli" | "web" | "team";
+  userId?: number;
+}
+
+/** 컨텍스트 소진 시 자동 저장되는 체크포인트 */
+export interface ContinuationCheckpoint {
+  sessionId: string;
+  parentSessionId?: string;
+  goal: string;
+  progress: {
+    completedTasks: string[];
+    currentTask: string;
+    remainingTasks: string[];
+  };
+  changedFiles: Array<{ path: string; diff: string }>;
+  workingMemory: string;
+  yuanMdUpdates: string[];
+  errors: string[];
+  contextUsageAtSave: number;
+  totalTokensUsed: number;
+  iterationsCompleted: number;
+  createdAt: Date;
+}
+
+/** 구조적 검증 결과 (Reviewer Pipeline) */
+export interface StructuralValidation {
+  typeCheck: boolean;
+  lintPass: boolean;
+  buildPass: boolean;
+  testPass: boolean;
+  importIntegrity: boolean;
+  schemaValid: boolean;
+}
+
+/** 의미적 검증 결과 (Reviewer Pipeline) */
+export interface SemanticValidation {
+  goalAchieved: boolean;
+  codeQuality: number;
+  noRegression: boolean;
+  securityClean: boolean;
+  conventions: boolean;
+}
+
+/** 리뷰어 파이프라인 — 구조적 + 의미적 검증 */
+export interface ReviewerPipeline {
+  structural: StructuralValidation;
+  semantic: SemanticValidation;
+}
+
+// ─── Design Mode Types ───
+
+/** Supported frontend frameworks for Design Mode */
+export type DesignFramework = "nextjs" | "vite" | "cra" | "astro" | "svelte" | "unknown";
+
+/** Dev server state */
+export interface DevServerState {
+  framework: DesignFramework;
+  command: string;
+  url: string;
+  port: number;
+  pid: number;
+  managed: boolean;
+}
+
+/** Design Mode session config */
+export interface DesignSessionConfig {
+  workDir: string;
+  autoVision?: boolean;
+  viewport?: { width: number; height: number };
+  devCommand?: string;
+  port?: number;
+}
+
+/** DOM snapshot result */
+export interface DOMSnapshot {
+  accessibilityTree: string;
+  url: string;
+  title: string;
+  timestamp: number;
+}
+
+/** Design Mode event types */
+export type DesignEventType =
+  | "design:server_started"
+  | "design:browser_connected"
+  | "design:dom_snapshot"
+  | "design:screenshot"
+  | "design:hmr_detected"
+  | "design:file_changed"
+  | "design:security_warning";
+
+export interface DesignEvent {
+  type: DesignEventType;
+  data: Record<string, unknown>;
+  timestamp: number;
 }

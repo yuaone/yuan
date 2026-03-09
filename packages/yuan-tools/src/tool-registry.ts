@@ -75,6 +75,33 @@ export class ToolRegistry {
   }
 
   /**
+   * Execute a tool by name, passing an optional AbortSignal for interrupt support.
+   * @param name - Tool name
+   * @param args - Tool arguments
+   * @param workDir - Project working directory
+   * @param abortSignal - Optional AbortSignal for cancellation
+   */
+  async executeWithSignal(
+    name: string,
+    args: Record<string, unknown>,
+    workDir: string,
+    abortSignal?: AbortSignal
+  ): Promise<ToolResult> {
+    const tool = this.tools.get(name);
+    if (!tool) {
+      return {
+        tool_call_id: (args._toolCallId as string) ?? '',
+        name,
+        success: false,
+        output: `Error: Unknown tool: ${name}. Available tools: ${this.listNames().join(', ')}`,
+        durationMs: 0,
+      };
+    }
+
+    return tool.execute(args, workDir, abortSignal);
+  }
+
+  /**
    * Create a ToolExecutor adapter that implements @yuan/core's ToolExecutor interface.
    *
    * The adapter:
@@ -93,7 +120,7 @@ export class ToolRegistry {
     return {
       definitions,
 
-      async execute(call: ToolCall): Promise<ToolResult> {
+      async execute(call: ToolCall, abortSignal?: AbortSignal): Promise<ToolResult> {
         // Parse arguments: core ToolCall.arguments can be string or object
         let args: Record<string, unknown>;
         if (typeof call.arguments === 'string') {
@@ -116,7 +143,7 @@ export class ToolRegistry {
         args._toolCallId = call.id;
 
         const startTime = Date.now();
-        const result = await registry.execute(call.name, args, workDir);
+        const result = await registry.executeWithSignal(call.name, args, workDir, abortSignal);
         const durationMs = Date.now() - startTime;
 
         // Ensure result has correct durationMs
@@ -145,6 +172,7 @@ import { GlobTool } from './glob.js';
 import { GitOpsTool } from './git-ops.js';
 import { TestRunTool } from './test-run.js';
 import { CodeSearchTool } from './code-search.js';
+import { SecurityScanTool } from './security-scan.js';
 
 /**
  * Create a ToolRegistry pre-loaded with all built-in YUAN tools.
@@ -161,6 +189,24 @@ export function createDefaultRegistry(): ToolRegistry {
     new GitOpsTool(),
     new TestRunTool(),
     new CodeSearchTool(),
+    new SecurityScanTool(),
   ]);
+  return registry;
+}
+
+/**
+ * Create a ToolRegistry with all standard tools + design mode tools.
+ *
+ * Design tools (snapshot, screenshot, navigate, resize, inspect, scroll)
+ * are loaded via dynamic import to avoid circular dependencies.
+ *
+ * @param workDir - Project working directory (reserved for future use)
+ */
+export async function createDesignRegistry(workDir: string): Promise<ToolRegistry> {
+  const registry = createDefaultRegistry();
+  const { createDesignTools } = await import('./design-tools.js');
+  for (const tool of createDesignTools()) {
+    registry.register(tool);
+  }
   return registry;
 }

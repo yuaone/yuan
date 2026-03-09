@@ -20,3 +20,25 @@ export {
 } from "./session.js";
 export { InteractiveSession } from "./interactive.js";
 export { runOneshot } from "./oneshot.js";
+export {
+  login,
+  logout,
+  getAuth,
+  verifyAuth,
+  type AuthData,
+  type AuthUser,
+  type AuthPlan,
+} from "./auth.js";
+export { YSpinner } from "./y-spinner.js";
+export { DesignRenderer } from "./design-renderer.js";
+export {
+  ProgressRenderer,
+  renderBar,
+  type ProgressRendererConfig,
+  type AgentPhase,
+  type StatusEvent,
+  type ToolCallEvent,
+  type ToolResultEvent,
+  type ApprovalEvent,
+  type DoneResult,
+} from "./progress-renderer.js";

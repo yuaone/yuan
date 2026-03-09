@@ -56,7 +56,9 @@ export const PLAN_LIMITS: Record<PlanTier, PlanLimits> = {
 export const MODEL_DEFAULTS: Record<LLMProvider, string> = {
   openai: "gpt-4o",
   anthropic: "claude-sonnet-4-20250514",
-  google: "gemini-2.0-flash",
+  google: "gemini-2.5-flash",
+  yua: "yua-pro",
+  deepseek: "deepseek-chat",
 };
 
 /**
@@ -65,7 +67,9 @@ export const MODEL_DEFAULTS: Record<LLMProvider, string> = {
 export const PROVIDER_BASE_URLS: Record<LLMProvider, string> = {
   openai: "https://api.openai.com/v1",
   anthropic: "https://api.anthropic.com",
-  google: "https://generativelanguage.googleapis.com/v1beta",
+  google: "https://generativelanguage.googleapis.com/v1beta/openai",
+  yua: "https://yuaone.com/api/v1",
+  deepseek: "https://api.deepseek.com/v1",
 };
 
 /**
@@ -107,3 +111,43 @@ export const DEFAULT_LOOP_CONFIG = {
   maxTokensPerIteration: 8_000,
   totalTokenBudget: 200_000,
 } as const;
+
+/** Design Mode: allowed edit paths (Governor enforced) */
+export const DESIGN_ALLOWED_PATHS = [
+  "src/",
+  "app/",
+  "components/",
+  "styles/",
+  "pages/",
+  "public/",
+  "assets/",
+];
+
+/** Design Mode: blocked edit paths */
+export const DESIGN_BLOCKED_PATHS = [
+  "node_modules/",
+  ".env",
+  "package.json",
+  "package-lock.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  ".git/",
+];
+
+/** Design Mode: security scan patterns */
+export const DESIGN_SECURITY_PATTERNS: Record<string, RegExp[]> = {
+  xss: [
+    /dangerouslySetInnerHTML/,
+    /\bonclick\s*=/i,
+    /\bonerror\s*=/i,
+    /\bonload\s*=/i,
+    /javascript:/i,
+  ],
+  csp: [
+    /style\s*=\s*["']/,
+    /<script[^>]*>/i,
+  ],
+  injection: [
+    /\$\{[^}]*(?:user|input|query|param)/i,
+  ],
+};

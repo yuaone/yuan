@@ -8,10 +8,11 @@
  * - Fuzzy match suggestion on failure
  */
 
-import { readFile, writeFile } from 'node:fs/promises';
-import { stat } from 'node:fs/promises';
+import { readFile, stat, open as fsOpen } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import type { ParameterDef, RiskLevel, ToolResult } from './types.js';
 import { BaseTool } from './base-tool.js';
+import { isSensitiveFile } from './validators.js';
 
 export class FileEditTool extends BaseTool {
   readonly name = 'file_edit';
@@ -60,6 +61,15 @@ export class FileEditTool extends BaseTool {
       resolvedPath = this.validatePath(path, workDir);
     } catch (err) {
       return this.fail(toolCallId, (err as Error).message);
+    }
+
+    // Sensitive file check
+    if (isSensitiveFile(path)) {
+      return this.fail(
+        toolCallId,
+        `Sensitive file detected: "${path}". ` +
+          'Editing credential/secret files is blocked for security.'
+      );
     }
 
     // Check file exists
@@ -111,11 +121,22 @@ export class FileEditTool extends BaseTool {
     // Generate preview (unified diff style)
     const preview = generatePreview(content, newContent, path);
 
-    // Write file
+    // Write file using O_NOFOLLOW to prevent symlink TOCTOU attacks
     try {
-      await writeFile(resolvedPath, newContent, 'utf-8');
+      const fh = await fsOpen(
+        resolvedPath,
+        fsConstants.O_WRONLY | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW
+      );
+      try {
+        await fh.writeFile(newContent, 'utf-8');
+      } finally {
+        await fh.close();
+      }
     } catch (err) {
-      return this.fail(toolCallId, `Failed to write file: ${(err as Error).message}`);
+      const msg = (err as NodeJS.ErrnoException).code === 'ELOOP'
+        ? `Refusing to edit through symlink: ${path}`
+        : `Failed to write file: ${(err as Error).message}`;
+      return this.fail(toolCallId, msg);
     }
 
     return this.ok(
@@ -133,7 +154,7 @@ function countOccurrences(content: string, search: string): number {
     const idx = content.indexOf(search, pos);
     if (idx === -1) break;
     count++;
-    pos = idx + 1;
+    pos = idx + search.length;
   }
   return count;
 }
@@ -165,7 +186,8 @@ function generatePreview(oldContent: string, newContent: string, filePath: strin
 
   // Build hunks
   const sortedIndices = [...changedLineIndices].sort((a, b) => a - b);
-  let hunkStart = sortedIndices[0];
+  if (sortedIndices.length === 0) return 'No changes detected.';
+  let hunkStart = sortedIndices[0]!;
   let hunkLines: string[] = [];
 
   for (const idx of sortedIndices) {

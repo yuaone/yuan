@@ -60,6 +60,28 @@ const BLOCKED_EXECUTABLES = new Set([
   // Mount operations
   "mount",
   "umount",
+  // Shell binaries — must not be invoked directly (bypass tool validation)
+  "bash",
+  "sh",
+  "zsh",
+  "dash",
+  "csh",
+  "ksh",
+  "fish",
+  // Container runtime — can escape sandbox restrictions
+  "docker",
+  "podman",
+  // Command wrappers — can invoke arbitrary commands, bypassing security checks
+  "env",
+  "xargs",
+  "nohup",
+  "strace",
+  "ltrace",
+  "gdb",
+  "script",
+  "expect",
+  "unbuffer",
+  "setsid",
 ]);
 
 // ─── Dangerous Command Patterns ───────────────────────────────────
@@ -227,6 +249,14 @@ export const INTERACTIVE_COMMANDS: ReadonlySet<string> = new Set([
   "htop",
   "screen",
   "tmux",
+  // Shell binaries (also in BLOCKED_EXECUTABLES — listed here for explicit coverage)
+  "bash",
+  "sh",
+  "zsh",
+  "dash",
+  "csh",
+  "ksh",
+  "fish",
 ]);
 
 // ─── Path Traversal Patterns ──────────────────────────────────────
@@ -298,7 +328,16 @@ export function validateCommand(
     }
   }
 
-  // 4. Shell 메타문자 검사
+  // 4. Allowlist enforcement — reject executables not in ALLOWED_EXECUTABLES
+  if (!ALLOWED_EXECUTABLES.includes(base)) {
+    return {
+      allowed: false,
+      reason: `Executable "${base}" is not in the allowed list. Allowed: ${ALLOWED_EXECUTABLES.join(', ')}`,
+      risk: "high",
+    };
+  }
+
+  // 5. Shell 메타문자 검사
   if (SHELL_META_PATTERN.test(executable)) {
     return {
       allowed: false,

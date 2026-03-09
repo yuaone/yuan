@@ -10,11 +10,13 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "node --test dist/__tests__/*.test.js"
   },
   "dependencies": {
     "@yuan/core": "workspace:*",
-    "fast-glob": "^3.3.3"
+    "fast-glob": "^3.3.3",
+    "playwright": "^1.52.0"
   },
   "devDependencies": {
     "@types/node": "^25.3.5",

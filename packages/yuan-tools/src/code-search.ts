@@ -155,6 +155,7 @@ export class CodeSearchTool extends BaseTool {
         ignore: IGNORE_DIRS,
         absolute: true,
         onlyFiles: true,
+        followSymbolicLinks: false,
       });
 
       // Search files

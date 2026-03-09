@@ -8,7 +8,8 @@
  * - Image file base64 conversion
  */
 
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, stat, open as fsOpen } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import type { ParameterDef, RiskLevel, ToolResult } from './types.js';
 import { BaseTool } from './base-tool.js';
 import { isBinaryFile, isImageFile, detectLanguage } from './validators.js';
@@ -67,19 +68,27 @@ export class FileReadTool extends BaseTool {
       return this.fail(toolCallId, `Path is a directory, not a file: ${path}`);
     }
 
-    // Image file → base64
+    // Image file → base64 (uses O_NOFOLLOW to prevent symlink TOCTOU)
     if (isImageFile(resolvedPath)) {
       try {
-        const buf = await readFile(resolvedPath);
-        const b64 = buf.toString('base64');
-        const language = detectLanguage(resolvedPath);
-        return this.ok(toolCallId, `[base64 image: ${language}]\n${b64}`, {
-          totalLines: 0,
-          language,
-          truncated: false,
-        });
+        const fh = await fsOpen(resolvedPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+        try {
+          const buf = await fh.readFile();
+          const b64 = buf.toString('base64');
+          const language = detectLanguage(resolvedPath);
+          return this.ok(toolCallId, `[base64 image: ${language}]\n${b64}`, {
+            totalLines: 0,
+            language,
+            truncated: false,
+          });
+        } finally {
+          await fh.close();
+        }
       } catch (err) {
-        return this.fail(toolCallId, `Failed to read image: ${(err as Error).message}`);
+        const msg = (err as NodeJS.ErrnoException).code === 'ELOOP'
+          ? `Refusing to read through symlink: ${path}`
+          : `Failed to read image: ${(err as Error).message}`;
+        return this.fail(toolCallId, msg);
       }
     }
 
@@ -105,9 +114,16 @@ export class FileReadTool extends BaseTool {
       );
     }
 
-    // Read file
+    // Read file using O_NOFOLLOW to atomically prevent symlink TOCTOU attacks
     try {
-      const raw = await readFile(resolvedPath, 'utf-8');
+      const fh = await fsOpen(resolvedPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      let raw: string;
+      try {
+        const buf = await fh.readFile();
+        raw = buf.toString('utf-8');
+      } finally {
+        await fh.close();
+      }
       const allLines = raw.split('\n');
       const totalLines = allLines.length;
 
@@ -133,7 +149,10 @@ export class FileReadTool extends BaseTool {
         truncated,
       });
     } catch (err) {
-      return this.fail(toolCallId, `Failed to read file: ${(err as Error).message}`);
+      const msg = (err as NodeJS.ErrnoException).code === 'ELOOP'
+        ? `Refusing to read through symlink: ${path}`
+        : `Failed to read file: ${(err as Error).message}`;
+      return this.fail(toolCallId, msg);
     }
   }
 }

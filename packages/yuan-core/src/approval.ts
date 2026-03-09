@@ -273,11 +273,21 @@ export class ApprovalManager extends EventEmitter {
       return "reject";
     }
 
-    // 타임아웃 처리
+    // 타임아웃 처리 — clear timer after race resolves to prevent leak
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<ApprovalResponse>((resolve) => {
+      timer = setTimeout(() => {
+        this.emit("approval:timeout", request.id);
+        resolve("reject");
+      }, request.timeout);
+    });
+
     const response = await Promise.race([
       this.handler(request),
-      this.createTimeout(request.timeout, request.id),
+      timeoutPromise,
     ]);
+
+    clearTimeout(timer);
 
     // always_approve 처리
     if (response === "always_approve") {
@@ -399,15 +409,4 @@ export class ApprovalManager extends EventEmitter {
     return "RUN_DANGEROUS_CMD";
   }
 
-  private createTimeout(
-    timeoutMs: number,
-    requestId: string,
-  ): Promise<ApprovalResponse> {
-    return new Promise((resolve) => {
-      setTimeout(() => {
-        this.emit("approval:timeout", requestId);
-        resolve("reject");
-      }, timeoutMs);
-    });
-  }
 }

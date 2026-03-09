@@ -20,6 +20,7 @@ import { TerminalRenderer } from "./renderer.js";
 import { InteractiveSession } from "./interactive.js";
 import { SessionManager } from "./session.js";
 import { runOneshot } from "./oneshot.js";
+import { login, logout, getAuth } from "./auth.js";
 
 const renderer = new TerminalRenderer();
 
@@ -51,16 +52,25 @@ program
     await session.start();
   });
 
-// ─── yuan code <prompt> ───
+// ─── yuan code <prompt> / yuan run <prompt> ───
+const oneshotAction = async (prompt: string, options: { model?: string }): Promise<void> => {
+  const exitCode = await runOneshot(prompt, options);
+  process.exit(exitCode);
+};
+
 program
   .command("code")
   .description("Run a one-shot coding task")
   .argument("<prompt>", "The coding task to execute")
   .option("-m, --model <model>", "Override the default model")
-  .action(async (prompt: string, options: { model?: string }) => {
-    const exitCode = await runOneshot(prompt, options);
-    process.exit(exitCode);
-  });
+  .action(oneshotAction);
+
+program
+  .command("run")
+  .description("Run a one-shot coding task (alias for 'code')")
+  .argument("<prompt>", "The coding task to execute")
+  .option("-m, --model <model>", "Override the default model")
+  .action(oneshotAction);
 
 // ─── yuan config ───
 const configCmd = program
@@ -79,13 +89,13 @@ configCmd
   .argument("<provider>", "Provider: openai, anthropic, or google")
   .argument("<key>", "API key")
   .action((provider: string, key: string) => {
-    const validProviders = ["openai", "anthropic", "google"] as const;
+    const validProviders = ["openai", "anthropic", "google", "yua", "deepseek"] as const;
     if (!validProviders.includes(provider as typeof validProviders[number])) {
-      renderer.error(`Invalid provider: ${provider}. Use: openai, anthropic, or google`);
+      renderer.error(`Invalid provider: ${provider}. Use: openai, anthropic, google, yua, or deepseek`);
       process.exit(1);
     }
     const configManager = new ConfigManager();
-    configManager.setKey(provider as "openai" | "anthropic" | "google", key);
+    configManager.setKey(provider as "openai" | "anthropic" | "google" | "yua" | "deepseek", key);
     renderer.success(`API key saved for ${provider}`);
   });
 
@@ -171,6 +181,49 @@ program
       session
     );
     await interactive.start();
+  });
+
+// ─── yuan design ───
+program
+  .command("design")
+  .description("Enter Design Mode — AI-powered real-time design collaboration")
+  .option("-p, --port <port>", "Dev server port", parseInt)
+  .option("--auto-vision", "Auto-capture screenshot after every change")
+  .option("--viewport <preset>", "Viewport preset: mobile, tablet, desktop")
+  .option("--dev-command <cmd>", "Custom dev server command")
+  .action(async (options) => {
+    const { runDesignMode } = await import("./design.js");
+    await runDesignMode(options);
+  });
+
+// ─── yuan login ───
+program
+  .command("login")
+  .description("Login to YUA Platform")
+  .option("--url <url>", "Platform URL", "https://platform.yuaone.com")
+  .action(async (opts: { url: string }) => {
+    await login(opts.url);
+  });
+
+// ─── yuan logout ───
+program
+  .command("logout")
+  .description("Logout from YUA Platform")
+  .action(async () => {
+    await logout();
+  });
+
+// ─── yuan whoami ───
+program
+  .command("whoami")
+  .description("Show current user info")
+  .action(async () => {
+    const auth = await getAuth();
+    if (!auth) {
+      console.log("Not logged in. Run: yuan login");
+      return;
+    }
+    console.log(`${auth.user.email} (${auth.plan.name})`);
   });
 
 program.parse();

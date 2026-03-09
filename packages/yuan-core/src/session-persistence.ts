@@ -11,6 +11,11 @@
  * - messages.json: 대화 히스토리
  * - plan.json: 현재 실행 계획
  * - checkpoint.json: 마지막 체크포인트 (iteration, token usage)
+ * - plan-graph.json: PlanGraphManager 런타임 상태 (resume용)
+ * - runtime-state.json: StateMachine phase + stepIndex (resume용)
+ * - context-budget.json: ContextBudgetManager 스냅샷 (resume용)
+ * - learnings.json: SelfReflection 학습 기록 (resume용)
+ * - monologue.json: SelfReflection 내적 독백 (resume용)
  *
  * 체크포인트 주기: 매 iteration 완료 시
  */
@@ -67,6 +72,21 @@ export interface SessionData {
   plan: ExecutionPlan | null;
   /** 변경된 파일 목록 */
   changedFiles: string[];
+
+  // ─── Runtime State for Resume (optional, new fields) ───
+
+  /** PlanGraphManager.toJSON() 출력 — 계획 그래프의 런타임 상태 */
+  planGraphState?: unknown;
+  /** AgentPhase enum 값 — 상태 기계의 현재 단계 */
+  stateMachinePhase?: string;
+  /** 현재 실행 중인 step 인덱스 */
+  stepIndex?: number;
+  /** ContextBudgetManager.toJSON() 출력 — 컨텍스트 예산 상태 */
+  contextBudgetState?: unknown;
+  /** SelfReflection 학습 기록 */
+  reflectionLearnings?: unknown[];
+  /** SelfReflection 내적 독백 (최근 N개) */
+  reflectionMonologue?: unknown[];
 }
 
 /** 체크포인트 데이터 — 매 iteration 완료 시 저장 */
@@ -92,11 +112,16 @@ export interface CheckpointData {
  * ```
  * ~/.yuan/sessions/
  * ├── <sessionId>/
- * │   ├── state.json       ← SessionSnapshot
- * │   ├── messages.json    ← Message[]
- * │   ├── plan.json        ← ExecutionPlan | null
- * │   └── checkpoint.json  ← CheckpointData
- * └── last-session         ← 마지막 세션 ID
+ * │   ├── state.json          ← SessionSnapshot
+ * │   ├── messages.json       ← Message[]
+ * │   ├── plan.json           ← ExecutionPlan | null
+ * │   ├── checkpoint.json     ← CheckpointData
+ * │   ├── plan-graph.json     ← PlanGraphManager 런타임 상태 (optional)
+ * │   ├── runtime-state.json  ← StateMachine phase + stepIndex (optional)
+ * │   ├── context-budget.json ← ContextBudgetManager 스냅샷 (optional)
+ * │   ├── learnings.json      ← SelfReflection 학습 기록 (optional)
+ * │   └── monologue.json      ← SelfReflection 내적 독백 (optional)
+ * └── last-session            ← 마지막 세션 ID
  * ```
  */
 export class SessionPersistence {
@@ -127,12 +152,44 @@ export class SessionPersistence {
     // 업데이트 시각 갱신
     data.snapshot.updatedAt = new Date().toISOString();
 
-    // 병렬 저장
-    await Promise.all([
+    // 병렬 저장 — 기본 데이터
+    const writes: Promise<void>[] = [
       this.writeJson(path.join(sessionDir, "state.json"), data.snapshot),
       this.writeJson(path.join(sessionDir, "messages.json"), data.messages),
       this.writeJson(path.join(sessionDir, "plan.json"), data.plan),
-    ]);
+    ];
+
+    // 런타임 상태 저장 (있는 경우에만)
+    if (data.planGraphState !== undefined) {
+      writes.push(
+        this.writeJson(path.join(sessionDir, "plan-graph.json"), data.planGraphState),
+      );
+    }
+    if (data.stateMachinePhase !== undefined || data.stepIndex !== undefined) {
+      writes.push(
+        this.writeJson(path.join(sessionDir, "runtime-state.json"), {
+          stateMachinePhase: data.stateMachinePhase,
+          stepIndex: data.stepIndex,
+        }),
+      );
+    }
+    if (data.contextBudgetState !== undefined) {
+      writes.push(
+        this.writeJson(path.join(sessionDir, "context-budget.json"), data.contextBudgetState),
+      );
+    }
+    if (data.reflectionLearnings !== undefined) {
+      writes.push(
+        this.writeJson(path.join(sessionDir, "learnings.json"), data.reflectionLearnings),
+      );
+    }
+    if (data.reflectionMonologue !== undefined) {
+      writes.push(
+        this.writeJson(path.join(sessionDir, "monologue.json"), data.reflectionMonologue),
+      );
+    }
+
+    await Promise.all(writes);
 
     // 마지막 세션 ID 기록
     await this.setLastSessionId(sessionId);
@@ -155,25 +212,59 @@ export class SessionPersistence {
     }
 
     try {
-      const [snapshot, messages, plan] = await Promise.all([
+      // 기본 데이터 + 런타임 상태를 병렬 로드
+      const [
+        snapshot,
+        messages,
+        plan,
+        checkpoint,
+        planGraphState,
+        runtimeState,
+        contextBudgetState,
+        reflectionLearnings,
+        reflectionMonologue,
+      ] = await Promise.all([
         this.readJson<SessionSnapshot>(path.join(sessionDir, "state.json")),
         this.readJson<Message[]>(path.join(sessionDir, "messages.json")),
         this.readJson<ExecutionPlan | null>(path.join(sessionDir, "plan.json")),
+        this.readJson<CheckpointData>(path.join(sessionDir, "checkpoint.json")),
+        this.readJson<unknown>(path.join(sessionDir, "plan-graph.json")),
+        this.readJson<{ stateMachinePhase?: string; stepIndex?: number }>(
+          path.join(sessionDir, "runtime-state.json"),
+        ),
+        this.readJson<unknown>(path.join(sessionDir, "context-budget.json")),
+        this.readJson<unknown[]>(path.join(sessionDir, "learnings.json")),
+        this.readJson<unknown[]>(path.join(sessionDir, "monologue.json")),
       ]);
 
       if (!snapshot) return null;
 
-      // 체크포인트에서 changedFiles 복구
-      const checkpoint = await this.readJson<CheckpointData>(
-        path.join(sessionDir, "checkpoint.json"),
-      );
-
-      return {
+      const data: SessionData = {
         snapshot,
         messages: messages ?? [],
         plan: plan ?? null,
         changedFiles: checkpoint?.changedFiles ?? [],
       };
+
+      // 런타임 상태 복원 (파일이 없으면 undefined로 남음)
+      if (planGraphState !== null) {
+        data.planGraphState = planGraphState;
+      }
+      if (runtimeState !== null) {
+        data.stateMachinePhase = runtimeState.stateMachinePhase;
+        data.stepIndex = runtimeState.stepIndex;
+      }
+      if (contextBudgetState !== null) {
+        data.contextBudgetState = contextBudgetState;
+      }
+      if (reflectionLearnings !== null) {
+        data.reflectionLearnings = reflectionLearnings;
+      }
+      if (reflectionMonologue !== null) {
+        data.reflectionMonologue = reflectionMonologue;
+      }
+
+      return data;
     } catch {
       // 손상된 세션 파일
       return null;
@@ -273,6 +364,85 @@ export class SessionPersistence {
       snapshot.iteration = checkpoint.iteration;
       snapshot.tokenUsage = checkpoint.tokenUsage;
       snapshot.updatedAt = checkpoint.timestamp;
+      await this.writeJson(stateFile, snapshot);
+    }
+  }
+
+  // ─── Runtime State Checkpoint ───
+
+  /**
+   * 런타임 상태를 부분 저장한다 (매 step 완료 시 호출 가능).
+   * 기존 저장된 데이터와 병합하여 새로운 필드만 업데이트한다.
+   * 기본 checkpoint.json도 함께 업데이트한다.
+   *
+   * @param sessionId 세션 ID
+   * @param partial 저장할 런타임 상태 (SessionData의 부분 집합)
+   */
+  async saveRuntimeState(
+    sessionId: string,
+    partial: Partial<SessionData>,
+  ): Promise<void> {
+    const sessionDir = this.sessionDir(sessionId);
+    this.ensureDir(sessionDir);
+
+    const writes: Promise<void>[] = [];
+
+    if (partial.planGraphState !== undefined) {
+      writes.push(
+        this.writeJson(path.join(sessionDir, "plan-graph.json"), partial.planGraphState),
+      );
+    }
+    if (partial.stateMachinePhase !== undefined || partial.stepIndex !== undefined) {
+      // 기존 runtime-state.json을 읽어 병합
+      const existing = await this.readJson<Record<string, unknown>>(
+        path.join(sessionDir, "runtime-state.json"),
+      );
+      const merged = {
+        ...(existing ?? {}),
+        ...(partial.stateMachinePhase !== undefined
+          ? { stateMachinePhase: partial.stateMachinePhase }
+          : {}),
+        ...(partial.stepIndex !== undefined ? { stepIndex: partial.stepIndex } : {}),
+      };
+      writes.push(
+        this.writeJson(path.join(sessionDir, "runtime-state.json"), merged),
+      );
+    }
+    if (partial.contextBudgetState !== undefined) {
+      writes.push(
+        this.writeJson(path.join(sessionDir, "context-budget.json"), partial.contextBudgetState),
+      );
+    }
+    if (partial.reflectionLearnings !== undefined) {
+      writes.push(
+        this.writeJson(path.join(sessionDir, "learnings.json"), partial.reflectionLearnings),
+      );
+    }
+    if (partial.reflectionMonologue !== undefined) {
+      writes.push(
+        this.writeJson(path.join(sessionDir, "monologue.json"), partial.reflectionMonologue),
+      );
+    }
+    if (partial.messages !== undefined) {
+      writes.push(
+        this.writeJson(path.join(sessionDir, "messages.json"), partial.messages),
+      );
+    }
+    if (partial.plan !== undefined) {
+      writes.push(
+        this.writeJson(path.join(sessionDir, "plan.json"), partial.plan),
+      );
+    }
+
+    if (writes.length > 0) {
+      await Promise.all(writes);
+    }
+
+    // state.json의 updatedAt 갱신
+    const stateFile = path.join(sessionDir, "state.json");
+    const snapshot = await this.readJson<SessionSnapshot>(stateFile);
+    if (snapshot) {
+      snapshot.updatedAt = new Date().toISOString();
       await this.writeJson(stateFile, snapshot);
     }
   }
@@ -377,6 +547,9 @@ export class SessionPersistence {
   // ─── Helpers ───
 
   private sessionDir(sessionId: string): string {
+    if (!/^[a-zA-Z0-9\-_]+$/.test(sessionId)) {
+      throw new Error(`Invalid session ID: ${sessionId}`);
+    }
     return path.join(this.baseDir, sessionId);
   }
 
@@ -393,11 +566,19 @@ export class SessionPersistence {
   }
 
   private async writeJson(filePath: string, data: unknown): Promise<void> {
+    // Ensure parent directory exists before writing
+    const dir = path.dirname(filePath);
+    this.ensureDir(dir);
+    // Atomic write: write to unique temp file then rename.
+    // Use random suffix to prevent race conditions when multiple saves run concurrently.
+    const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const tmpPath = `${filePath}.${suffix}.tmp`;
     await fs.promises.writeFile(
-      filePath,
+      tmpPath,
       JSON.stringify(data, null, 2),
       "utf-8",
     );
+    await fs.promises.rename(tmpPath, filePath);
   }
 
   private async readJson<T>(filePath: string): Promise<T | null> {

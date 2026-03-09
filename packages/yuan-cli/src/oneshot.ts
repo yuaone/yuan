@@ -93,6 +93,14 @@ export async function runOneshot(
     governorConfig: { planTier: "FREE" },
   });
 
+  // Handle SIGINT gracefully — restore cursor and exit
+  const sigintHandler = (): void => {
+    process.stdout.write("\x1b[?25h"); // restore cursor
+    renderer.info("\nInterrupted.");
+    process.exit(130);
+  };
+  process.on("SIGINT", sigintHandler);
+
   const spinner = renderer.thinking();
   let isStreaming = false;
 
@@ -142,17 +150,19 @@ export async function runOneshot(
         renderer.error(event.message);
         break;
 
-      case "agent:completed":
+      case "agent:completed": {
+        const wasStreaming = isStreaming;
         if (isStreaming) {
           renderer.endStream();
           isStreaming = false;
         } else {
           spinner.stop();
         }
-        if (!isStreaming) {
+        if (!wasStreaming) {
           console.log();
         }
         break;
+      }
 
       default:
         break;

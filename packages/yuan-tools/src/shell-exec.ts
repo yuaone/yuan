@@ -55,7 +55,7 @@ export class ShellExecTool extends BaseTool {
     },
   };
 
-  async execute(args: Record<string, unknown>, workDir: string): Promise<ToolResult> {
+  async execute(args: Record<string, unknown>, workDir: string, abortSignal?: AbortSignal): Promise<ToolResult> {
     const toolCallId = (args._toolCallId as string) ?? '';
     const executable = args.executable as string | undefined;
     const execArgs = args.args as string[] | undefined;
@@ -68,6 +68,28 @@ export class ShellExecTool extends BaseTool {
     }
     if (!execArgs || !Array.isArray(execArgs)) {
       return this.fail(toolCallId, 'Missing required parameter: args (must be an array)');
+    }
+
+    // Block shell binaries and command wrappers that can bypass tool validation
+    const SHELL_BINARIES = new Set(['bash', 'sh', 'zsh', 'dash', 'csh', 'ksh', 'fish']);
+    const COMMAND_WRAPPERS = new Set([
+      'env', 'xargs', 'nohup', 'strace', 'ltrace', 'gdb',
+      'script', 'expect', 'unbuffer', 'setsid', 'timeout',
+    ]);
+    const execBase = executable.split('/').pop() ?? executable;
+    if (SHELL_BINARIES.has(execBase)) {
+      return this.fail(
+        toolCallId,
+        `Shell binary "${execBase}" cannot be executed directly. ` +
+          'Use specific tool commands instead (e.g., "node", "pnpm", "git").'
+      );
+    }
+    if (COMMAND_WRAPPERS.has(execBase)) {
+      return this.fail(
+        toolCallId,
+        `Command wrapper "${execBase}" is blocked — it can be used to bypass security controls. ` +
+          'Execute the target command directly instead.'
+      );
     }
 
     // Validate no shell metacharacters
@@ -100,6 +122,12 @@ export class ShellExecTool extends BaseTool {
     try {
       const result = await new Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean }>(
         (resolve) => {
+          // Check if already aborted before starting
+          if (abortSignal?.aborted) {
+            resolve({ stdout: '', stderr: '', exitCode: 1, timedOut: false });
+            return;
+          }
+
           const child = execFile(
             executable,
             execArgs,
@@ -107,11 +135,19 @@ export class ShellExecTool extends BaseTool {
               cwd: resolvedCwd,
               timeout,
               maxBuffer: MAX_STDOUT + MAX_STDERR,
-              env: env ? { ...process.env, ...env } : process.env,
+              env: env ? { ...process.env, ...sanitizeEnv(env) } : process.env,
             },
             (error, stdout, stderr) => {
-              const exitCode = error && 'code' in error ? (error.code as number) ?? 1 : 0;
-              const timedOut = error !== null && 'killed' in error && error.killed === true;
+              const execError = error as NodeJS.ErrnoException | null;
+              let exitCode: number;
+              if (execError && typeof execError.code === 'number') {
+                exitCode = execError.code;
+              } else if (execError && 'status' in execError && typeof (execError as { status?: unknown }).status === 'number') {
+                exitCode = (execError as { status: number }).status;
+              } else {
+                exitCode = execError ? 1 : 0;
+              }
+              const timedOut = execError !== null && 'killed' in (execError ?? {}) && (execError as unknown as { killed?: boolean })?.killed === true;
 
               resolve({
                 stdout: truncateStr(String(stdout ?? ''), MAX_STDOUT),
@@ -122,8 +158,23 @@ export class ShellExecTool extends BaseTool {
             }
           );
 
-          // Safety: kill child on timeout (execFile handles this, but belt-and-suspenders)
-          child.unref?.();
+          // Wire AbortSignal to kill the child process
+          if (abortSignal) {
+            const onAbort = () => {
+              child.kill('SIGTERM');
+              // If SIGTERM doesn't work, escalate to SIGKILL after 3s
+              setTimeout(() => {
+                if (!child.killed) {
+                  child.kill('SIGKILL');
+                }
+              }, 3000).unref();
+            };
+            abortSignal.addEventListener('abort', onAbort, { once: true });
+            // Clean up listener when child exits
+            child.on('exit', () => {
+              abortSignal.removeEventListener('abort', onAbort);
+            });
+          }
         }
       );
 
@@ -156,6 +207,28 @@ export class ShellExecTool extends BaseTool {
       );
     }
   }
+}
+
+/**
+ * Strip dangerous environment variables that could enable arbitrary code execution.
+ * Blocks PATH override, dynamic linker injection, and interpreter hooks.
+ */
+const BLOCKED_ENV_VARS = new Set([
+  'PATH', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'DYLD_INSERT_LIBRARIES',
+  'DYLD_LIBRARY_PATH', 'NODE_OPTIONS', 'PYTHONPATH', 'PYTHONSTARTUP',
+  'PERL5OPT', 'PERL5LIB', 'RUBYOPT', 'RUBYLIB',
+  'SHELL', 'BASH_ENV', 'ENV', 'CDPATH',
+  'IFS', 'SHELLOPTS', 'BASHOPTS',
+]);
+
+function sanitizeEnv(env: Record<string, string>): Record<string, string> {
+  const safe: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (!BLOCKED_ENV_VARS.has(key.toUpperCase())) {
+      safe[key] = value;
+    }
+  }
+  return safe;
 }
 
 function truncateStr(s: string, max: number): string {

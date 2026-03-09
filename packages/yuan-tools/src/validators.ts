@@ -8,20 +8,75 @@
  * This module delegates to the SSOT and provides tool-specific wrappers.
  */
 
-import { resolve, relative, extname } from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { resolve, relative, extname, sep, dirname } from 'node:path';
+import { open } from 'node:fs/promises';
+import { realpathSync, lstatSync, existsSync } from 'node:fs';
 import {
   validateCommand as coreValidateCommand,
   isSensitiveFile as securityIsSensitiveFile,
   SHELL_META_PATTERN,
 } from '@yuan/core';
 
+// ─── Symlink-Aware Path Resolution ──────────────────────────────────
+
+/**
+ * Resolve a path and verify that it (and its symlink target) stays within the
+ * allowed project directory. Defends against symlink-based path traversal.
+ *
+ * @returns `{ valid, resolved, reason? }` — `resolved` is the real path if valid.
+ */
+export function resolveAndValidatePath(
+  filePath: string,
+  projectRoot: string,
+): { valid: boolean; resolved: string; reason?: string } {
+  const resolved = resolve(projectRoot, filePath);
+  const normalizedRoot = resolve(projectRoot);
+
+  // Check the resolved string first
+  if (!resolved.startsWith(normalizedRoot + sep) && resolved !== normalizedRoot) {
+    return { valid: false, resolved, reason: 'path escapes project directory' };
+  }
+
+  // If file exists, resolve symlinks and check again
+  if (existsSync(resolved)) {
+    try {
+      const real = realpathSync(resolved);
+      if (!real.startsWith(normalizedRoot + sep) && real !== normalizedRoot) {
+        return { valid: false, resolved: real, reason: 'symlink target escapes project directory' };
+      }
+      return { valid: true, resolved: real };
+    } catch {
+      return { valid: false, resolved, reason: 'cannot resolve symlink' };
+    }
+  }
+
+  // File doesn't exist yet — check parent directories for symlinks
+  let current = dirname(resolved);
+  while (current !== normalizedRoot && current.startsWith(normalizedRoot)) {
+    if (existsSync(current)) {
+      try {
+        const realParent = realpathSync(current);
+        if (!realParent.startsWith(normalizedRoot + sep) && realParent !== normalizedRoot) {
+          return { valid: false, resolved, reason: 'parent directory is a symlink escaping project' };
+        }
+      } catch {
+        // Can't resolve — safer to reject
+        return { valid: false, resolved, reason: 'cannot resolve parent symlink' };
+      }
+      break; // Found existing parent, it's safe
+    }
+    current = dirname(current);
+  }
+
+  return { valid: true, resolved };
+}
+
 // ─── Path Traversal Defence ─────────────────────────────────────────
 
 /**
  * Resolve and validate a path to ensure it stays within workDir.
  * Returns the resolved absolute path.
- * Throws on path traversal attempts.
+ * Throws on path traversal attempts (including symlink-based).
  */
 export function validatePath(inputPath: string, workDir: string): string {
   // Reject null bytes
@@ -39,7 +94,15 @@ export function validatePath(inputPath: string, workDir: string): string {
     );
   }
 
-  return resolved;
+  // Symlink defence: verify the real path stays within workDir
+  const symlinkCheck = resolveAndValidatePath(inputPath, workDir);
+  if (!symlinkCheck.valid) {
+    throw new Error(
+      `Symlink traversal blocked: "${inputPath}" — ${symlinkCheck.reason}`
+    );
+  }
+
+  return symlinkCheck.resolved;
 }
 
 // ─── Shell Metacharacter Defence ────────────────────────────────────
@@ -115,14 +178,20 @@ export async function isBinaryFile(filePath: string): Promise<boolean> {
   if (TEXT_EXTENSIONS.has(ext)) return false;
   if (IMAGE_EXTENSIONS.has(ext)) return true;
 
-  // Sniff first 8KB for null bytes
+  // Sniff first 8KB for null bytes (avoid reading entire file)
   try {
-    const buf = await readFile(filePath);
-    const sample = buf.subarray(0, 8192);
-    for (let i = 0; i < sample.length; i++) {
-      if (sample[i] === 0) return true;
+    const fh = await open(filePath, 'r');
+    try {
+      const buf = Buffer.alloc(8192);
+      const { bytesRead } = await fh.read(buf, 0, 8192, 0);
+      const sample = buf.subarray(0, bytesRead);
+      for (let i = 0; i < sample.length; i++) {
+        if (sample[i] === 0) return true;
+      }
+      return false;
+    } finally {
+      await fh.close();
     }
-    return false;
   } catch {
     return false;
   }

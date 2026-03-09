@@ -182,7 +182,9 @@ export class Governor extends EventEmitter {
   private checkDangerousCommand(args: Record<string, unknown>): void {
     const command = String(args.command ?? args.cmd ?? "");
     const executable = String(args.executable ?? "");
-    const fullCmd = `${executable} ${command}`.trim();
+    // Include args array in the full command string for pattern matching
+    const argsArr = Array.isArray(args.args) ? (args.args as string[]).join(" ") : "";
+    const fullCmd = `${executable} ${argsArr} ${command}`.trim();
 
     for (const pattern of DANGEROUS_PATTERNS) {
       if (pattern.test(fullCmd)) {

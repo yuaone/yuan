@@ -39,6 +39,8 @@ import {
   type AutoFixConfig,
   type ValidationResult,
 } from "./auto-fix.js";
+import { InterruptManager } from "./interrupt-manager.js";
+import type { InterruptSignal } from "./types.js";
 
 /** AgentLoop 설정 */
 export interface AgentLoopOptions {
@@ -56,6 +58,8 @@ export interface AgentLoopOptions {
   approvalHandler?: ApprovalHandler;
   /** 자동 수정 루프 설정 */
   autoFixConfig?: Partial<AutoFixConfig>;
+  /** 인터럽트 매니저 (외부에서 주입, 미지정 시 내부 생성) */
+  interruptManager?: InterruptManager;
 }
 
 /**
@@ -93,6 +97,7 @@ export class AgentLoop extends EventEmitter {
   private readonly config: AgentConfig;
   private readonly approvalManager: ApprovalManager;
   private readonly autoFixLoop: AutoFixLoop;
+  private readonly interruptManager: InterruptManager;
   private aborted = false;
   private tokenUsage: TokenUsage = {
     input: 0,
@@ -132,6 +137,10 @@ export class AgentLoop extends EventEmitter {
     // AutoFixLoop 생성
     this.autoFixLoop = new AutoFixLoop(options.autoFixConfig);
 
+    // InterruptManager 설정 (외부 주입 또는 내부 생성)
+    this.interruptManager = options.interruptManager ?? new InterruptManager();
+    this.setupInterruptListeners();
+
     // 시스템 프롬프트 추가
     this.contextManager.addMessage({
       role: "system",
@@ -170,6 +179,34 @@ export class AgentLoop extends EventEmitter {
   }
 
   /**
+   * 에이전트에 인터럽트 시그널을 전달한다.
+   * InterruptManager로 위임하며, 관련 이벤트를 발행한다.
+   *
+   * @param signal - 인터럽트 시그널
+   */
+  interrupt(signal: InterruptSignal): void {
+    this.interruptManager.interrupt(signal);
+
+    // Emit as agent:error for external listeners (backward-compatible)
+    this.emitEvent({
+      kind: "agent:error",
+      message: `Interrupt received: ${signal.type}${signal.feedback ? ` — ${signal.feedback}` : ""}`,
+      retryable: signal.type === "soft",
+    });
+
+    // Also emit raw interrupt event on the EventEmitter for specialized listeners
+    this.emit("interrupt", signal);
+  }
+
+  /**
+   * InterruptManager 인스턴스를 반환한다.
+   * 외부에서 직접 인터럽트를 전달하거나 이벤트를 구독할 때 사용.
+   */
+  getInterruptManager(): InterruptManager {
+    return this.interruptManager;
+  }
+
+  /**
    * 현재 토큰 사용량을 반환.
    */
   getTokenUsage(): Readonly<TokenUsage> {
@@ -205,6 +242,13 @@ export class AgentLoop extends EventEmitter {
     let iteration = 0;
 
     while (!this.aborted) {
+      // Interrupt: pause 상태이면 resume될 때까지 대기
+      if (this.interruptManager.isPaused()) {
+        await this.waitForResume();
+        // hard interrupt로 paused된 경우 aborted일 수 있음
+        if (this.aborted) break;
+      }
+
       // Governor: iteration 검증
       try {
         this.governor.checkIteration();
@@ -257,23 +301,49 @@ export class AgentLoop extends EventEmitter {
 
       // 3. 응답 처리
       if (response.toolCalls.length === 0) {
-        // 도구 호출 없음 → 작업 완료
-        if (response.content) {
+        // 도구 호출 없음 — but the LLM might be asking a question or
+        // expressing inability rather than signaling completion.
+        // Check for question/uncertainty patterns before assuming GOAL_ACHIEVED.
+        // NOTE: There is no NEEDS_INPUT termination reason in AgentTermination.
+        // If the LLM is uncertain, we continue the loop so it can self-correct
+        // or the iteration limit will eventually stop it.
+        const content = response.content ?? "";
+        const looksLikeQuestion =
+          content.includes("?") ||
+          /\b(cannot|can't|need|unclear|please|could you)\b/i.test(content);
+
+        if (looksLikeQuestion) {
+          // LLM seems uncertain or asking for input — add as assistant message
+          // and continue the loop rather than declaring success.
+          if (content) {
+            this.contextManager.addMessage({
+              role: "assistant",
+              content,
+            });
+          }
+          this.emitEvent({
+            kind: "agent:thinking",
+            content: `LLM responded without tool calls (possible question/uncertainty). Continuing loop.`,
+          });
+          continue;
+        }
+
+        if (content) {
           this.contextManager.addMessage({
             role: "assistant",
-            content: response.content,
+            content,
           });
         }
 
         this.emitEvent({
           kind: "agent:completed",
-          summary: response.content ?? "Task completed.",
+          summary: content || "Task completed.",
           filesChanged: [],
         });
 
         return {
           reason: "GOAL_ACHIEVED",
-          summary: response.content ?? "Task completed.",
+          summary: content || "Task completed.",
         };
       }
 
@@ -436,10 +506,14 @@ export class AgentLoop extends EventEmitter {
         // 승인됨 → 계속 실행
       }
 
-      // 도구 실행
+      // 도구 실행 — AbortController를 InterruptManager에 등록
       const startTime = Date.now();
+      const toolAbort = new AbortController();
+      this.interruptManager.registerToolAbort(toolAbort);
+
       try {
-        const result = await this.toolExecutor.execute(toolCall);
+        const result = await this.toolExecutor.execute(toolCall, toolAbort.signal);
+        this.interruptManager.clearToolAbort();
         results.push(result);
 
         this.emitEvent({
@@ -471,7 +545,30 @@ export class AgentLoop extends EventEmitter {
         // AutoFixLoop: 결과 검증
         await this.validateAndFeedback(toolCall.name, result);
       } catch (err) {
+        this.interruptManager.clearToolAbort();
         const durationMs = Date.now() - startTime;
+
+        // AbortError인 경우 (인터럽트로 취소됨)
+        if (toolAbort.signal.aborted) {
+          results.push({
+            tool_call_id: toolCall.id,
+            name: toolCall.name,
+            output: `[INTERRUPTED] Tool execution was cancelled by user interrupt.`,
+            success: false,
+            durationMs,
+          });
+
+          this.emitEvent({
+            kind: "agent:error",
+            message: `Tool ${toolCall.name} cancelled by interrupt`,
+            retryable: false,
+          });
+
+          // soft interrupt: 남은 tool calls 건너뛰고 루프 계속
+          // hard interrupt: aborted=true로 루프 종료됨
+          break;
+        }
+
         const errorMessage =
           err instanceof Error ? err.message : String(err);
 
@@ -625,6 +722,57 @@ export class AgentLoop extends EventEmitter {
       }
     }
     return args;
+  }
+
+  // ─── Interrupt Helpers ───
+
+  /**
+   * InterruptManager 이벤트를 AgentLoop에 연결한다.
+   * - soft interrupt: 피드백을 user 메시지로 주입
+   * - hard interrupt: 루프 즉시 중단
+   */
+  private setupInterruptListeners(): void {
+    // soft interrupt: 피드백을 대화 히스토리에 주입
+    this.interruptManager.on("interrupt:feedback", (feedback: string) => {
+      this.contextManager.addMessage({
+        role: "user",
+        content: feedback,
+      });
+    });
+
+    // hard interrupt: 루프 중단
+    this.interruptManager.on("interrupt:hard", () => {
+      this.aborted = true;
+    });
+  }
+
+  /**
+   * pause 상태일 때 resume 시그널을 대기한다.
+   * resume 또는 hard interrupt가 올 때까지 블로킹.
+   */
+  private waitForResume(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      // 이미 resume 상태이면 즉시 반환
+      if (!this.interruptManager.isPaused()) {
+        resolve();
+        return;
+      }
+
+      const onResume = () => {
+        this.interruptManager.removeListener("interrupt:resume", onResume);
+        this.interruptManager.removeListener("interrupt:hard", onHard);
+        resolve();
+      };
+
+      const onHard = () => {
+        this.interruptManager.removeListener("interrupt:resume", onResume);
+        this.interruptManager.removeListener("interrupt:hard", onHard);
+        resolve();
+      };
+
+      this.interruptManager.on("interrupt:resume", onResume);
+      this.interruptManager.on("interrupt:hard", onHard);
+    });
   }
 
   // ─── Helpers ───

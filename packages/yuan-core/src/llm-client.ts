@@ -47,7 +47,7 @@ export interface LLMStreamChunk {
 export class BYOKClient {
   private readonly config: BYOKConfig;
   private readonly model: string;
-  private readonly openaiClient: OpenAI | null;
+  private openaiClient: OpenAI | null;
 
   constructor(config: BYOKConfig) {
     this.config = config;
@@ -57,10 +57,17 @@ export class BYOKClient {
     if (config.provider === "anthropic") {
       this.openaiClient = null;
     } else {
+      const headers = this.getDefaultHeaders(config.provider);
+      // YUA uses x-api-key header, not Bearer token.
+      // Override Authorization to prevent OpenAI SDK from sending Bearer token
+      // which would trigger YUA's Firebase auth path instead of API key auth.
+      if (config.provider === "yua") {
+        headers["Authorization"] = "";
+      }
       this.openaiClient = new OpenAI({
         apiKey: config.apiKey,
         baseURL: config.baseUrl ?? this.getBaseUrl(config.provider),
-        defaultHeaders: this.getDefaultHeaders(config.provider),
+        defaultHeaders: headers,
       });
     }
   }
@@ -542,6 +549,14 @@ export class BYOKClient {
     };
   }
 
+  /**
+   * 리소스 정리. 내부 클라이언트 참조를 해제한다.
+   */
+  destroy(): void {
+    // Clear the OpenAI client reference to allow GC
+    this.openaiClient = null;
+  }
+
   // ─── Helpers ───
 
   private getBaseUrl(provider: LLMProvider): string {
@@ -554,6 +569,11 @@ export class BYOKClient {
     if (provider === "anthropic") {
       return {
         "anthropic-version": "2023-06-01",
+      };
+    }
+    if (provider === "yua") {
+      return {
+        "x-api-key": this.config.apiKey,
       };
     }
     return {};

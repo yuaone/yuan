@@ -4,7 +4,9 @@
   "description": "YUAN Coding Agent MCP Server",
   "license": "AGPL-3.0",
   "type": "module",
-  "bin": { "yuan-mcp": "dist/server.js" },
+  "bin": {
+    "yuan-mcp": "dist/server.js"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
@@ -14,9 +16,9 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "@yuan/core": "workspace:*",
-    "@yuan/tools": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.12.1"
+    "@yuan/tools": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

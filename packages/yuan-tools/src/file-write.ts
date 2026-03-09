@@ -7,7 +7,8 @@
  * - Detects and warns about sensitive files (.env, credentials, etc.)
  */
 
-import { readFile, writeFile, mkdir, stat, copyFile } from 'node:fs/promises';
+import { readFile, mkdir, stat, copyFile, open as fsOpen } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import { dirname } from 'node:path';
 import type { ParameterDef, RiskLevel, ToolResult } from './types.js';
 import { BaseTool } from './base-tool.js';
@@ -68,6 +69,13 @@ export class FileWriteTool extends BaseTool {
       );
     }
 
+    // Write size limit (10MB)
+    const contentStr = String(content);
+    const MAX_WRITE_SIZE = 10 * 1024 * 1024;
+    if (Buffer.byteLength(contentStr, 'utf-8') > MAX_WRITE_SIZE) {
+      return this.fail(toolCallId, `Content exceeds maximum write size (10MB)`);
+    }
+
     // Check if file already exists
     let existed = false;
     try {
@@ -99,10 +107,18 @@ export class FileWriteTool extends BaseTool {
       }
     }
 
-    // Write file
+    // Write file using O_NOFOLLOW to atomically prevent symlink TOCTOU attacks.
+    // This eliminates the race window between symlink check and write.
     try {
-      const contentStr = String(content);
-      await writeFile(resolvedPath, contentStr, 'utf-8');
+      const flags = existed
+        ? fsConstants.O_WRONLY | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW
+        : fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW;
+      const fh = await fsOpen(resolvedPath, flags, 0o644);
+      try {
+        await fh.writeFile(contentStr, 'utf-8');
+      } finally {
+        await fh.close();
+      }
       const bytesWritten = Buffer.byteLength(contentStr, 'utf-8');
 
       let output = existed
@@ -126,7 +142,10 @@ export class FileWriteTool extends BaseTool {
         created: !existed,
       });
     } catch (err) {
-      return this.fail(toolCallId, `Failed to write file: ${(err as Error).message}`);
+      const msg = (err as NodeJS.ErrnoException).code === 'ELOOP'
+        ? `Refusing to write through symlink: ${path}`
+        : `Failed to write file: ${(err as Error).message}`;
+      return this.fail(toolCallId, msg);
     }
   }
 }

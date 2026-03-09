@@ -11,7 +11,7 @@ import * as os from "node:os";
 import * as readline from "node:readline";
 
 /** Supported LLM providers */
-export type Provider = "openai" | "anthropic" | "google";
+export type Provider = "openai" | "anthropic" | "google" | "yua" | "deepseek";
 
 /** YUAN CLI configuration (stored in ~/.yuan/config.json) */
 export interface YuanConfig {
@@ -28,7 +28,9 @@ const CONFIG_PATH = path.join(YUAN_DIR, "config.json");
 const DEFAULT_MODELS: Record<Provider, string> = {
   openai: "gpt-4o",
   anthropic: "claude-sonnet-4-20250514",
-  google: "gemini-2.0-flash",
+  google: "gemini-2.5-flash",
+  yua: "yua-pro",
+  deepseek: "deepseek-chat",
 };
 
 /** Default configuration */
@@ -69,9 +71,9 @@ export class ConfigManager {
   /** Save current config to disk */
   private save(): void {
     if (!fs.existsSync(YUAN_DIR)) {
-      fs.mkdirSync(YUAN_DIR, { recursive: true });
+      fs.mkdirSync(YUAN_DIR, { recursive: true, mode: 0o700 });
     }
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(this.config, null, 2), "utf-8");
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(this.config, null, 2), { encoding: "utf-8", mode: 0o600 });
   }
 
   /** Get current config */
@@ -154,11 +156,15 @@ export class ConfigManager {
     console.log("    1) OpenAI");
     console.log("    2) Anthropic");
     console.log("    3) Google (Gemini)");
-    const providerChoice = await ask("\n  Provider [1/2/3] (default: 2): ");
+    console.log("    4) YUA");
+    console.log("    5) DeepSeek");
+    const providerChoice = await ask("\n  Provider [1-5] (default: 2): ");
     const providerMap: Record<string, Provider> = {
       "1": "openai",
       "2": "anthropic",
       "3": "google",
+      "4": "yua",
+      "5": "deepseek",
     };
     const provider = providerMap[providerChoice] ?? "anthropic";
     this.config.provider = provider;

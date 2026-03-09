@@ -74,6 +74,12 @@ export class SessionManager {
       tokenUsage: { input: 0, output: 0 },
     };
 
+    // Ensure session directory exists SYNCHRONOUSLY before any async writes.
+    // This prevents ENOENT race conditions when fire-and-forget persistence.save()
+    // hasn't created the directory yet and a subsequent save() call runs concurrently.
+    const sessionDir = path.join(SESSIONS_DIR, session.id);
+    fs.mkdirSync(sessionDir, { recursive: true });
+
     // Save to disk immediately
     this.save(session);
     return session;
@@ -93,8 +99,26 @@ export class SessionManager {
       changedFiles: [],
     };
 
-    // Fire-and-forget async save (sync wrapper for CLI compatibility)
-    void this.persistence.save(session.id, persistentData);
+    // Ensure session directory exists SYNCHRONOUSLY before any async writes.
+    // This prevents ENOENT when multiple fire-and-forget saves race.
+    const sessionDir = path.join(SESSIONS_DIR, session.id);
+    try {
+      fs.mkdirSync(sessionDir, { recursive: true });
+    } catch {
+      // Best-effort — persistence.save() will also try ensureDir
+    }
+
+    // Write last-session pointer
+    try {
+      fs.writeFileSync(LAST_SESSION_FILE, session.id, "utf-8");
+    } catch {
+      // Best-effort
+    }
+
+    // Fire-and-forget async save with error logging
+    this.persistence.save(session.id, persistentData).catch((err) => {
+      process.stderr.write(`Session save failed: ${err}\n`);
+    });
   }
 
   /** Load a session by ID */

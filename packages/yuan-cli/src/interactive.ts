@@ -6,8 +6,9 @@
  * Wired to @yuan/core AgentLoop + @yuan/tools for real LLM-powered execution.
  */
 
+import * as fs from "node:fs";
 import * as readline from "node:readline";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { TerminalRenderer, colors } from "./renderer.js";
 import { DiffRenderer } from "./diff-renderer.js";
 import { SessionManager, type SessionData } from "./session.js";
@@ -230,7 +231,7 @@ export class InteractiveSession {
     const lastFile = this.changedFiles[this.changedFiles.length - 1];
     try {
       // Try git checkout first (most reliable)
-      execSync(`git checkout -- "${lastFile}"`, {
+      execFileSync("git", ["checkout", "--", lastFile], {
         cwd: this.session.workDir,
         stdio: "pipe",
       });
@@ -240,10 +241,7 @@ export class InteractiveSession {
       // If git checkout fails, try .yuan-backup
       try {
         const backupPath = `${lastFile}.yuan-backup`;
-        execSync(`mv "${backupPath}" "${lastFile}"`, {
-          cwd: this.session.workDir,
-          stdio: "pipe",
-        });
+        fs.renameSync(backupPath, lastFile);
         this.changedFiles.pop();
         this.renderer.success(`Restored from backup: ${lastFile}`);
       } catch {
@@ -261,7 +259,7 @@ export class InteractiveSession {
   private handleDiff(): void {
     try {
       // Show git diff of working directory changes
-      const diffOutput = execSync("git diff", {
+      const diffOutput = execFileSync("git", ["diff"], {
         cwd: this.session.workDir,
         stdio: "pipe",
         encoding: "utf-8",
@@ -270,7 +268,7 @@ export class InteractiveSession {
 
       if (!diffOutput.trim()) {
         // Also check staged changes
-        const stagedOutput = execSync("git diff --cached", {
+        const stagedOutput = execFileSync("git", ["diff", "--cached"], {
           cwd: this.session.workDir,
           stdio: "pipe",
           encoding: "utf-8",
@@ -409,18 +407,19 @@ export class InteractiveSession {
           this.renderer.error(event.message);
           break;
 
-        case "agent:completed":
+        case "agent:completed": {
+          const wasStreaming = this.isStreaming;
           if (this.isStreaming) {
             this.renderer.endStream();
             this.isStreaming = false;
           } else {
             spinner.stop();
           }
-          // If we already streamed the content, don't duplicate it
-          if (!this.isStreaming) {
+          if (!wasStreaming) {
             console.log();
           }
           break;
+        }
 
         case "agent:approval_needed":
           if (this.isStreaming) {

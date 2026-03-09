@@ -9,6 +9,7 @@
 import { execFile } from 'node:child_process';
 import type { ParameterDef, RiskLevel, ToolResult } from './types.js';
 import { BaseTool } from './base-tool.js';
+import { validatePath, isSensitiveFile } from './validators.js';
 
 const GIT_TIMEOUT = 15_000; // 15s
 
@@ -80,7 +81,7 @@ export class GitOpsTool extends BaseTool {
         case 'stash':
           return await this.gitStash(toolCallId, workDir, args.message as string | undefined);
         case 'restore':
-          return await this.gitRestore(toolCallId, workDir);
+          return await this.gitRestore(toolCallId, workDir, args.files as string[] | undefined);
         default:
           return this.fail(toolCallId, `Unknown operation: ${operation}`);
       }
@@ -129,12 +130,38 @@ export class GitOpsTool extends BaseTool {
   private async gitAdd(toolCallId: string, cwd: string, files?: string[]): Promise<ToolResult> {
     const gitArgs = ['add'];
     if (files && files.length > 0) {
+      // Validate each file path
+      for (const f of files) {
+        try {
+          validatePath(f, cwd);
+        } catch (err) {
+          return this.fail(toolCallId, (err as Error).message);
+        }
+      }
       gitArgs.push('--', ...files);
     } else {
       gitArgs.push('-A');
     }
 
     await runGit(gitArgs, cwd);
+
+    // Warn about sensitive files when using -A
+    if (!files || files.length === 0) {
+      const statusResult = await runGit(['status', '--porcelain', '-u'], cwd);
+      const stagedFiles = statusResult.stdout.split('\n').filter(Boolean);
+      const sensitiveFiles = stagedFiles
+        .map((line) => line.slice(3).trim())
+        .filter((f) => isSensitiveFile(f));
+      if (sensitiveFiles.length > 0) {
+        return this.ok(
+          toolCallId,
+          `Files staged.\n${statusResult.stdout}\n\n⚠️ WARNING: Sensitive files staged: ${sensitiveFiles.join(', ')}. Consider unstaging them before commit.`,
+          { operation: 'add', sensitiveFiles }
+        );
+      }
+      return this.ok(toolCallId, `Files staged.\n${statusResult.stdout}`, { operation: 'add' });
+    }
+
     const statusResult = await runGit(['status', '--porcelain', '-u'], cwd);
     return this.ok(toolCallId, `Files staged.\n${statusResult.stdout}`, { operation: 'add' });
   }
@@ -149,8 +176,15 @@ export class GitOpsTool extends BaseTool {
       return this.fail(toolCallId, 'Missing required parameter: message (for commit operation)');
     }
 
-    // If specific files provided, add them first
+    // If specific files provided, validate paths and add them first
     if (files && files.length > 0) {
+      for (const f of files) {
+        try {
+          validatePath(f, cwd);
+        } catch (err) {
+          return this.fail(toolCallId, (err as Error).message);
+        }
+      }
       await runGit(['add', '--', ...files], cwd);
     }
 
@@ -182,9 +216,23 @@ export class GitOpsTool extends BaseTool {
     return this.ok(toolCallId, result.stdout || 'Changes stashed.', { operation: 'stash' });
   }
 
-  private async gitRestore(toolCallId: string, cwd: string): Promise<ToolResult> {
-    const result = await runGit(['stash', 'pop'], cwd);
-    return this.ok(toolCallId, result.stdout || 'Stash applied and dropped.', { operation: 'restore' });
+  private async gitRestore(toolCallId: string, cwd: string, files?: string[]): Promise<ToolResult> {
+    const gitArgs = ['restore'];
+    if (files && files.length > 0) {
+      // Validate each file path to prevent argument injection
+      for (const f of files) {
+        try {
+          validatePath(f, cwd);
+        } catch (err) {
+          return this.fail(toolCallId, (err as Error).message);
+        }
+      }
+      gitArgs.push('--', ...files);
+    } else {
+      gitArgs.push('.');
+    }
+    const result = await runGit(gitArgs, cwd);
+    return this.ok(toolCallId, result.stdout || 'Files restored.', { operation: 'restore' });
   }
 }
 
