@@ -192,7 +192,7 @@ export interface SessionState {
 // ─── Plan Tiers ───
 
 /** 플랜 티어 */
-export type PlanTier = "FREE" | "PRO" | "BUSINESS" | "ENTERPRISE";
+export type PlanTier = "LOCAL" | "FREE" | "PRO" | "BUSINESS" | "ENTERPRISE";
 
 /** 플랜별 제한값 */
 export interface PlanLimits {

@@ -16,6 +16,14 @@ import type { PlanLimits, PlanTier, LLMProvider } from "./types.js";
  * 플랜별 리소스 제한 (SSOT — 설계 문서 11.2 기준)
  */
 export const PLAN_LIMITS: Record<PlanTier, PlanLimits> = {
+  LOCAL: {
+    dailyExecutions: Infinity,
+    maxIterations: 200,
+    maxParallelAgents: Infinity,
+    tokensPerRequest: Infinity,
+    sessionTtlMs: 24 * 60 * 60 * 1000, // 24시간
+    concurrentSessions: Infinity,
+  },
   FREE: {
     dailyExecutions: 3,
     maxIterations: 5,

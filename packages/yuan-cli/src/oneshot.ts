@@ -96,7 +96,7 @@ export async function runOneshot(
   const loop = new AgentLoop({
     config: agentConfig,
     toolExecutor,
-    governorConfig: { planTier: "FREE" },
+    governorConfig: { planTier: "LOCAL" },
   });
 
   // Handle SIGINT gracefully — restore cursor and exit

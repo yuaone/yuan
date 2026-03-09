@@ -534,7 +534,7 @@ export class InteractiveSession {
     const loop = new AgentLoop({
       config: agentConfig,
       toolExecutor,
-      governorConfig: { planTier: "FREE" },
+      governorConfig: { planTier: "LOCAL" },
       approvalHandler: (request) => this.promptApproval(request),
       autoFixConfig: { maxRetries: 3, autoLint: true, autoBuild: true, autoTest: false },
     });
