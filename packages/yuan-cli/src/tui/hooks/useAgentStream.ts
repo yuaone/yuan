@@ -3,7 +3,7 @@
  * Converts agent events into TUIMessage updates, tracks streaming state.
  */
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import type { TUIMessage, TUIToolCall, AgentStreamState } from "../types.js";
 
 export interface UseAgentStreamReturn {
@@ -37,6 +37,40 @@ export function useAgentStream(): UseAgentStreamReturn {
 
   const currentMsgIdRef = useRef<string | null>(null);
   const tokenWindowRef = useRef<{ time: number; tokens: number }[]>([]);
+
+  const updateCurrentMessage = useCallback(
+    (updater: (msg: TUIMessage) => TUIMessage) => {
+      const id = currentMsgIdRef.current;
+      if (!id) return;
+      setMessages((prev) =>
+        prev.map((m) => (m.id === id ? updater(m) : m)),
+      );
+    },
+    [],
+  );
+
+  // 스트리밍 텍스트 배치 버퍼 — 1토큰마다 re-render 하지 않고 모아서 flush
+  const pendingTextRef = useRef("");
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const FLUSH_INTERVAL = 120; // 120ms 디바운스 — 문단 단위로 떨어지는 느낌
+
+  const flushPendingText = useCallback(() => {
+    if (flushTimerRef.current) { clearTimeout(flushTimerRef.current); flushTimerRef.current = null; }
+    const text = pendingTextRef.current;
+    if (text.length === 0) return;
+    pendingTextRef.current = "";
+    updateCurrentMessage((msg) => ({
+      ...msg,
+      content: msg.content + text,
+    }));
+  }, [updateCurrentMessage]);
+
+  // 컴포넌트 unmount 시 타이머 정리
+  useEffect(() => {
+    return () => {
+      if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
+    };
+  }, []);
 
   const addUserMessage = useCallback((content: string) => {
     const msg: TUIMessage = {
@@ -74,17 +108,6 @@ export function useAgentStream(): UseAgentStreamReturn {
     setMessages((prev) => [...prev, msg]);
   }, []);
 
-  const updateCurrentMessage = useCallback(
-    (updater: (msg: TUIMessage) => TUIMessage) => {
-      const id = currentMsgIdRef.current;
-      if (!id) return;
-      setMessages((prev) =>
-        prev.map((m) => (m.id === id ? updater(m) : m)),
-      );
-    },
-    [],
-  );
-
   const handleEvent = useCallback(
     (event: AgentEventLike) => {
       switch (event.kind) {
@@ -96,10 +119,10 @@ export function useAgentStream(): UseAgentStreamReturn {
           const text = event.text as string;
           setStreamBuffer((prev) => prev + text);
           setStatus("streaming");
-          updateCurrentMessage((msg) => ({
-            ...msg,
-            content: msg.content + text,
-          }));
+          // 배치 버퍼에 축적 → 디바운스로 한번에 flush (문단 단위 렌더링)
+          pendingTextRef.current += text;
+          if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
+          flushTimerRef.current = setTimeout(flushPendingText, FLUSH_INTERVAL);
           break;
         }
 
@@ -159,6 +182,8 @@ export function useAgentStream(): UseAgentStreamReturn {
         }
 
         case "agent:completed": {
+          // 남은 버퍼 텍스트 즉시 flush
+          flushPendingText();
           const summary = event.summary as string;
           updateCurrentMessage((msg) => ({
             ...msg,
@@ -197,10 +222,12 @@ export function useAgentStream(): UseAgentStreamReturn {
           break;
       }
     },
-    [updateCurrentMessage],
+    [updateCurrentMessage, flushPendingText],
   );
 
   const interrupt = useCallback(() => {
+    // 남은 버퍼 flush 후 중단
+    flushPendingText();
     updateCurrentMessage((msg) => ({
       ...msg,
       isStreaming: false,
@@ -217,9 +244,11 @@ export function useAgentStream(): UseAgentStreamReturn {
       timestamp: Date.now(),
     };
     setMessages((prev) => [...prev, sysMsg]);
-  }, [updateCurrentMessage]);
+  }, [updateCurrentMessage, flushPendingText]);
 
   const clearMessages = useCallback(() => {
+    if (flushTimerRef.current) { clearTimeout(flushTimerRef.current); flushTimerRef.current = null; }
+    pendingTextRef.current = "";
     setMessages([]);
     setStreamBuffer("");
     setStatus("idle");
