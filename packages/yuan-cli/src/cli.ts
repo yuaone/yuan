@@ -31,9 +31,10 @@ program
   .description("YUAN — Autonomous Coding Agent")
   .version("0.1.0");
 
-// ─── Default: Interactive mode ───
+// ─── Default: Interactive mode (TUI) ───
 program
-  .action(async () => {
+  .option("--classic", "Use classic readline REPL instead of full-screen TUI")
+  .action(async (options: { classic?: boolean }) => {
     const configManager = new ConfigManager();
     const sessionManager = new SessionManager();
 
@@ -44,12 +45,39 @@ program
       console.log();
     }
 
-    const session = new InteractiveSession(
-      renderer,
-      sessionManager,
-      configManager
-    );
-    await session.start();
+    // Use classic mode if requested or not a TTY
+    if (options.classic || !process.stdout.isTTY) {
+      const session = new InteractiveSession(
+        renderer,
+        sessionManager,
+        configManager
+      );
+      await session.start();
+      return;
+    }
+
+    // Full-screen TUI mode (default)
+    const { launchTUI } = await import("./tui/App.js");
+    const { AgentBridge } = await import("./tui/agent-bridge.js");
+    const config = configManager.get();
+
+    const bridge = new AgentBridge({
+      provider: config.provider || "openai",
+      apiKey: config.apiKey,
+      model: config.model,
+      baseUrl: config.baseUrl,
+      workDir: process.cwd(),
+    });
+
+    launchTUI({
+      version: "0.1.3",
+      model: configManager.getModel(),
+      provider: config.provider || "openai",
+      bridge,
+      onExit: () => {
+        process.exit(0);
+      },
+    });
   });
 
 // ─── yuan code <prompt> / yuan run <prompt> ───
