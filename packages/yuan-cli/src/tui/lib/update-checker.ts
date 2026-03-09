@@ -130,9 +130,21 @@ export async function checkForUpdate(currentVersion: string): Promise<UpdateInfo
   return { currentVersion, latestVersion: latest, hasUpdate };
 }
 
-/** Run auto-update via npm/pnpm */
+/** Run auto-update — tries pnpm first, then npm */
 export async function performUpdate(): Promise<boolean> {
   const { execSync } = await import("node:child_process");
+
+  // Try pnpm global add first (handles workspace:* correctly)
+  try {
+    execSync(`pnpm add -g ${PACKAGE_NAME}@latest`, {
+      stdio: "pipe",
+      timeout: 60000,
+    });
+    return true;
+  } catch {
+    // pnpm not available or failed — fall back to npm
+  }
+
   try {
     execSync(`npm install -g ${PACKAGE_NAME}@latest`, {
       stdio: "pipe",

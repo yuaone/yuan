@@ -74,6 +74,7 @@ async function runCmd(
   cwd: string,
   timeoutMs: number,
 ): Promise<string | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const result = await Promise.race([
       execFileAsync(cmd, args, {
@@ -81,13 +82,15 @@ async function runCmd(
         maxBuffer: 1024 * 1024, // 1 MB
         timeout: timeoutMs,
       }),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("timeout")), timeoutMs),
-      ),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("timeout")), timeoutMs);
+      }),
     ]);
     return result.stdout;
   } catch {
     return null;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 

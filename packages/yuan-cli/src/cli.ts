@@ -21,6 +21,10 @@ import { InteractiveSession } from "./interactive.js";
 import { SessionManager } from "./session.js";
 import { runOneshot } from "./oneshot.js";
 import { login, logout, getAuth } from "./auth.js";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const PKG_VERSION: string = (require("../package.json") as { version: string }).version;
 
 const renderer = new TerminalRenderer();
 
@@ -29,7 +33,7 @@ const program = new Command();
 program
   .name("yuan")
   .description("YUAN — Autonomous Coding Agent")
-  .version("0.1.0");
+  .version(PKG_VERSION);
 
 // ─── Default: Interactive mode (TUI) ───
 program
@@ -70,7 +74,7 @@ program
     });
 
     launchTUI({
-      version: "0.1.3",
+      version: PKG_VERSION,
       model: configManager.getModel(),
       provider: config.provider || "openai",
       bridge,

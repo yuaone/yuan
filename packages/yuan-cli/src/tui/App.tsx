@@ -205,7 +205,7 @@ function App({
         } else if (settings.autoUpdate === "prompt") {
           agentStream.addSystemMessage(
             `Update available: ${info.currentVersion} → ${info.latestVersion}\n` +
-            `  Run: npm i -g @yuaone/cli@latest\n` +
+            `  Run: pnpm add -g @yuaone/cli@latest\n` +
             `  Or: /settings to enable auto-update`,
           );
         }
