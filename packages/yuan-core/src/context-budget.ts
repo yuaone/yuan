@@ -36,7 +36,7 @@
  */
 
 import { EventEmitter } from "node:events";
-import type { Message } from "./types.js";
+import { type Message, contentToString } from "./types.js";
 
 // ─── Types ───
 
@@ -1169,14 +1169,15 @@ export class ContextBudgetManager extends EventEmitter {
         priority = "high";
       }
 
+      const contentStr = contentToString(msg.content);
       this.addItem(
         {
           category,
           priority,
-          content: msg.content ?? "",
+          content: contentStr,
           role: msg.role,
         },
-        msg.content ?? "",
+        contentStr,
       );
     }
   }

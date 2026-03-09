@@ -4,7 +4,7 @@
  * 메시지 히스토리 관리, 토큰 카운팅 (근사), 컨텍스트 압축.
  */
 
-import type { Message } from "./types.js";
+import { type Message, contentToString } from "./types.js";
 import { TOOL_RESULT_LIMITS, HISTORY_COMPACTION } from "./constants.js";
 import { ContextOverflowError } from "./errors.js";
 
@@ -62,6 +62,20 @@ export class ContextManager {
   }
 
   /**
+   * 시스템 메시지를 교체.
+   * init() 후 향상된 프롬프트로 갱신할 때 사용.
+   * @param content 새 시스템 프롬프트 내용
+   */
+  replaceSystemMessage(content: string): void {
+    const idx = this.messages.findIndex((m) => m.role === "system");
+    if (idx >= 0) {
+      this.messages[idx] = { role: "system", content };
+    } else {
+      this.messages.unshift({ role: "system", content });
+    }
+  }
+
+  /**
    * 현재 메시지 히스토리 반환.
    * 컨텍스트 윈도우 내에 맞도록 자동 압축.
    */
@@ -103,7 +117,21 @@ export class ContextManager {
       // 메시지 오버헤드 (~4 토큰)
       total += 4;
       if (msg.content) {
-        total += this.estimateStringTokens(msg.content);
+        if (typeof msg.content === "string") {
+          total += this.estimateStringTokens(msg.content);
+        } else if (Array.isArray(msg.content)) {
+          // 멀티모달 콘텐츠 블록
+          for (const block of msg.content) {
+            if (block.type === "text") {
+              total += this.estimateStringTokens(block.text);
+            } else if (block.type === "image") {
+              // 이미지는 대략 85 토큰 (low detail) ~ 1000+ (high detail)
+              total += 300;
+            } else if (block.type === "file") {
+              total += this.estimateStringTokens(block.content) + 10;
+            }
+          }
+        }
       }
       if (msg.tool_calls) {
         for (const tc of msg.tool_calls) {
@@ -208,7 +236,7 @@ export class ContextManager {
       if (msg.role === "tool" && msg.content) {
         result.push({
           ...msg,
-          content: this.truncateToolResult(msg.content),
+          content: this.truncateToolResult(contentToString(msg.content)),
         });
       } else {
         result.push(msg);

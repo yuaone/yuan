@@ -25,10 +25,31 @@ export interface BYOKConfig {
 /** 메시지 역할 */
 export type MessageRole = "system" | "user" | "assistant" | "tool";
 
+/** 멀티모달 콘텐츠 블록 */
+export type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mediaType: "image/png" | "image/jpeg" | "image/gif" | "image/webp" }
+  | { type: "file"; name: string; content: string; language?: string };
+
+/** ContentBlock[] | string | null → string 변환 유틸 */
+export function contentToString(content: string | ContentBlock[] | null | undefined): string {
+  if (!content) return "";
+  if (typeof content === "string") return content;
+  return content
+    .map((b) => {
+      if (b.type === "text") return b.text;
+      if (b.type === "file") return `[File: ${b.name}]\n${b.content}`;
+      if (b.type === "image") return "[Image]";
+      return "";
+    })
+    .join("\n");
+}
+
 /** 대화 메시지 */
 export interface Message {
   role: MessageRole;
-  content: string | null;
+  /** 텍스트 전용이면 string, 멀티모달이면 ContentBlock[] */
+  content: string | ContentBlock[] | null;
   /** 어시스턴트가 호출한 도구 목록 */
   tool_calls?: ToolCall[];
   /** 도구 실행 결과 (role=tool 일 때) */
@@ -152,7 +173,7 @@ export type AgentEvent =
   | { kind: "agent:tool_call"; tool: string; input: unknown }
   | { kind: "agent:tool_result"; tool: string; output: string; durationMs: number }
   | { kind: "agent:file_change"; path: string; diff: string }
-  | { kind: "agent:iteration"; index: number; tokensUsed: number }
+  | { kind: "agent:iteration"; index: number; tokensUsed: number; durationMs?: number }
   | { kind: "agent:error"; message: string; retryable: boolean }
   | { kind: "agent:approval_needed"; action: PendingAction }
   | { kind: "agent:completed"; summary: string; filesChanged: string[] }
