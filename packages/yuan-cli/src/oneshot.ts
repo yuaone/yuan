@@ -16,6 +16,7 @@ import {
   type BYOKConfig,
 } from "@yuan/core";
 import { createDefaultRegistry } from "@yuan/tools";
+import { CloudClient, type AgentEvent as CloudAgentEvent } from "./cloud-client.js";
 
 const ESC = "\x1b[";
 
@@ -51,6 +52,11 @@ export async function runOneshot(
   renderer.info(`Provider: ${config.provider} | Model: ${model}`);
   renderer.info(`Task: ${prompt}`);
   renderer.separator();
+
+  // Cloud mode — delegate to remote server
+  if (configManager.isCloudMode()) {
+    return runOneshotCloud(prompt, config, renderer, options);
+  }
 
   // Create a session for this one-shot
   const session = sessionManager.create(process.cwd(), config.provider, model);
@@ -208,5 +214,107 @@ export async function runOneshot(
     const errorMsg = err instanceof Error ? err.message : String(err);
     renderer.error(`Unexpected error: ${errorMsg}`);
     return 1;
+  }
+}
+
+/**
+ * Run a one-shot task via CloudClient (cloud mode).
+ */
+async function runOneshotCloud(
+  prompt: string,
+  config: ReturnType<ConfigManager["get"]>,
+  renderer: TerminalRenderer,
+  options: { model?: string },
+): Promise<number> {
+  const client = new CloudClient(config.serverUrl, config.apiKey);
+  const abortController = new AbortController();
+
+  const sigintHandler = (): void => {
+    abortController.abort();
+  };
+  process.on("SIGINT", sigintHandler);
+
+  const spinner = renderer.thinking();
+  let isStreaming = false;
+  let cloudSessionId: string | undefined;
+  let hasError = false;
+
+  try {
+    const { sessionId } = await client.startSession(prompt, {
+      workDir: process.cwd(),
+      model: options.model ?? config.model,
+    });
+    cloudSessionId = sessionId;
+
+    await client.streamEvents(sessionId, (event: CloudAgentEvent) => {
+      switch (event.kind) {
+        case "thinking":
+          if (!isStreaming) spinner.update(event.content);
+          break;
+
+        case "text_delta":
+          if (!isStreaming) {
+            spinner.stop();
+            isStreaming = true;
+            console.log();
+          }
+          renderer.streamToken(event.text);
+          break;
+
+        case "tool_call":
+          if (isStreaming) { renderer.endStream(); isStreaming = false; }
+          else spinner.stop();
+          renderer.toolCall(
+            event.tool,
+            typeof event.input === "string"
+              ? event.input.slice(0, 100)
+              : JSON.stringify(event.input, null, 0).slice(0, 100),
+          );
+          break;
+
+        case "tool_result":
+          renderer.toolResult(event.output);
+          break;
+
+        case "error":
+          if (isStreaming) { renderer.endStream(); isStreaming = false; }
+          else spinner.stop();
+          renderer.error(event.message);
+          hasError = true;
+          break;
+
+        case "done":
+          if (isStreaming) { renderer.endStream(); isStreaming = false; }
+          else spinner.stop();
+          break;
+
+        default:
+          break;
+      }
+    }, { signal: abortController.signal });
+
+    spinner.stop();
+    if (isStreaming) renderer.endStream();
+
+    if (!hasError) {
+      renderer.success("Task completed.");
+      return 0;
+    }
+    return 1;
+  } catch (err) {
+    spinner.stop();
+    if (isStreaming) renderer.endStream();
+
+    if (err instanceof DOMException && err.name === "AbortError") {
+      if (cloudSessionId) await client.stop(cloudSessionId).catch(() => {});
+      renderer.info("Interrupted.");
+      return 130;
+    }
+
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    renderer.error(`Cloud error: ${errorMsg}`);
+    return 1;
+  } finally {
+    process.removeListener("SIGINT", sigintHandler);
   }
 }

@@ -109,6 +109,30 @@ configCmd
     console.log();
   });
 
+configCmd
+  .command("set-mode")
+  .description("Set execution mode: local or cloud")
+  .argument("<mode>", "Mode: local or cloud")
+  .action((mode: string) => {
+    if (mode !== "local" && mode !== "cloud") {
+      renderer.error(`Invalid mode: ${mode}. Use: local or cloud`);
+      process.exit(1);
+    }
+    const configManager = new ConfigManager();
+    configManager.setMode(mode);
+    renderer.success(`Mode set to ${mode}`);
+  });
+
+configCmd
+  .command("set-server")
+  .description("Set cloud server URL")
+  .argument("<url>", "Server URL (e.g. https://api.yuaone.com)")
+  .action((url: string) => {
+    const configManager = new ConfigManager();
+    configManager.setServerUrl(url);
+    renderer.success(`Server URL set to ${url}`);
+  });
+
 // ─── yuan resume ───
 program
   .command("resume")

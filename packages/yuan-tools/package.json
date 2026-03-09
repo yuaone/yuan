@@ -6,6 +6,23 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": ["dist/", "README.md", "LICENSE"],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yuaone/yuan.git",
+    "directory": "packages/yuan-tools"
+  },
+  "homepage": "https://github.com/yuaone/yuan#readme",
+  "bugs": {
+    "url": "https://github.com/yuaone/yuan/issues"
+  },
+  "keywords": ["coding-agent", "ai", "tools", "file-operations", "shell"],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",

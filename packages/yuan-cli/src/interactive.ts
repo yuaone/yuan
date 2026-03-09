@@ -24,6 +24,7 @@ import {
   type ApprovalResponse,
 } from "@yuan/core";
 import { createDefaultRegistry } from "@yuan/tools";
+import { CloudClient, type AgentEvent as CloudAgentEvent } from "./cloud-client.js";
 
 const ESC = "\x1b[";
 
@@ -295,10 +296,199 @@ export class InteractiveSession {
   }
 
   /**
-   * Process a user message through the AgentLoop.
-   * Creates BYOKClient + ToolExecutor, runs AgentLoop.run(), and renders events.
+   * Process a user message — dispatches to local or cloud mode.
    */
   private async processMessage(message: string): Promise<void> {
+    if (this.configManager.isCloudMode()) {
+      return this.processMessageCloud(message);
+    }
+    return this.processMessageLocal(message);
+  }
+
+  /**
+   * Process a user message via CloudClient (cloud mode).
+   * Starts a remote session, streams SSE events, handles approvals.
+   */
+  private async processMessageCloud(message: string): Promise<void> {
+    this.sessionManager.addMessage(this.session, "user", message);
+
+    const config = this.configManager.get();
+    if (!config.apiKey) {
+      this.renderer.error("No API key configured. Run `yuan config` to set up.");
+      return;
+    }
+
+    const client = new CloudClient(config.serverUrl, config.apiKey);
+    const abortController = new AbortController();
+
+    // Handle SIGINT during cloud streaming
+    const sigintHandler = (): void => {
+      abortController.abort();
+    };
+    process.on("SIGINT", sigintHandler);
+
+    const spinner = this.renderer.thinking();
+    this.isStreaming = false;
+    let cloudSessionId: string | undefined;
+
+    try {
+      // Start remote session
+      const { sessionId } = await client.startSession(message, {
+        workDir: this.session.workDir,
+        model: config.model,
+      });
+      cloudSessionId = sessionId;
+
+      // Stream events
+      await client.streamEvents(sessionId, (event: CloudAgentEvent) => {
+        switch (event.kind) {
+          case "thinking":
+            if (!this.isStreaming) {
+              spinner.update(event.content);
+            }
+            break;
+
+          case "text_delta":
+            if (!this.isStreaming) {
+              spinner.stop();
+              this.isStreaming = true;
+              console.log();
+            }
+            this.renderer.streamToken(event.text);
+            break;
+
+          case "tool_call":
+            if (this.isStreaming) {
+              this.renderer.endStream();
+              this.isStreaming = false;
+            } else {
+              spinner.stop();
+            }
+            this.renderer.toolCall(
+              event.tool,
+              typeof event.input === "string"
+                ? event.input.slice(0, 100)
+                : JSON.stringify(event.input, null, 0).slice(0, 100),
+            );
+            break;
+
+          case "tool_result":
+            this.renderer.toolResult(event.output);
+            break;
+
+          case "approval_needed":
+            if (this.isStreaming) {
+              this.renderer.endStream();
+              this.isStreaming = false;
+            } else {
+              spinner.stop();
+            }
+            this.renderer.warn(
+              `Approval required: ${event.description} [${event.risk}]`,
+            );
+            // Prompt user and send approval
+            void this.promptCloudApproval(client, sessionId, event.actionId, event.tool).then(() => {
+              // Approval sent — stream will continue via SSE
+            });
+            break;
+
+          case "error":
+            if (this.isStreaming) {
+              this.renderer.endStream();
+              this.isStreaming = false;
+            } else {
+              spinner.stop();
+            }
+            this.renderer.error(event.message);
+            break;
+
+          case "done":
+            if (this.isStreaming) {
+              this.renderer.endStream();
+              this.isStreaming = false;
+            } else {
+              spinner.stop();
+            }
+            break;
+
+          case "status_change":
+            // Silent — could log if verbose
+            break;
+        }
+      }, { signal: abortController.signal });
+
+      spinner.stop();
+      if (this.isStreaming) {
+        this.renderer.endStream();
+        this.isStreaming = false;
+      }
+
+      this.sessionManager.addMessage(this.session, "assistant", "[cloud session completed]");
+    } catch (err) {
+      spinner.stop();
+      if (this.isStreaming) {
+        this.renderer.endStream();
+        this.isStreaming = false;
+      }
+
+      // If aborted (SIGINT), try to stop remote session
+      if (err instanceof DOMException && err.name === "AbortError") {
+        if (cloudSessionId) {
+          await client.stop(cloudSessionId).catch(() => {});
+        }
+        this.renderer.info("Cancelled.");
+        this.sessionManager.addMessage(this.session, "assistant", "[cancelled]");
+      } else {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        this.renderer.error(`Cloud error: ${errorMsg}`);
+        this.sessionManager.addMessage(this.session, "assistant", `[ERROR] ${errorMsg}`);
+      }
+    } finally {
+      process.removeListener("SIGINT", sigintHandler);
+    }
+  }
+
+  /**
+   * Prompt the user for cloud-mode approval and send response to server.
+   */
+  private async promptCloudApproval(
+    client: CloudClient,
+    sessionId: string,
+    actionId: string,
+    toolName: string,
+  ): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const approvalRl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+
+      approvalRl.question(
+        `\x1b[33m\x1b[1m  Approve? [Y/n] \x1b[0m`,
+        async (answer) => {
+          approvalRl.close();
+          const trimmed = answer.trim().toLowerCase();
+          const approved = trimmed !== "n" && trimmed !== "no";
+
+          try {
+            await client.approve(sessionId, actionId, {
+              approved,
+              message: approved ? undefined : "User rejected",
+            });
+          } catch (err) {
+            this.renderer.error(`Approval send failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          resolve();
+        },
+      );
+    });
+  }
+
+  /**
+   * Process a user message through the local AgentLoop.
+   * Creates BYOKClient + ToolExecutor, runs AgentLoop.run(), and renders events.
+   */
+  private async processMessageLocal(message: string): Promise<void> {
     // Save user message
     this.sessionManager.addMessage(this.session, "user", message);
 

@@ -20,6 +20,8 @@ export interface YuanConfig {
   model?: string;
   baseUrl?: string;
   theme: "dark" | "light";
+  mode: "local" | "cloud";
+  serverUrl: string;
 }
 
 const YUAN_DIR = path.join(os.homedir(), ".yuan");
@@ -41,6 +43,8 @@ function defaultConfig(): YuanConfig {
     model: undefined,
     baseUrl: undefined,
     theme: "dark",
+    mode: "local",
+    serverUrl: "https://api.yuaone.com",
   };
 }
 
@@ -83,6 +87,9 @@ export class ConfigManager {
 
   /** Check if API key is configured */
   isConfigured(): boolean {
+    if (this.config.mode === "cloud") {
+      return this.config.apiKey.startsWith("yua_sk_") && this.config.apiKey.length > 7;
+    }
     return this.config.apiKey.length > 0;
   }
 
@@ -116,6 +123,28 @@ export class ConfigManager {
     this.save();
   }
 
+  /** Set execution mode (local or cloud) */
+  setMode(mode: "local" | "cloud"): void {
+    this.config.mode = mode;
+    this.save();
+  }
+
+  /** Set cloud server URL */
+  setServerUrl(url: string): void {
+    this.config.serverUrl = url;
+    this.save();
+  }
+
+  /** Check if running in cloud mode */
+  isCloudMode(): boolean {
+    return this.config.mode === "cloud";
+  }
+
+  /** Get the effective server URL */
+  getServerUrl(): string {
+    return this.config.serverUrl;
+  }
+
   /** Display current config (masking API key) */
   show(): string {
     const c = this.config;
@@ -124,10 +153,12 @@ export class ConfigManager {
       : "(not set)";
 
     const lines = [
+      `Mode     : ${c.mode}`,
       `Provider : ${c.provider}`,
       `API Key  : ${maskedKey}`,
       `Model    : ${this.getModel()}`,
       `Base URL : ${c.baseUrl ?? "(default)"}`,
+      `Server   : ${c.mode === "cloud" ? c.serverUrl : "(n/a — local mode)"}`,
       `Theme    : ${c.theme}`,
       `Config   : ${CONFIG_PATH}`,
     ];
@@ -169,24 +200,54 @@ export class ConfigManager {
     const provider = providerMap[providerChoice] ?? "anthropic";
     this.config.provider = provider;
 
-    // API key
-    const keyPrompt = `  ${provider} API key: `;
-    const apiKey = await ask(keyPrompt);
-    if (apiKey) {
-      this.config.apiKey = apiKey;
+    // Execution mode selection
+    console.log("\n  Execution mode:");
+    console.log("    1) Local (BYOK — runs on your machine)");
+    console.log("    2) Cloud (YUA Platform — runs on server)");
+    const modeChoice = await ask("\n  Mode [1-2] (default: 1): ");
+    const isCloud = modeChoice === "2";
+    this.config.mode = isCloud ? "cloud" : "local";
+
+    if (isCloud) {
+      // Cloud mode — override provider to yua
+      this.config.provider = "yua";
+
+      // Server URL
+      const serverUrl = await ask(`  Server URL (default: ${defaultConfig().serverUrl}): `);
+      if (serverUrl) {
+        this.config.serverUrl = serverUrl;
+      } else {
+        this.config.serverUrl = defaultConfig().serverUrl;
+      }
+
+      // YUA platform API key
+      const yuaKey = await ask("  YUA API key (yua_sk_xxx): ");
+      if (yuaKey) {
+        this.config.apiKey = yuaKey;
+      }
+    } else {
+      // Local mode — ask for provider API key
+      const keyPrompt = `  ${provider} API key: `;
+      const apiKey = await ask(keyPrompt);
+      if (apiKey) {
+        this.config.apiKey = apiKey;
+      }
     }
 
     // Model (optional)
-    const modelPrompt = `  Model (default: ${DEFAULT_MODELS[provider]}): `;
+    const effectiveProvider = this.config.provider;
+    const modelPrompt = `  Model (default: ${DEFAULT_MODELS[effectiveProvider]}): `;
     const model = await ask(modelPrompt);
     if (model) {
       this.config.model = model;
     }
 
-    // Base URL (optional)
-    const baseUrl = await ask("  Custom base URL (optional): ");
-    if (baseUrl) {
-      this.config.baseUrl = baseUrl;
+    // Base URL (optional, only relevant for local mode)
+    if (!isCloud) {
+      const baseUrl = await ask("  Custom base URL (optional): ");
+      if (baseUrl) {
+        this.config.baseUrl = baseUrl;
+      }
     }
 
     this.save();
