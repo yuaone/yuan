@@ -220,18 +220,50 @@ export class ContextManager {
       result.push(nonSystemMessages[i]);
     }
 
-    // 토큰 초과 시 중간 메시지도 추가 요약
-    let tokens = this.estimateTokens(result);
-    if (tokens > targetTokens && result.length > systemMessages.length + this.recentWindow) {
-      // 중간 메시지 제거하고 더 짧은 요약으로 교체
-      const keep = systemMessages.length + 1 + this.recentWindow; // system + summary + recent
-      while (result.length > keep && tokens > targetTokens) {
-        result.splice(systemMessages.length + 1, 1);
-        tokens = this.estimateTokens(result);
+    // Ensure assistant(tool_calls) + tool message pairs are never split.
+    // Walk result and if an assistant message has tool_calls but the next
+    // message(s) are not the matching tool results, re-insert them.
+    const repaired: Message[] = [];
+    for (let i = 0; i < result.length; i++) {
+      repaired.push(result[i]);
+      const msg = result[i];
+      if (msg.role === "assistant" && msg.tool_calls?.length) {
+        const expectedIds = new Set(msg.tool_calls.map((tc) => tc.id));
+        // Check if the next messages already cover all tool_call_ids
+        let j = i + 1;
+        while (j < result.length && result[j].role === "tool") {
+          expectedIds.delete(result[j].tool_call_id ?? "");
+          j++;
+        }
+        // If some tool results are missing, find them in original messages
+        if (expectedIds.size > 0) {
+          for (const origMsg of this.messages) {
+            if (origMsg.role === "tool" && expectedIds.has(origMsg.tool_call_id ?? "")) {
+              repaired.push(origMsg);
+              expectedIds.delete(origMsg.tool_call_id ?? "");
+            }
+          }
+        }
       }
     }
 
-    return result;
+    // 토큰 초과 시 중간 메시지도 추가 요약
+    let tokens = this.estimateTokens(repaired);
+    if (tokens > targetTokens && repaired.length > systemMessages.length + this.recentWindow) {
+      const keep = systemMessages.length + 1 + this.recentWindow;
+      while (repaired.length > keep && tokens > targetTokens) {
+        // Don't remove tool messages that are paired with assistant tool_calls
+        const candidate = repaired[systemMessages.length + 1];
+        if (candidate.role === "tool") {
+          // Skip — removing a tool message would break the pair
+          break;
+        }
+        repaired.splice(systemMessages.length + 1, 1);
+        tokens = this.estimateTokens(repaired);
+      }
+    }
+
+    return repaired;
   }
 
   private summarizeMessages(messages: Message[]): string {

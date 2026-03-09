@@ -301,32 +301,7 @@ export class AgentLoop extends EventEmitter {
 
       // 3. 응답 처리
       if (response.toolCalls.length === 0) {
-        // 도구 호출 없음 — but the LLM might be asking a question or
-        // expressing inability rather than signaling completion.
-        // Check for question/uncertainty patterns before assuming GOAL_ACHIEVED.
-        // NOTE: There is no NEEDS_INPUT termination reason in AgentTermination.
-        // If the LLM is uncertain, we continue the loop so it can self-correct
-        // or the iteration limit will eventually stop it.
         const content = response.content ?? "";
-        const looksLikeQuestion =
-          content.includes("?") ||
-          /\b(cannot|can't|need|unclear|please|could you)\b/i.test(content);
-
-        if (looksLikeQuestion) {
-          // LLM seems uncertain or asking for input — add as assistant message
-          // and continue the loop rather than declaring success.
-          if (content) {
-            this.contextManager.addMessage({
-              role: "assistant",
-              content,
-            });
-          }
-          this.emitEvent({
-            kind: "agent:thinking",
-            content: `LLM responded without tool calls (possible question/uncertainty). Continuing loop.`,
-          });
-          continue;
-        }
 
         if (content) {
           this.contextManager.addMessage({
