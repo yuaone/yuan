@@ -1217,8 +1217,10 @@ Exactly one approach should have recommended=true.`;
     // Snapshot target files before modification
     await this.snapshotFiles(step.targetFiles);
 
-    // ─── Speculative Execution (opt-in) ─────────────────────────
-    if (this.config.enableSpeculative) {
+    // ─── Speculative Execution (auto-activates when complexity >= complex) ───
+    const specComplexity = state.workingMemory.get("complexity") as string | undefined;
+    const specAutoActivate = ["complex", "massive"].includes(specComplexity ?? "");
+    if (this.config.enableSpeculative || specAutoActivate) {
       try {
         this._logger.info("system", `Speculative execution enabled for step ${stepIndex + 1}`);
         this.reflection.think("implement", `Using speculative execution for step ${stepIndex + 1}`);
@@ -1513,8 +1515,11 @@ Exactly one approach should have recommended=true.`;
       `Deep verification: ${deepResult.verdict} (score: ${deepResult.overallScore}, confidence: ${deepResult.confidence})`,
     );
 
-    // ─── Debate Orchestrator (optional) ───────────────────────
-    if (this.config.enableDebate && this.changedFiles.size > 0) {
+    // ─── Debate Orchestrator (optional — auto-activates when complexity >= moderate) ───
+    const debateComplexity = state.workingMemory.get("complexity") as string | undefined;
+    const debateAutoActivate = ["moderate", "complex", "massive"].includes(debateComplexity ?? "");
+    const shouldDebate = (this.config.enableDebate || debateAutoActivate) && this.changedFiles.size > 0;
+    if (shouldDebate) {
       try {
         this._logger.info("system", "Running multi-agent debate verification...");
         this.reflection.think("verify", "Starting debate orchestrator for code review...");

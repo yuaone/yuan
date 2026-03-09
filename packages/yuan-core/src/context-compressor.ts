@@ -22,7 +22,7 @@
  * ```
  */
 
-import type { Message } from "./types.js";
+import { type Message, contentToString } from "./types.js";
 
 // ─── Types ───
 
@@ -404,7 +404,8 @@ export class ContextCompressor {
         priority = priorities.olderToolResult;
       } else if (message.role === "assistant") {
         // 승인 관련 메시지는 높은 우선순위
-        if (message.content?.includes("[APPROVED]") || message.content?.includes("[REJECTED]")) {
+        const contentStr = contentToString(message.content);
+        if (contentStr.includes("[APPROVED]") || contentStr.includes("[REJECTED]")) {
           priority = priorities.approval;
         } else {
           priority = priorities.olderAssistant;
@@ -437,7 +438,7 @@ export class ContextCompressor {
         return item;
       }
 
-      const content = item.message.content;
+      const content = contentToString(item.message.content);
       if (!content || content.length < 500) {
         return item;
       }
@@ -580,7 +581,7 @@ export class ContextCompressor {
   private estimateMessageTokens(message: Message): number {
     let total = 4; // message overhead
     if (message.content) {
-      total += this.estimateStringTokens(message.content);
+      total += this.estimateStringTokens(contentToString(message.content));
     }
     if (message.tool_calls) {
       for (const tc of message.tool_calls) {

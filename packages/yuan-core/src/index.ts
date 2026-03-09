@@ -20,6 +20,7 @@ export type {
   LLMProvider,
   BYOKConfig,
   MessageRole,
+  ContentBlock,
   Message,
   ToolParameterSchema,
   ToolDefinition,
@@ -79,6 +80,9 @@ export type {
   DesignEventType,
   DesignEvent,
 } from "./types.js";
+
+// ─── Type Utilities ───
+export { contentToString } from "./types.js";
 
 // ─── Errors ───
 export {
@@ -620,3 +624,55 @@ export type {
 // ─── Design Loop ───
 export { DesignLoop } from "./design-loop.js";
 export type { DesignLoopOptions } from "./design-loop.js";
+
+// ─── Task Classifier ───
+export { TaskClassifier, TaskType } from "./task-classifier.js";
+export type { TaskClassification } from "./task-classifier.js";
+
+// ─── Prompt Defense ───
+export { PromptDefense } from "./prompt-defense.js";
+export type {
+  SanitizeResult,
+  ValidationResult as PromptValidationResult,
+  InjectionDetection,
+  InjectionMatch,
+  InjectionSeverity,
+  StrictnessLevel,
+} from "./prompt-defense.js";
+
+// ─── Token Budget ───
+export { TokenBudgetManager } from "./token-budget.js";
+export type {
+  BudgetRole,
+  RoleBudgetConfig,
+  RoleUsage,
+  BudgetCheckResult,
+  OverallBudgetStatus,
+} from "./token-budget.js";
+
+// ─── Continuation Engine ───
+export { ContinuationEngine } from "./continuation-engine.js";
+export type { ContinuationEngineConfig } from "./continuation-engine.js";
+
+// ─── Memory Updater ───
+export { MemoryUpdater } from "./memory-updater.js";
+export type {
+  ToolPattern,
+  CoChangePattern,
+  PerfSummary,
+  ErrorPattern,
+  RunAnalysis,
+  MemoryUpdaterConfig,
+  AnalyzeRunParams,
+  ToolResultEntry,
+} from "./memory-updater.js";
+
+// ─── Reflexion Layer ───
+export { ReflexionStore, ReflexionEngine } from "./reflexion.js";
+export type {
+  ReflexionEntry,
+  StrategyRecord,
+  ReflexionGuidance,
+  ReflexionConfig,
+  ReflectParams,
+} from "./reflexion.js";

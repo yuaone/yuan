@@ -7,12 +7,14 @@
  */
 
 import OpenAI from "openai";
-import type {
-  BYOKConfig,
-  LLMProvider,
-  Message,
-  ToolCall,
-  ToolDefinition,
+import {
+  type BYOKConfig,
+  type ContentBlock,
+  type LLMProvider,
+  type Message,
+  type ToolCall,
+  type ToolDefinition,
+  contentToString,
 } from "./types.js";
 import { MODEL_DEFAULTS, PROVIDER_BASE_URLS } from "./constants.js";
 import { LLMError } from "./errors.js";
@@ -230,7 +232,9 @@ export class BYOKClient {
     const body: Record<string, unknown> = {
       model: this.model,
       max_tokens: 8192,
-      ...(systemMessage?.content ? { system: systemMessage.content } : {}),
+      ...(systemMessage?.content
+        ? { system: typeof systemMessage.content === "string" ? systemMessage.content : systemMessage.content.filter((b): b is { type: "text"; text: string } => b.type === "text").map((b) => b.text).join("\n") }
+        : {}),
       messages: nonSystemMessages.map((m) => this.toAnthropicMessage(m)),
       ...(tools && tools.length > 0
         ? { tools: tools.map((t) => this.toAnthropicTool(t)) }
@@ -273,7 +277,9 @@ export class BYOKClient {
       model: this.model,
       max_tokens: 8192,
       stream: true,
-      ...(systemMessage?.content ? { system: systemMessage.content } : {}),
+      ...(systemMessage?.content
+        ? { system: typeof systemMessage.content === "string" ? systemMessage.content : systemMessage.content.filter((b): b is { type: "text"; text: string } => b.type === "text").map((b) => b.text).join("\n") }
+        : {}),
       messages: nonSystemMessages.map((m) => this.toAnthropicMessage(m)),
       ...(tools && tools.length > 0
         ? { tools: tools.map((t) => this.toAnthropicTool(t)) }
@@ -400,7 +406,7 @@ export class BYOKClient {
     if (msg.role === "tool") {
       return {
         role: "tool",
-        content: msg.content ?? "",
+        content: contentToString(msg.content),
         tool_call_id: msg.tool_call_id ?? "",
       };
     }
@@ -408,7 +414,7 @@ export class BYOKClient {
     if (msg.role === "assistant" && msg.tool_calls?.length) {
       return {
         role: "assistant",
-        content: msg.content ?? null,
+        content: typeof msg.content === "string" ? msg.content : null,
         tool_calls: msg.tool_calls.map((tc) => ({
           id: tc.id,
           type: "function" as const,
@@ -421,6 +427,33 @@ export class BYOKClient {
           },
         })),
       };
+    }
+
+    // 멀티모달 콘텐츠 블록 처리 (user/system)
+    if (Array.isArray(msg.content)) {
+      const parts: Array<{ type: string; text?: string; image_url?: { url: string } }> = [];
+      for (const block of msg.content) {
+        if (block.type === "text") {
+          parts.push({ type: "text", text: block.text });
+        } else if (block.type === "image") {
+          parts.push({
+            type: "image_url",
+            image_url: {
+              url: `data:${block.mediaType};base64,${block.data}`,
+            },
+          });
+        } else if (block.type === "file") {
+          const lang = block.language || "";
+          parts.push({
+            type: "text",
+            text: `--- File: ${block.name} ---\n\`\`\`${lang}\n${block.content}\n\`\`\``,
+          });
+        }
+      }
+      return {
+        role: msg.role as "user" | "system",
+        content: parts as unknown as string,
+      } as OpenAI.Chat.ChatCompletionMessageParam;
     }
 
     return {
@@ -463,7 +496,12 @@ export class BYOKClient {
     if (msg.role === "assistant" && msg.tool_calls?.length) {
       const content: unknown[] = [];
       if (msg.content) {
-        content.push({ type: "text", text: msg.content });
+        const textContent = typeof msg.content === "string"
+          ? msg.content
+          : msg.content.filter((b): b is { type: "text"; text: string } => b.type === "text").map((b) => b.text).join("\n");
+        if (textContent) {
+          content.push({ type: "text", text: textContent });
+        }
       }
       for (const tc of msg.tool_calls) {
         let input: unknown;
@@ -471,7 +509,6 @@ export class BYOKClient {
           try {
             input = JSON.parse(tc.arguments);
           } catch {
-            // If arguments is malformed JSON, pass raw string as-is
             input = tc.arguments;
           }
         } else {
@@ -494,9 +531,38 @@ export class BYOKClient {
           {
             type: "tool_result",
             tool_use_id: msg.tool_call_id,
-            content: msg.content ?? "",
+            content: typeof msg.content === "string" ? msg.content : (msg.content ?? ""),
           },
         ],
+      };
+    }
+
+    // 멀티모달 콘텐츠 블록 처리
+    if (Array.isArray(msg.content)) {
+      const parts: unknown[] = [];
+      for (const block of msg.content) {
+        if (block.type === "text") {
+          parts.push({ type: "text", text: block.text });
+        } else if (block.type === "image") {
+          parts.push({
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: block.mediaType,
+              data: block.data,
+            },
+          });
+        } else if (block.type === "file") {
+          const lang = block.language || "";
+          parts.push({
+            type: "text",
+            text: `--- File: ${block.name} ---\n\`\`\`${lang}\n${block.content}\n\`\`\``,
+          });
+        }
+      }
+      return {
+        role: msg.role === "system" ? "user" : msg.role,
+        content: parts,
       };
     }
 

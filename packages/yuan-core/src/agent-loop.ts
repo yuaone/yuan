@@ -41,6 +41,23 @@ import {
 } from "./auto-fix.js";
 import { InterruptManager } from "./interrupt-manager.js";
 import type { InterruptSignal } from "./types.js";
+import { YuanMemory, type ProjectStructure } from "./memory.js";
+import { MemoryManager } from "./memory-manager.js";
+import { buildSystemPrompt, type EnvironmentInfo } from "./system-prompt.js";
+import {
+  HierarchicalPlanner,
+  type HierarchicalPlan,
+  type TacticalTask,
+  type RePlanTrigger,
+} from "./hierarchical-planner.js";
+import { TaskClassifier, type TaskClassification } from "./task-classifier.js";
+import { PromptDefense } from "./prompt-defense.js";
+import { ReflexionEngine, type ReflexionEntry } from "./reflexion.js";
+import { TokenBudgetManager, type BudgetRole } from "./token-budget.js";
+import { ContinuationEngine } from "./continuation-engine.js";
+import { MemoryUpdater, type RunAnalysis } from "./memory-updater.js";
+import type { ContinuationCheckpoint, ToolDefinition } from "./types.js";
+import { MCPClient, type MCPServerConfig } from "./mcp-client.js";
 
 /** AgentLoop 설정 */
 export interface AgentLoopOptions {
@@ -60,6 +77,16 @@ export interface AgentLoopOptions {
   autoFixConfig?: Partial<AutoFixConfig>;
   /** 인터럽트 매니저 (외부에서 주입, 미지정 시 내부 생성) */
   interruptManager?: InterruptManager;
+  /** Memory 자동 로드/저장 활성화 (기본 true) */
+  enableMemory?: boolean;
+  /** 환경 정보 (시스템 프롬프트에 포함) */
+  environment?: EnvironmentInfo;
+  /** 자동 플래닝 활성화 (복잡한 태스크 감지 시 계획 수립, 기본 true) */
+  enablePlanning?: boolean;
+  /** 플래닝이 필요한 최소 복잡도 (기본 "moderate") */
+  planningThreshold?: "simple" | "moderate" | "complex";
+  /** MCP 서버 설정 (외부 도구 연동) */
+  mcpServerConfigs?: MCPServerConfig[];
 }
 
 /**
@@ -98,7 +125,30 @@ export class AgentLoop extends EventEmitter {
   private readonly approvalManager: ApprovalManager;
   private readonly autoFixLoop: AutoFixLoop;
   private readonly interruptManager: InterruptManager;
+  private readonly enableMemory: boolean;
+  private readonly enablePlanning: boolean;
+  private readonly planningThreshold: "simple" | "moderate" | "complex";
+  private readonly environment?: EnvironmentInfo;
+  private yuanMemory: YuanMemory | null = null;
+  private memoryManager: MemoryManager | null = null;
+  private planner: HierarchicalPlanner | null = null;
+  private activePlan: HierarchicalPlan | null = null;
+  private taskClassifier: TaskClassifier;
+  private promptDefense: PromptDefense;
+  private reflexionEngine: ReflexionEngine | null = null;
+  private tokenBudgetManager: TokenBudgetManager;
+  private allToolResults: ToolResult[] = [];
+  private currentTaskIndex = 0;
+  private changedFiles: string[] = [];
   private aborted = false;
+  private initialized = false;
+  private continuationEngine: ContinuationEngine | null = null;
+  private mcpClient: MCPClient | null = null;
+  private mcpToolDefinitions: ToolDefinition[] = [];
+  private readonly mcpServerConfigs: MCPServerConfig[];
+  private memoryUpdater: MemoryUpdater;
+  private checkpointSaved = false;
+  private iterationCount = 0;
   private tokenUsage: TokenUsage = {
     input: 0,
     output: 0,
@@ -111,6 +161,10 @@ export class AgentLoop extends EventEmitter {
 
     this.config = options.config;
     this.toolExecutor = options.toolExecutor;
+    this.enableMemory = options.enableMemory !== false;
+    this.enablePlanning = options.enablePlanning !== false;
+    this.planningThreshold = options.planningThreshold ?? "moderate";
+    this.environment = options.environment;
 
     // BYOK LLM 클라이언트 생성
     this.llmClient = new BYOKClient(options.config.byok);
@@ -137,11 +191,22 @@ export class AgentLoop extends EventEmitter {
     // AutoFixLoop 생성
     this.autoFixLoop = new AutoFixLoop(options.autoFixConfig);
 
+    // Task Classifier + Prompt Defense + Token Budget + Memory Updater
+    this.taskClassifier = new TaskClassifier();
+    this.promptDefense = new PromptDefense();
+    this.tokenBudgetManager = new TokenBudgetManager({
+      totalBudget: options.config.loop.totalTokenBudget,
+    });
+    this.memoryUpdater = new MemoryUpdater();
+
+    // MCP 서버 설정 저장
+    this.mcpServerConfigs = options.mcpServerConfigs ?? [];
+
     // InterruptManager 설정 (외부 주입 또는 내부 생성)
     this.interruptManager = options.interruptManager ?? new InterruptManager();
     this.setupInterruptListeners();
 
-    // 시스템 프롬프트 추가
+    // 시스템 프롬프트 추가 (메모리 없이 기본 프롬프트로 시작, init()에서 갱신)
     this.contextManager.addMessage({
       role: "system",
       content: this.config.loop.systemPrompt,
@@ -149,12 +214,182 @@ export class AgentLoop extends EventEmitter {
   }
 
   /**
+   * Memory와 프로젝트 컨텍스트를 로드하여 시스템 프롬프트를 갱신.
+   * run() 호출 전에 한 번 호출하면 메모리가 자동으로 주입된다.
+   * 이미 초기화되었으면 스킵.
+   */
+  async init(): Promise<void> {
+    if (this.initialized) return;
+    this.initialized = true;
+
+    const projectPath = this.config.loop.projectPath;
+    if (!projectPath) return;
+
+    let yuanMdContent: string | undefined;
+    let projectStructure: ProjectStructure | undefined;
+
+    // Memory 로드
+    if (this.enableMemory) {
+      try {
+        // YUAN.md (raw markdown)
+        this.yuanMemory = new YuanMemory(projectPath);
+        const memData = await this.yuanMemory.load();
+        if (memData) {
+          yuanMdContent = memData.raw;
+        }
+
+        // MemoryManager (structured learnings)
+        this.memoryManager = new MemoryManager(projectPath);
+        await this.memoryManager.load();
+
+        // 프로젝트 구조 분석
+        projectStructure = await this.yuanMemory.analyzeProject();
+      } catch (memErr) {
+        // 메모리 로드 실패는 치명적이지 않음 — 경고만 출력
+        this.emitEvent({
+          kind: "agent:error",
+          message: `Memory load failed: ${memErr instanceof Error ? memErr.message : String(memErr)}`,
+          retryable: false,
+        });
+      }
+    }
+
+    // ContinuationEngine 생성
+    this.continuationEngine = new ContinuationEngine({ projectPath });
+
+    // 이전 세션 체크포인트 복원
+    try {
+      const latestCheckpoint = await this.continuationEngine.findLatestCheckpoint();
+      if (latestCheckpoint) {
+        const continuationPrompt = this.continuationEngine.formatContinuationPrompt(latestCheckpoint);
+        this.contextManager.addMessage({
+          role: "system",
+          content: continuationPrompt,
+        });
+        // 복원 후 체크포인트 정리
+        await this.continuationEngine.pruneOldCheckpoints();
+      }
+    } catch {
+      // 체크포인트 복원 실패는 치명적이지 않음
+    }
+
+    // MCP 클라이언트 연결
+    if (this.mcpServerConfigs.length > 0) {
+      try {
+        this.mcpClient = new MCPClient({
+          servers: this.mcpServerConfigs,
+        });
+        await this.mcpClient.connectAll();
+        this.mcpToolDefinitions = this.mcpClient.toToolDefinitions();
+      } catch {
+        // MCP 연결 실패는 치명적이지 않음 — 로컬 도구만 사용
+        this.mcpClient = null;
+        this.mcpToolDefinitions = [];
+      }
+    }
+
+    // HierarchicalPlanner 생성
+    if (this.enablePlanning && projectPath) {
+      this.planner = new HierarchicalPlanner({ projectPath });
+    }
+
+    // ReflexionEngine 생성
+    if (projectPath) {
+      this.reflexionEngine = new ReflexionEngine({ projectPath });
+    }
+
+    // 향상된 시스템 프롬프트 생성
+    const enhancedPrompt = buildSystemPrompt({
+      projectStructure,
+      yuanMdContent,
+      tools: [...this.config.loop.tools, ...this.mcpToolDefinitions],
+      projectPath,
+      environment: this.environment,
+    });
+
+    // 기존 시스템 메시지를 향상된 프롬프트로 교체
+    this.contextManager.replaceSystemMessage(enhancedPrompt);
+
+    // MemoryManager의 관련 학습/경고를 추가 컨텍스트로 주입
+    if (this.memoryManager) {
+      const memory = this.memoryManager.getMemory();
+      if (memory.learnings.length > 0 || memory.failedApproaches.length > 0) {
+        const memoryContext = this.buildMemoryContext(memory);
+        if (memoryContext) {
+          this.contextManager.addMessage({
+            role: "system",
+            content: memoryContext,
+          });
+        }
+      }
+    }
+  }
+
+  /**
+   * MemoryManager의 학습/실패 기록을 시스템 메시지로 변환.
+   */
+  private buildMemoryContext(memory: {
+    learnings: Array<{ category: string; content: string; confidence: number }>;
+    failedApproaches: Array<{ approach: string; reason: string }>;
+    conventions: string[];
+  }): string | null {
+    const parts: string[] = [];
+
+    // 높은 confidence 학습만 포함
+    const highConfLearnings = memory.learnings.filter((l) => l.confidence >= 0.3);
+    if (highConfLearnings.length > 0) {
+      parts.push("## Things I've Learned About This Project");
+      for (const l of highConfLearnings.slice(0, 20)) {
+        parts.push(`- [${l.category}] ${l.content}`);
+      }
+    }
+
+    // 실패한 접근 방식 (최근 10개)
+    if (memory.failedApproaches.length > 0) {
+      parts.push("\n## Approaches That Failed Before (Avoid These)");
+      for (const f of memory.failedApproaches.slice(0, 10)) {
+        parts.push(`- **${f.approach}** — failed because: ${f.reason}`);
+      }
+    }
+
+    // 코딩 규칙
+    if (memory.conventions.length > 0) {
+      parts.push("\n## Project Conventions");
+      for (const c of memory.conventions) {
+        parts.push(`- ${c}`);
+      }
+    }
+
+    return parts.length > 0 ? parts.join("\n") : null;
+  }
+
+  /**
    * 에이전트 루프를 실행.
+   * 첫 호출 시 자동으로 Memory와 프로젝트 컨텍스트를 로드한다.
    * @param userMessage 사용자의 요청 메시지
    * @returns 종료 사유 및 결과
    */
   async run(userMessage: string): Promise<AgentTermination> {
     this.aborted = false;
+    this.changedFiles = [];
+    this.allToolResults = [];
+    this.checkpointSaved = false;
+    this.iterationCount = 0;
+    this.tokenBudgetManager.reset();
+    const runStartTime = Date.now();
+
+    // 첫 실행 시 메모리/프로젝트 컨텍스트 자동 로드
+    await this.init();
+
+    // 사용자 입력 검증 (prompt injection 방어)
+    const inputValidation = this.promptDefense.validateUserInput(userMessage);
+    if (inputValidation.injectionDetected && (inputValidation.severity === "critical" || inputValidation.severity === "high")) {
+      this.emitEvent({
+        kind: "agent:error",
+        message: `Prompt injection detected in user input (${inputValidation.severity}): ${inputValidation.patternsFound.join(", ")}`,
+        retryable: false,
+      });
+    }
 
     // 사용자 메시지 추가
     this.contextManager.addMessage({
@@ -165,9 +400,134 @@ export class AgentLoop extends EventEmitter {
     this.emitEvent({ kind: "agent:start", goal: userMessage });
 
     try {
-      return await this.executeLoop();
+      // Reflexion: 과거 실행에서 배운 가이던스 주입
+      if (this.reflexionEngine) {
+        try {
+          const guidance = await this.reflexionEngine.getGuidance(userMessage);
+          // 가이던스 유효성 검증: 빈 전략이나 매우 낮은 confidence 필터링
+          const validStrategies = guidance.relevantStrategies.filter(
+            (s) => s.strategy && s.strategy.length > 5 && s.confidence > 0.1,
+          );
+          if (validStrategies.length > 0 || guidance.recentFailures.length > 0) {
+            const filteredGuidance = { ...guidance, relevantStrategies: validStrategies };
+            const guidancePrompt = this.reflexionEngine.formatForSystemPrompt(filteredGuidance);
+            this.contextManager.addMessage({
+              role: "system",
+              content: guidancePrompt,
+            });
+          }
+        } catch {
+          // guidance 로드 실패는 치명적이지 않음
+        }
+      }
+
+      // Task 분류 → 시스템 프롬프트에 tool sequence hint 주입
+      const classification = this.taskClassifier.classify(userMessage);
+      if (classification.confidence >= 0.3) {
+        const classificationHint = this.taskClassifier.formatForSystemPrompt(classification);
+        this.contextManager.addMessage({
+          role: "system",
+          content: classificationHint,
+        });
+      }
+
+      // 복잡도 감지 → 필요 시 자동 플래닝
+      await this.maybeCreatePlan(userMessage);
+
+      const result = await this.executeLoop();
+
+      // 실행 완료 후 메모리 자동 업데이트
+      await this.updateMemoryAfterRun(userMessage, result, Date.now() - runStartTime);
+
+      return result;
     } catch (err) {
       return this.handleFatalError(err);
+    }
+  }
+
+  /**
+   * 에이전트 실행 완료 후 메모리를 자동 업데이트한다.
+   * - 변경된 파일 목록 기록
+   * - 성공/실패 패턴 학습
+   */
+  private async updateMemoryAfterRun(
+    userGoal: string,
+    result: AgentTermination,
+    runDurationMs = 0,
+  ): Promise<void> {
+    if (!this.enableMemory || !this.memoryManager) return;
+
+    try {
+      // MemoryUpdater로 풍부한 학습 추출
+      const analysis = this.memoryUpdater.analyzeRun({
+        goal: userGoal,
+        termination: {
+          reason: result.reason,
+          error: (result as { error?: string }).error,
+          summary: (result as { summary?: string }).summary,
+        },
+        toolResults: this.allToolResults.map((r) => ({
+          name: r.name,
+          output: r.output,
+          success: r.success,
+          durationMs: r.durationMs,
+        })),
+        changedFiles: this.changedFiles,
+        messages: this.contextManager.getMessages().map((m) => ({
+          role: m.role,
+          content: typeof m.content === "string" ? m.content : null,
+        })),
+        tokensUsed: this.tokenUsage.total,
+        durationMs: runDurationMs,
+        iterations: this.iterationCount,
+      });
+
+      // 추출된 학습을 MemoryManager에 저장
+      const learnings = this.memoryUpdater.extractLearnings(analysis, userGoal);
+      for (const learning of learnings) {
+        this.memoryManager.addLearning(learning.category, learning.content);
+      }
+
+      // 에러로 종료된 경우 실패 기록도 추가
+      if (result.reason === "ERROR") {
+        this.memoryManager.addFailedApproach(
+          `Task: ${userGoal.slice(0, 80)}`,
+          (result as { error?: string }).error ?? "Unknown error",
+        );
+      }
+
+      // 메모리 저장
+      await this.memoryManager.save();
+    } catch {
+      // 메모리 저장 실패는 치명적이지 않음
+    }
+
+    // Reflexion: 실행 결과 반영 + 전략 추출
+    if (this.reflexionEngine) {
+      try {
+        const entry = this.reflexionEngine.reflect({
+          goal: userGoal,
+          runId: crypto.randomUUID(),
+          termination: result,
+          toolResults: this.allToolResults,
+          messages: this.contextManager.getMessages(),
+          tokensUsed: this.tokenUsage.total,
+          durationMs: runDurationMs,
+          changedFiles: this.changedFiles,
+        });
+
+        await this.reflexionEngine.store.saveReflection(entry);
+
+        // 성공 시 전략 추출
+        if (entry.outcome === "success") {
+          const strategy = this.reflexionEngine.extractStrategy(entry, userGoal);
+          if (strategy) {
+            await this.reflexionEngine.store.saveStrategy(strategy);
+          }
+        }
+      } catch {
+        // reflexion 저장 실패는 치명적이지 않음
+      }
     }
   }
 
@@ -236,6 +596,255 @@ export class AgentLoop extends EventEmitter {
     return this.autoFixLoop;
   }
 
+  /**
+   * TokenBudgetManager 인스턴스를 반환.
+   * 역할별 토큰 사용량 조회/리밸런싱에 사용.
+   */
+  getTokenBudgetManager(): TokenBudgetManager {
+    return this.tokenBudgetManager;
+  }
+
+  // ─── Planning ───
+
+  /**
+   * 사용자 메시지의 복잡도를 감지하고, 복잡한 태스크이면 계획을 수립하여 컨텍스트에 주입.
+   *
+   * 복잡도 판단 기준:
+   * - 메시지 길이, 파일/작업 수 언급, 키워드 패턴
+   * - "trivial"/"simple" → 플래닝 스킵 (LLM이 직접 처리)
+   * - "moderate" 이상 → HierarchicalPlanner로 L1+L2 계획 수립
+   */
+  private async maybeCreatePlan(userMessage: string): Promise<void> {
+    if (!this.planner || !this.enablePlanning) return;
+
+    const complexity = this.detectComplexity(userMessage);
+
+    // 임계값 미만이면 플래닝 스킵
+    const thresholdOrder = { simple: 1, moderate: 2, complex: 3 };
+    const complexityOrder: Record<string, number> = {
+      trivial: 0, simple: 1, moderate: 2, complex: 3, massive: 4,
+    };
+    if ((complexityOrder[complexity] ?? 0) < thresholdOrder[this.planningThreshold]) {
+      return;
+    }
+
+    this.emitEvent({
+      kind: "agent:thinking",
+      content: `Task complexity: ${complexity}. Creating execution plan...`,
+    });
+
+    try {
+      const plan = await this.planner.createHierarchicalPlan(
+        userMessage,
+        this.llmClient,
+      );
+
+      this.activePlan = plan;
+      this.currentTaskIndex = 0;
+
+      // Estimate planner token usage (plan creation typically uses ~500 tokens per task)
+      const planTokenEstimate = plan.tactical.length * 500;
+      this.tokenBudgetManager.recordUsage("planner", planTokenEstimate, planTokenEstimate);
+
+      // 계획을 컨텍스트에 주입 (LLM이 따라갈 수 있도록)
+      const planContext = this.formatPlanForContext(plan);
+      this.contextManager.addMessage({
+        role: "system",
+        content: planContext,
+      });
+
+      this.emitEvent({
+        kind: "agent:thinking",
+        content: `Plan created: ${plan.tactical.length} tasks, ${plan.totalEstimatedIterations} estimated iterations. Risk: ${plan.strategic.riskAssessment.level}.`,
+      });
+    } catch {
+      // 플래닝 실패는 치명적이지 않음 — LLM이 직접 처리하도록 폴백
+      this.activePlan = null;
+    }
+  }
+
+  /**
+   * 사용자 메시지에서 태스크 복잡도를 휴리스틱으로 추정.
+   * LLM 호출 없이 빠르게 결정 (토큰 절약).
+   */
+  private detectComplexity(
+    message: string,
+  ): "trivial" | "simple" | "moderate" | "complex" | "massive" {
+    const lower = message.toLowerCase();
+    const len = message.length;
+
+    // 복잡도 점수 계산
+    let score = 0;
+
+    // 길이 기반
+    if (len > 500) score += 2;
+    else if (len > 200) score += 1;
+
+    // 다중 파일/작업 키워드
+    const multiFileKeywords = [
+      "refactor", "리팩토링", "리팩터",
+      "migrate", "마이그레이션",
+      "모든 파일", "all files", "전체",
+      "여러 파일", "multiple files",
+      "아키텍처", "architecture",
+      "시스템", "system-wide",
+    ];
+    for (const kw of multiFileKeywords) {
+      if (lower.includes(kw)) { score += 2; break; }
+    }
+
+    // 여러 작업 나열 (1. 2. 3. 또는 - 으로 나열)
+    const listItems = message.match(/(?:^|\n)\s*(?:\d+[.)]\s|-\s)/gm);
+    if (listItems && listItems.length >= 3) score += 2;
+    else if (listItems && listItems.length >= 2) score += 1;
+
+    // 파일 경로 패턴
+    const filePaths = message.match(/\b[\w\-./]+\.[a-z]{1,4}\b/g);
+    if (filePaths && filePaths.length >= 5) score += 2;
+    else if (filePaths && filePaths.length >= 2) score += 1;
+
+    // 간단한 작업 키워드 (감점)
+    const simpleKeywords = [
+      "fix", "고쳐", "수정해",
+      "rename", "이름 바꿔",
+      "한 줄", "one line",
+      "간단", "simple", "quick",
+    ];
+    for (const kw of simpleKeywords) {
+      if (lower.includes(kw)) { score -= 1; break; }
+    }
+
+    // 점수 → 복잡도
+    if (score <= 0) return "trivial";
+    if (score <= 1) return "simple";
+    if (score <= 3) return "moderate";
+    if (score <= 5) return "complex";
+    return "massive";
+  }
+
+  /**
+   * HierarchicalPlan을 LLM이 따라갈 수 있는 컨텍스트 메시지로 포맷.
+   */
+  private formatPlanForContext(plan: HierarchicalPlan): string {
+    const parts: string[] = [];
+
+    parts.push("## Execution Plan");
+    parts.push(`**Goal:** ${plan.goal}`);
+    parts.push(`**Complexity:** ${plan.strategic.estimatedComplexity}`);
+    parts.push(`**Risk:** ${plan.strategic.riskAssessment.level}`);
+
+    if (plan.strategic.riskAssessment.requiresApproval) {
+      parts.push("**⚠ Requires user approval for high-risk operations.**");
+    }
+
+    parts.push("\n### Tasks (execute in order):");
+    for (let i = 0; i < plan.tactical.length; i++) {
+      const task = plan.tactical[i];
+      const deps = task.dependsOn.length > 0
+        ? ` (after: ${task.dependsOn.join(", ")})`
+        : "";
+      parts.push(`${i + 1}. **${task.description}**${deps}`);
+      if (task.targetFiles.length > 0) {
+        parts.push(`   Files: ${task.targetFiles.join(", ")}`);
+      }
+      if (task.readFiles.length > 0) {
+        parts.push(`   Read: ${task.readFiles.join(", ")}`);
+      }
+      parts.push(`   Tools: ${task.toolStrategy.join(", ")}`);
+    }
+
+    if (plan.strategic.riskAssessment.mitigations.length > 0) {
+      parts.push("\n### Risk Mitigations:");
+      for (const m of plan.strategic.riskAssessment.mitigations) {
+        parts.push(`- ${m}`);
+      }
+    }
+
+    parts.push("\n### Execution Instructions:");
+    parts.push("- Follow the task order above. Complete each task before moving to the next.");
+    parts.push("- Read target files before modifying them.");
+    parts.push("- If a task fails, report the error and attempt an alternative approach.");
+    parts.push("- After all tasks, verify the changes work correctly.");
+
+    return parts.join("\n");
+  }
+
+  /**
+   * 실행 중 에러 발생 시 리플래닝을 시도한다.
+   * @returns 리플래닝 성공 시 true (계속 진행), 실패 시 false
+   */
+  private async attemptReplan(
+    error: string,
+    failedTaskId?: string,
+  ): Promise<boolean> {
+    if (!this.planner || !this.activePlan) return false;
+
+    const trigger: RePlanTrigger = {
+      type: "error",
+      description: error,
+      affectedTaskIds: failedTaskId ? [failedTaskId] : [],
+      severity: "major",
+    };
+
+    try {
+      const result = await this.planner.replan(
+        this.activePlan,
+        trigger,
+        this.llmClient,
+      );
+
+      if (result.strategy === "escalate") {
+        // 에스컬레이션 → 유저에게 알림
+        this.emitEvent({
+          kind: "agent:error",
+          message: `Re-plan escalated: ${result.reason}`,
+          retryable: false,
+        });
+        return false;
+      }
+
+      // 수정된 태스크로 업데이트
+      if (result.modifiedTasks.length > 0) {
+        // 기존 tactical 태스크를 교체
+        for (const modTask of result.modifiedTasks) {
+          const idx = this.activePlan.tactical.findIndex(
+            (t) => t.id === modTask.id,
+          );
+          if (idx >= 0) {
+            this.activePlan.tactical[idx] = modTask;
+          } else {
+            this.activePlan.tactical.push(modTask);
+          }
+        }
+
+        // 리플래닝 결과를 컨텍스트에 주입
+        this.contextManager.addMessage({
+          role: "system",
+          content: `[Re-plan] Strategy: ${result.strategy}. Reason: ${result.reason}.\nModified tasks: ${result.modifiedTasks.map((t) => t.description).join(", ")}`,
+        });
+      }
+
+      // Estimate replan token usage
+      this.tokenBudgetManager.recordUsage("planner", 500, 500);
+
+      this.emitEvent({
+        kind: "agent:thinking",
+        content: `Re-planned: ${result.strategy} — ${result.reason}`,
+      });
+
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 현재 활성 플랜을 반환 (외부에서 진행 상황 조회용).
+   */
+  getActivePlan(): HierarchicalPlan | null {
+    return this.activePlan;
+  }
+
   // ─── Core Loop ───
 
   private async executeLoop(): Promise<AgentTermination> {
@@ -263,12 +872,25 @@ export class AgentLoop extends EventEmitter {
       }
 
       iteration++;
+      this.iterationCount = iteration;
       const iterationStart = Date.now();
 
       // 1. 컨텍스트 준비
       const messages = this.contextManager.prepareForLLM();
 
       // 2. LLM 호출 (streaming)
+
+      // Before LLM call, check executor budget
+      const budgetCheck = this.tokenBudgetManager.canUse("executor", 4000);
+      if (!budgetCheck.allowed) {
+        this.emitEvent({
+          kind: "agent:thinking",
+          content: `Token budget warning: ${budgetCheck.reason}`,
+        });
+        // Try rebalancing to free up budget from idle roles
+        this.tokenBudgetManager.rebalance();
+      }
+
       this.emitEvent({
         kind: "agent:thinking",
         content: `Iteration ${iteration}...`,
@@ -293,11 +915,37 @@ export class AgentLoop extends EventEmitter {
         response.usage.output,
       );
 
+      // Role-based token budget 추적
+      this.tokenBudgetManager.recordUsage(
+        "executor",
+        response.usage.input,
+        response.usage.output,
+      );
+
+      // Rebalance budgets every 5 iterations to redistribute from idle roles
+      if (iteration % 5 === 0) {
+        this.tokenBudgetManager.rebalance();
+      }
+
       this.emitEvent({
         kind: "agent:token_usage",
         input: this.tokenUsage.input,
         output: this.tokenUsage.output,
       });
+
+      // LLM 응답 살균 — 간접 프롬프트 인젝션 방어
+      if (response.content) {
+        const llmSanitized = this.promptDefense.sanitizeToolOutput("llm_response", response.content);
+        if (llmSanitized.injectionDetected) {
+          this.emitEvent({
+            kind: "agent:error",
+            message: `Prompt injection detected in LLM response: ${llmSanitized.patternsFound.join(", ")}`,
+            retryable: false,
+          });
+          // 살균된 콘텐츠로 교체
+          response = { ...response, content: llmSanitized.output };
+        }
+      }
 
       // 3. 응답 처리
       if (response.toolCalls.length === 0) {
@@ -339,12 +987,29 @@ export class AgentLoop extends EventEmitter {
       // 4. 도구 실행
       const toolResults = await this.executeTools(response.toolCalls);
 
-      // 5. 도구 결과를 히스토리에 추가
+      // Reflexion: 도구 결과 수집
+      this.allToolResults.push(...toolResults);
+
+      // 5. 도구 결과를 히스토리에 추가 (살균 + 압축)
       for (const result of toolResults) {
-        // 큰 결과는 압축
-        const compressedOutput = this.contextManager.compressToolResult(
+        // Prompt injection 방어: 도구 출력 살균
+        const sanitized = this.promptDefense.sanitizeToolOutput(
           result.name,
           result.output,
+        );
+
+        if (sanitized.injectionDetected) {
+          this.emitEvent({
+            kind: "agent:error",
+            message: `Prompt injection detected in ${result.name} output: ${sanitized.patternsFound.join(", ")}`,
+            retryable: false,
+          });
+        }
+
+        // 큰 결과는 추가 압축
+        const compressedOutput = this.contextManager.compressToolResult(
+          result.name,
+          sanitized.output,
         );
 
         this.contextManager.addMessage({
@@ -355,12 +1020,33 @@ export class AgentLoop extends EventEmitter {
       }
 
       // iteration 이벤트
-      const durationMs = Date.now() - iterationStart;
       this.emitEvent({
         kind: "agent:iteration",
         index: iteration,
         tokensUsed: response.usage.input + response.usage.output,
+        durationMs: Date.now() - iterationStart,
       });
+
+      // 에러가 많으면 리플래닝 시도
+      const errorResults = toolResults.filter((r) => !r.success);
+      if (errorResults.length > 0 && this.activePlan) {
+        const errorSummary = errorResults
+          .map((r) => `${r.name}: ${r.output}`)
+          .join("\n");
+        await this.attemptReplan(errorSummary);
+      }
+
+      // 체크포인트 저장: 토큰 예산 80% 이상 사용 시 자동 저장 (1회만)
+      if (
+        !this.checkpointSaved &&
+        this.continuationEngine?.shouldCheckpoint(
+          this.tokenUsage.total,
+          this.config.loop.totalTokenBudget,
+        )
+      ) {
+        await this.saveAutoCheckpoint(iteration);
+        this.checkpointSaved = true;
+      }
 
       // 예산 초과 체크
       if (this.tokenUsage.total >= this.config.loop.totalTokenBudget) {
@@ -385,9 +1071,10 @@ export class AgentLoop extends EventEmitter {
     let usage = { input: 0, output: 0 };
     let finishReason = "stop";
 
+    const allTools = [...this.config.loop.tools, ...this.mcpToolDefinitions];
     const stream = this.llmClient.chatStream(
       messages,
-      this.config.loop.tools,
+      allTools,
     );
 
     for await (const chunk of stream) {
@@ -481,6 +1168,22 @@ export class AgentLoop extends EventEmitter {
         // 승인됨 → 계속 실행
       }
 
+      // MCP 도구 호출 확인
+      if (this.mcpClient && this.isMCPTool(toolCall.name)) {
+        const mcpResult = await this.executeMCPTool(toolCall);
+        results.push(mcpResult);
+        this.emitEvent({
+          kind: "agent:tool_result",
+          tool: toolCall.name,
+          output:
+            mcpResult.output.length > 200
+              ? mcpResult.output.slice(0, 200) + "..."
+              : mcpResult.output,
+          durationMs: mcpResult.durationMs,
+        });
+        continue;
+      }
+
       // 도구 실행 — AbortController를 InterruptManager에 등록
       const startTime = Date.now();
       const toolAbort = new AbortController();
@@ -501,7 +1204,7 @@ export class AgentLoop extends EventEmitter {
           durationMs: result.durationMs,
         });
 
-        // 파일 변경 이벤트
+        // 파일 변경 이벤트 + 추적
         if (
           ["file_write", "file_edit"].includes(toolCall.name) &&
           result.success
@@ -510,9 +1213,16 @@ export class AgentLoop extends EventEmitter {
             (args as Record<string, unknown>).path ??
             (args as Record<string, unknown>).file ??
             "unknown";
+          const filePathStr = String(filePath);
+
+          // 변경 파일 추적 (메모리 업데이트용)
+          if (!this.changedFiles.includes(filePathStr)) {
+            this.changedFiles.push(filePathStr);
+          }
+
           this.emitEvent({
             kind: "agent:file_change",
-            path: String(filePath),
+            path: filePathStr,
             diff: result.output,
           });
         }
@@ -699,6 +1409,104 @@ export class AgentLoop extends EventEmitter {
     return args;
   }
 
+  // ─── Continuation Helpers ───
+
+  /**
+   * 토큰 예산 소진 임박 시 자동 체크포인트를 저장한다.
+   * 현재 진행 상태, 변경 파일, 에러 등을 직렬화.
+   */
+  private async saveAutoCheckpoint(iteration: number): Promise<void> {
+    if (!this.continuationEngine) return;
+
+    try {
+      // 현재 plan 정보에서 진행 상황 추출
+      const progress = this.extractProgress();
+
+      const checkpoint: ContinuationCheckpoint = {
+        sessionId: crypto.randomUUID(),
+        goal: this.contextManager.getMessages().find((m) => m.role === "user")?.content as string ?? "",
+        progress,
+        changedFiles: this.changedFiles.map((path) => ({ path, diff: "" })),
+        workingMemory: this.buildWorkingMemorySummary(),
+        yuanMdUpdates: [],
+        errors: this.allToolResults
+          .filter((r) => !r.success)
+          .slice(-5)
+          .map((r) => `${r.name}: ${r.output.slice(0, 200)}`),
+        contextUsageAtSave: this.tokenUsage.total / this.config.loop.totalTokenBudget,
+        totalTokensUsed: this.tokenUsage.total,
+        iterationsCompleted: iteration,
+        createdAt: new Date(),
+      };
+
+      const savedPath = await this.continuationEngine.saveCheckpoint(checkpoint);
+      if (savedPath) {
+        this.emitEvent({
+          kind: "agent:thinking",
+          content: `Auto-checkpoint saved at ${Math.round(checkpoint.contextUsageAtSave * 100)}% token usage (iteration ${iteration}).`,
+        });
+      }
+    } catch {
+      // 체크포인트 저장 실패는 치명적이지 않음
+    }
+  }
+
+  /**
+   * 현재 plan에서 진행 상황을 추출한다.
+   */
+  private extractProgress(): ContinuationCheckpoint["progress"] {
+    if (!this.activePlan) {
+      return { completedTasks: [], currentTask: "", remainingTasks: [] };
+    }
+
+    const tasks = this.activePlan.tactical;
+    const completedTasks = tasks
+      .slice(0, this.currentTaskIndex)
+      .map((t) => t.description);
+    const currentTask = tasks[this.currentTaskIndex]?.description ?? "";
+    const remainingTasks = tasks
+      .slice(this.currentTaskIndex + 1)
+      .map((t) => t.description);
+
+    return { completedTasks, currentTask, remainingTasks };
+  }
+
+  /**
+   * 현재 작업 메모리 요약을 생성한다.
+   * 최근 도구 결과와 LLM 응답의 핵심만 추출.
+   */
+  private buildWorkingMemorySummary(): string {
+    const parts: string[] = [];
+
+    // 최근 도구 결과 요약 (최대 5개)
+    const recentTools = this.allToolResults.slice(-5);
+    if (recentTools.length > 0) {
+      parts.push("Recent tool results:");
+      for (const r of recentTools) {
+        const status = r.success ? "OK" : "FAIL";
+        parts.push(`- ${r.name} [${status}]: ${r.output.slice(0, 100)}`);
+      }
+    }
+
+    // 변경된 파일 목록
+    if (this.changedFiles.length > 0) {
+      parts.push(`\nChanged files: ${this.changedFiles.join(", ")}`);
+    }
+
+    // 토큰 사용량
+    parts.push(`\nTokens used: ${this.tokenUsage.total} / ${this.config.loop.totalTokenBudget}`);
+
+    return parts.join("\n");
+  }
+
+  /**
+   * ContinuationEngine 인스턴스를 반환한다.
+   * 외부에서 체크포인트 조회/관리에 사용.
+   */
+  getContinuationEngine(): ContinuationEngine | null {
+    return this.continuationEngine;
+  }
+
   // ─── Interrupt Helpers ───
 
   /**
@@ -748,6 +1556,30 @@ export class AgentLoop extends EventEmitter {
       this.interruptManager.on("interrupt:resume", onResume);
       this.interruptManager.on("interrupt:hard", onHard);
     });
+  }
+
+  // ─── MCP Helpers ───
+
+  /** MCP 도구인지 확인 */
+  private isMCPTool(toolName: string): boolean {
+    return this.mcpToolDefinitions.some((t) => t.name === toolName);
+  }
+
+  /** MCP 도구 실행 (callToolAsYuan 활용) */
+  private async executeMCPTool(toolCall: ToolCall): Promise<ToolResult> {
+    const args = this.parseToolArgs(toolCall.arguments);
+    return this.mcpClient!.callToolAsYuan(toolCall.name, args, toolCall.id);
+  }
+
+  /** MCP 클라이언트 정리 (세션 종료 시 호출) */
+  async dispose(): Promise<void> {
+    if (this.mcpClient) {
+      try {
+        await this.mcpClient.disconnectAll();
+      } catch {
+        // cleanup failure ignored
+      }
+    }
   }
 
   // ─── Helpers ───
