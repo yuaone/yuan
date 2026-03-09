@@ -58,11 +58,14 @@ export function MessageBubble({
   switch (msg.role) {
     case "user":
       return (
-        <Box flexDirection="column" marginBottom={1}>
-          <Text bold color="white">
-            {TOKENS.brand.userPrefix} you
-          </Text>
-          <Text>  {msg.content}</Text>
+        <Box flexDirection="row" marginBottom={1}>
+          <Text color="white" bold>{TOKENS.box.vertical}</Text>
+          <Box flexDirection="column" paddingLeft={1}>
+            <Text bold color="white">
+              {TOKENS.brand.userPrefix} you
+            </Text>
+            <Text>{msg.content}</Text>
+          </Box>
         </Box>
       );
 

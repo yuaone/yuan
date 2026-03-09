@@ -145,9 +145,14 @@ export function InputBox({
         return;
       }
 
-      // Regular character input
+      // Regular character input — escape sequence 및 비인쇄 문자 필터링
       if (input && !key.ctrl && !key.meta) {
-        updateValue(value + input);
+        // ANSI escape sequence, 마우스 이벤트, 제어 문자 차단
+        // eslint-disable-next-line no-control-regex
+        const cleaned = input.replace(/[\x00-\x1f\x7f]|\x1b\[[^a-zA-Z]*[a-zA-Z]/g, "");
+        if (cleaned.length > 0) {
+          updateValue(value + cleaned);
+        }
       }
     },
   );
@@ -162,7 +167,7 @@ export function InputBox({
   const cmdRecognized = isSlash && isKnownCommand(cmdToken);
 
   return (
-    <Box width={columns} flexDirection="column">
+    <Box width={columns} height={1} flexDirection="column" flexShrink={0}>
       <Box>
         <Text bold color="white">
           {prompt}{" "}

@@ -13,10 +13,12 @@ export const ANSI = {
   /** Show cursor */
   cursorShow: "\x1b[?25h",
 
-  /** Enable mouse button tracking (preserves text selection) */
-  mouseEnable: "\x1b[?1000h\x1b[?1006h",
-  /** Disable mouse tracking */
-  mouseDisable: "\x1b[?1000l\x1b[?1006l",
+  /**
+   * Mouse tracking disabled — Ink의 useInput이 SGR 마우스 이벤트를 파싱 못해서
+   * 입력창에 escape sequence가 그대로 노출됨. 텍스트 선택은 터미널 기본 동작으로 가능.
+   */
+  mouseEnable: "",
+  mouseDisable: "",
 
   /** Clear entire screen */
   clearScreen: "\x1b[2J\x1b[H",
