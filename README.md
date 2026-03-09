@@ -1,6 +1,6 @@
 # YUAN -- Autonomous Coding Agent
 
-[![CI](https://github.com/yua-inc/yuan/actions/workflows/ci.yml/badge.svg)](https://github.com/yua-inc/yuan/actions/workflows/ci.yml)
+[![CI](https://github.com/yuaone/yuan/actions/workflows/ci.yml/badge.svg)](https://github.com/yuaone/yuan/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
 An open-source autonomous coding agent that reads, writes, and fixes code using your own API keys.
@@ -13,13 +13,13 @@ YUAN runs a **Tool Use Loop** locally on your machine: describe a task in natura
 
 ```bash
 # One-shot -- describe a task and let the agent handle it
-npx yuan code "fix the login bug"
+npx @yuaone/cli code "fix the login bug"
 
 # Interactive mode -- start a conversation with the agent
-npx yuan
+npx @yuaone/cli
 
 # Configure your API key (interactive wizard)
-yuan config
+npx @yuaone/cli config
 ```
 
 On first run, YUAN will prompt you to set up an API key if none is configured.
@@ -63,14 +63,14 @@ yuan code "refactor the auth module" --model gpt-4o-mini
 ### Global install
 
 ```bash
-npm install -g yuan
+npm install -g @yuaone/cli
 yuan
 ```
 
 ### Without installing
 
 ```bash
-npx yuan
+npx @yuaone/cli
 ```
 
 ### Requirements
@@ -156,17 +156,17 @@ YUAN is organized as a pnpm monorepo:
 ```
 yuan/
   packages/
-    yuan-core/     @yuan/core   -- Agent runtime (loop, governor, planner, context manager, security)
-    yuan-tools/    @yuan/tools  -- Tool implementations (file I/O, shell, search, git, tests)
-    yuan-cli/      yuan         -- CLI entry point, REPL, terminal renderer, session management
-    yuan-mcp/      @yuan/mcp    -- MCP server adapter for exposing tools to external clients
+    yuan-core/     @yuaone/core   -- Agent runtime (loop, governor, planner, context manager, security)
+    yuan-tools/    @yuaone/tools  -- Tool implementations (file I/O, shell, search, git, tests)
+    yuan-cli/      @yuaone/cli    -- CLI entry point, REPL, terminal renderer, session management
+    yuan-mcp/      @yuaone/mcp    -- MCP server adapter for exposing tools to external clients
 ```
 
-### @yuan/core
+### @yuaone/core
 
 The agent runtime. Contains the main Agent Loop that orchestrates LLM calls and tool execution, the Governor that enforces safety limits, the Planner for task decomposition, and the Context Manager for token-aware history compaction.
 
-### @yuan/tools
+### @yuaone/tools
 
 Implementations of all 9 tools. Each tool extends `BaseTool` with a consistent interface for parameter validation, execution, and result formatting.
 
@@ -174,7 +174,7 @@ Implementations of all 9 tools. Each tool extends `BaseTool` with a consistent i
 
 The user-facing CLI built on Commander.js. Provides the interactive REPL, one-shot mode, session persistence (save/resume/list), configuration management, and terminal rendering with syntax-highlighted diffs.
 
-### @yuan/mcp
+### @yuaone/mcp
 
 An MCP (Model Context Protocol) server that exposes YUAN's tools as MCP resources and tool endpoints, allowing external MCP clients to use YUAN's capabilities.
 
@@ -215,7 +215,7 @@ YUAN enforces multiple layers of security:
 Contributions are welcome! See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
 
 ```bash
-git clone https://github.com/yua-inc/yuan.git
+git clone https://github.com/yuaone/yuan.git
 cd yuan
 pnpm install
 pnpm run build

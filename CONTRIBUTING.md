@@ -12,7 +12,7 @@ Thanks for your interest in contributing to YUAN! This guide will help you get s
 ### Setup
 
 ```bash
-git clone https://github.com/yua-inc/yuan.git
+git clone https://github.com/yuaone/yuan.git
 cd yuan
 pnpm install
 pnpm run build
@@ -45,16 +45,16 @@ YUAN uses a pnpm workspace with these packages:
 
 | Package | Path | Description |
 |---------|------|-------------|
-| `@yuan/core` | `packages/yuan-core/` | Agent runtime (loop, governor, planner) |
-| `@yuan/tools` | `packages/yuan-tools/` | Tool implementations (9 built-in tools) |
-| `yuan` (CLI) | `packages/yuan-cli/` | CLI entry point and REPL |
-| `@yuan/mcp` | `packages/yuan-mcp/` | MCP server adapter |
+| `@yuaone/core` | `packages/yuan-core/` | Agent runtime (loop, governor, planner) |
+| `@yuaone/tools` | `packages/yuan-tools/` | Tool implementations (9 built-in tools) |
+| `@yuaone/cli` | `packages/yuan-cli/` | CLI entry point and REPL |
+| `@yuaone/mcp` | `packages/yuan-mcp/` | MCP server adapter |
 
 ### Adding dependencies
 
 ```bash
 # Add to a specific package
-pnpm --filter @yuan/core add <dependency>
+pnpm --filter @yuaone/core add <dependency>
 
 # Add a dev dependency to the workspace root
 pnpm add -Dw <dependency>
@@ -67,7 +67,7 @@ pnpm add -Dw <dependency>
 - **TypeScript strict mode** -- all packages use `"strict": true`
 - **ESM only** -- all packages use `"type": "module"`
 - **JSDoc required** -- all public functions and exported types must have JSDoc comments
-- **Error handling** -- use the `YuanError` hierarchy from `@yuan/core` (never throw plain strings)
+- **Error handling** -- use the `YuanError` hierarchy from `@yuaone/core` (never throw plain strings)
 - **No `any`** -- avoid `any` types; use `unknown` and narrow with type guards
 
 ### Naming Conventions
@@ -85,7 +85,7 @@ pnpm add -Dw <dependency>
 pnpm run test
 
 # Run tests for a specific package
-pnpm --filter @yuan/core test
+pnpm --filter @yuaone/core test
 ```
 
 Tests use Node.js built-in test runner (`node --test`).
@@ -97,7 +97,7 @@ Tests use Node.js built-in test runner (`node --test`).
 pnpm run build
 
 # Build a specific package
-pnpm --filter @yuan/core build
+pnpm --filter @yuaone/core build
 ```
 
 Ensure `pnpm run build` passes before submitting a PR.
