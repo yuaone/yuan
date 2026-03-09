@@ -12,6 +12,8 @@
 import {
   AgentLoop,
   DEFAULT_LOOP_CONFIG,
+  ExecutionEngine,
+  type ExecutionEngineConfig,
   type AgentConfig,
   type AgentEvent,
   type BYOKConfig,
@@ -26,6 +28,7 @@ export interface AgentBridgeConfig {
   model?: string;
   baseUrl?: string;
   workDir: string;
+  useExecutionEngine?: boolean;
 }
 
 export type EventCallback = (event: AgentEvent) => void;
@@ -35,6 +38,7 @@ export type TerminationCallback = (result: { reason: string; [key: string]: unkn
 export class AgentBridge {
   private config: AgentBridgeConfig;
   private loop: AgentLoop | null = null;
+  private engine: ExecutionEngine | null = null;
   private eventCallback: EventCallback | null = null;
   private approvalCallback: ApprovalCallback | null = null;
   private terminationCallback: TerminationCallback | null = null;
@@ -78,7 +82,7 @@ export class AgentBridge {
     if (this.isProcessing) return;
     this.isProcessing = true;
 
-    const { provider, apiKey, model, baseUrl, workDir } = this.config;
+    const { provider, apiKey, model, baseUrl, workDir, useExecutionEngine } = this.config;
 
     // Build BYOK config
     const byokConfig: BYOKConfig = {
@@ -92,6 +96,20 @@ export class AgentBridge {
     const registry = createDefaultRegistry();
     const toolExecutor = registry.toExecutor(workDir);
 
+    if (useExecutionEngine) {
+      await this.runWithExecutionEngine(message, byokConfig, toolExecutor, workDir);
+    } else {
+      await this.runWithAgentLoop(message, byokConfig, toolExecutor, workDir);
+    }
+  }
+
+  /** Run using the standard AgentLoop */
+  private async runWithAgentLoop(
+    message: string,
+    byokConfig: BYOKConfig,
+    toolExecutor: ReturnType<ReturnType<typeof createDefaultRegistry>["toExecutor"]>,
+    workDir: string,
+  ): Promise<void> {
     // Build agent config
     const agentConfig: AgentConfig = {
       byok: byokConfig,
@@ -146,17 +164,119 @@ export class AgentBridge {
       this.terminationCallback?.({ reason: "ERROR", error: errMsg });
     } finally {
       this.isProcessing = false;
+      loop.removeAllListeners();
       this.loop = null;
+    }
+  }
+
+  /** Run using ExecutionEngine (hierarchical planning, parallel tools, deep verify) */
+  private async runWithExecutionEngine(
+    message: string,
+    byokConfig: BYOKConfig,
+    toolExecutor: ReturnType<ReturnType<typeof createDefaultRegistry>["toExecutor"]>,
+    workDir: string,
+  ): Promise<void> {
+    const engine = new ExecutionEngine({
+      byokConfig,
+      projectPath: workDir,
+      toolExecutor,
+      maxIterations: 100,
+      totalTokenBudget: 500_000,
+      enableParallel: true,
+      enableHierarchicalPlanning: true,
+      enableDeepVerify: true,
+      approvalHandler: (request: ApprovalRequest) => this.handleApproval(request),
+    });
+
+    this.engine = engine;
+
+    // Map ExecutionEngine events to AgentEvent format
+    engine.on("text_delta", (text: string) => {
+      this.eventCallback?.({ kind: "agent:text_delta", text } as AgentEvent);
+    });
+
+    engine.on("thinking", (text: string) => {
+      this.eventCallback?.({ kind: "agent:thinking", content: text } as AgentEvent);
+    });
+
+    engine.on("tool:call", (name: string, input: unknown) => {
+      this.eventCallback?.({ kind: "agent:tool_call", tool: name, input } as AgentEvent);
+    });
+
+    engine.on("tool:result", (name: string, output: unknown) => {
+      this.eventCallback?.({
+        kind: "agent:tool_result",
+        tool: name,
+        output,
+        durationMs: 0,
+      } as AgentEvent);
+    });
+
+    engine.on("engine:error", (error: Error) => {
+      this.eventCallback?.({
+        kind: "agent:error",
+        message: error.message,
+        retryable: false,
+      } as AgentEvent);
+    });
+
+    engine.on("engine:complete", (result: { summary: string; changedFiles: string[] }) => {
+      // Track changed files from engine result
+      for (const f of result.changedFiles) {
+        if (!this.changedFiles.includes(f)) {
+          this.changedFiles.push(f);
+        }
+      }
+
+      this.eventCallback?.({
+        kind: "agent:completed",
+        summary: result.summary,
+        filesChanged: result.changedFiles,
+      } as AgentEvent);
+    });
+
+    engine.on("phase:enter", (phase: string) => {
+      this.eventCallback?.({
+        kind: "agent:thinking",
+        content: `Phase: ${phase}`,
+      } as AgentEvent);
+    });
+
+    try {
+      const result = await engine.execute(message);
+      this.terminationCallback?.({
+        reason: "COMPLETE",
+        summary: result.summary,
+        changedFiles: result.changedFiles,
+      });
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      this.eventCallback?.({
+        kind: "agent:error",
+        message: errMsg,
+        retryable: false,
+      } as AgentEvent);
+      this.terminationCallback?.({ reason: "ERROR", error: errMsg });
+    } finally {
+      this.isProcessing = false;
+      engine.removeAllListeners();
+      this.engine = null;
     }
   }
 
   /** Interrupt the current agent execution (hard stop) */
   interrupt(): void {
-    if (this.loop && this.isProcessing) {
+    if (!this.isProcessing) return;
+
+    if (this.loop) {
       this.loop.interrupt({
         type: "hard",
         source: "cli",
       });
+    }
+
+    if (this.engine) {
+      this.engine.abort();
     }
   }
 
