@@ -194,6 +194,17 @@ export type {
   BuildResult,
 } from "./auto-fix.js";
 
+// ─── Failure Recovery ───
+export { FailureRecovery } from "./failure-recovery.js";
+export type {
+  ErrorCategory,
+  RecoveryStrategy,
+  RootCause,
+  RecoveryDecision,
+  FailureContext,
+  FailureRecoveryConfig,
+} from "./failure-recovery.js";
+
 // ─── Dependency Analyzer ───
 export { DependencyAnalyzer } from "./dependency-analyzer.js";
 export type {
@@ -353,12 +364,15 @@ export type {
   CodebaseIndex,
   SemanticSearchResult,
   BlastRadiusResult,
+  RelatedFile,
+  CallChainEntry,
 } from "./codebase-context.js";
 
 // ─── Hierarchical Planner ───
 export { HierarchicalPlanner } from "./hierarchical-planner.js";
 export type {
   PlanLevel,
+  Milestone,
   StrategicGoal,
   TacticalTask,
   OperationalAction,
@@ -676,3 +690,49 @@ export type {
   ReflexionConfig,
   ReflectParams,
 } from "./reflexion.js";
+
+// ─── World State ───
+export { WorldStateCollector } from "./world-state.js";
+export type {
+  WorldStateSnapshot,
+  WorldStateConfig,
+} from "./world-state.js";
+
+// ─── Execution Policy Engine ───
+export { ExecutionPolicyEngine, DEFAULT_POLICY } from "./execution-policy-engine.js";
+export type {
+  ExecutionPolicy,
+  PolicySource,
+} from "./execution-policy-engine.js";
+
+// ─── Cost Optimizer ───
+export { CostOptimizer } from "./cost-optimizer.js";
+export type {
+  ModelProfile,
+  CostEstimate,
+  CostRecord,
+  SessionCostSummary,
+  CostOptimizerConfig,
+} from "./cost-optimizer.js";
+// Note: ModelTier already exported from types.ts
+
+// ─── Impact Analyzer ───
+export { ImpactAnalyzer } from "./impact-analyzer.js";
+export type {
+  AffectedFile,
+  AffectedTest,
+  AffectedAPI,
+  ImpactBreakingChange,
+  RiskLevel,
+  ImpactReport,
+  ImpactAnalyzerConfig,
+} from "./impact-analyzer.js";
+
+// ─── Benchmark Runner ───
+export { BenchmarkRunner } from "./benchmark-runner.js";
+export type {
+  BenchmarkTask,
+  BenchmarkResult,
+  BenchmarkSummary,
+  BenchmarkRunnerConfig,
+} from "./benchmark-runner.js";

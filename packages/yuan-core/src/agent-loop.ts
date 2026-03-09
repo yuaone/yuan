@@ -58,6 +58,11 @@ import { ContinuationEngine } from "./continuation-engine.js";
 import { MemoryUpdater, type RunAnalysis } from "./memory-updater.js";
 import type { ContinuationCheckpoint, ToolDefinition } from "./types.js";
 import { MCPClient, type MCPServerConfig } from "./mcp-client.js";
+import { WorldStateCollector, type WorldStateSnapshot } from "./world-state.js";
+import { FailureRecovery, type RecoveryDecision } from "./failure-recovery.js";
+import { ExecutionPolicyEngine, type ExecutionPolicy } from "./execution-policy-engine.js";
+import { CostOptimizer } from "./cost-optimizer.js";
+import { ImpactAnalyzer, type ImpactReport } from "./impact-analyzer.js";
 
 /** AgentLoop 설정 */
 export interface AgentLoopOptions {
@@ -87,6 +92,8 @@ export interface AgentLoopOptions {
   planningThreshold?: "simple" | "moderate" | "complex";
   /** MCP 서버 설정 (외부 도구 연동) */
   mcpServerConfigs?: MCPServerConfig[];
+  /** 실행 정책 오버라이드 (미지정 시 .yuan/policy.json 자동 로드) */
+  policyOverrides?: Partial<ExecutionPolicy>;
 }
 
 /**
@@ -147,8 +154,16 @@ export class AgentLoop extends EventEmitter {
   private mcpToolDefinitions: ToolDefinition[] = [];
   private readonly mcpServerConfigs: MCPServerConfig[];
   private memoryUpdater: MemoryUpdater;
+  private failureRecovery: FailureRecovery;
+  private policyEngine: ExecutionPolicyEngine | null = null;
+  private worldState: WorldStateSnapshot | null = null;
+  private costOptimizer: CostOptimizer;
+  private impactAnalyzer: ImpactAnalyzer | null = null;
+  private readonly policyOverrides?: Partial<ExecutionPolicy>;
   private checkpointSaved = false;
   private iterationCount = 0;
+  private originalSnapshots: Map<string, string> = new Map();
+  private previousStrategies: import("./failure-recovery.js").RecoveryStrategy[] = [];
   private tokenUsage: TokenUsage = {
     input: 0,
     output: 0,
@@ -198,6 +213,9 @@ export class AgentLoop extends EventEmitter {
       totalBudget: options.config.loop.totalTokenBudget,
     });
     this.memoryUpdater = new MemoryUpdater();
+    this.failureRecovery = new FailureRecovery();
+    this.costOptimizer = new CostOptimizer();
+    this.policyOverrides = options.policyOverrides;
 
     // MCP 서버 설정 저장
     this.mcpServerConfigs = options.mcpServerConfigs ?? [];
@@ -254,6 +272,40 @@ export class AgentLoop extends EventEmitter {
       }
     }
 
+    // ExecutionPolicyEngine 로드
+    try {
+      this.policyEngine = new ExecutionPolicyEngine(projectPath);
+      const policy = await this.policyEngine.load();
+      if (this.policyOverrides) {
+        for (const [section, values] of Object.entries(this.policyOverrides)) {
+          this.policyEngine.override(
+            section as keyof ExecutionPolicy,
+            values as Partial<ExecutionPolicy[keyof ExecutionPolicy]>,
+          );
+        }
+      }
+      // FailureRecovery에 정책 적용
+      const recoveryConfig = this.policyEngine.toFailureRecoveryConfig();
+      this.failureRecovery = new FailureRecovery(recoveryConfig);
+    } catch {
+      // 정책 로드 실패 → 기본값 사용
+    }
+
+    // WorldState 수집 → system prompt에 주입
+    try {
+      const worldStateCollector = new WorldStateCollector({
+        projectPath,
+        maxRecentCommits: 10,
+        skipTest: true,
+      });
+      this.worldState = await worldStateCollector.collect();
+    } catch {
+      // WorldState 수집 실패는 치명적이지 않음
+    }
+
+    // ImpactAnalyzer 생성
+    this.impactAnalyzer = new ImpactAnalyzer({ projectPath });
+
     // ContinuationEngine 생성
     this.continuationEngine = new ContinuationEngine({ projectPath });
 
@@ -307,8 +359,15 @@ export class AgentLoop extends EventEmitter {
       environment: this.environment,
     });
 
+    // WorldState를 시스템 프롬프트에 추가
+    let worldStateSection = "";
+    if (this.worldState) {
+      const collector = new WorldStateCollector({ projectPath });
+      worldStateSection = "\n\n" + collector.formatForPrompt(this.worldState);
+    }
+
     // 기존 시스템 메시지를 향상된 프롬프트로 교체
-    this.contextManager.replaceSystemMessage(enhancedPrompt);
+    this.contextManager.replaceSystemMessage(enhancedPrompt + worldStateSection);
 
     // MemoryManager의 관련 학습/경고를 추가 컨텍스트로 주입
     if (this.memoryManager) {
@@ -375,6 +434,10 @@ export class AgentLoop extends EventEmitter {
     this.allToolResults = [];
     this.checkpointSaved = false;
     this.iterationCount = 0;
+    this.originalSnapshots.clear();
+    this.previousStrategies = [];
+    this.failureRecovery.reset();
+    this.costOptimizer.reset();
     this.tokenBudgetManager.reset();
     const runStartTime = Date.now();
 
@@ -922,6 +985,14 @@ export class AgentLoop extends EventEmitter {
         response.usage.output,
       );
 
+      // Cost tracking
+      this.costOptimizer.recordUsage(
+        this.config.byok.model ?? "unknown",
+        response.usage.input,
+        response.usage.output,
+        "executor",
+      );
+
       // Rebalance budgets every 5 iterations to redistribute from idle roles
       if (iteration % 5 === 0) {
         this.tokenBudgetManager.rebalance();
@@ -1027,13 +1098,72 @@ export class AgentLoop extends EventEmitter {
         durationMs: Date.now() - iterationStart,
       });
 
-      // 에러가 많으면 리플래닝 시도
+      // 에러가 많으면 FailureRecovery + 리플래닝 시도
       const errorResults = toolResults.filter((r) => !r.success);
-      if (errorResults.length > 0 && this.activePlan) {
+      if (errorResults.length > 0) {
         const errorSummary = errorResults
           .map((r) => `${r.name}: ${r.output}`)
           .join("\n");
-        await this.attemptReplan(errorSummary);
+
+        // FailureRecovery: 근본 원인 분석 + 전략 선택
+        const rootCause = this.failureRecovery.analyzeRootCause(
+          errorSummary,
+          errorResults[0]?.name,
+        );
+        const decision = this.failureRecovery.selectStrategy(rootCause, {
+          error: errorSummary,
+          toolName: errorResults[0]?.name,
+          toolOutput: errorResults[0]?.output,
+          attemptNumber: iteration,
+          maxAttempts: this.config.loop.maxIterations,
+          changedFiles: this.changedFiles,
+          originalSnapshots: this.originalSnapshots,
+          previousStrategies: this.previousStrategies,
+        });
+
+        this.previousStrategies.push(decision.strategy);
+        this.failureRecovery.recordStrategyResult(decision.strategy, false);
+
+        if (decision.strategy === "escalate") {
+          // 에스컬레이션: 유저에게 도움 요청
+          this.emitEvent({
+            kind: "agent:error",
+            message: `Recovery escalated: ${decision.reason}`,
+            retryable: false,
+          });
+        } else if (decision.strategy === "rollback") {
+          // 롤백 시도
+          await this.failureRecovery.executeRollback(
+            this.changedFiles,
+            this.originalSnapshots,
+          );
+          this.emitEvent({
+            kind: "agent:thinking",
+            content: `Rolled back changes. ${decision.reason}`,
+          });
+        } else {
+          // retry, approach_change, scope_reduce → 복구 프롬프트 주입
+          const recoveryPrompt = this.failureRecovery.buildRecoveryPrompt(
+            decision,
+            {
+              error: errorSummary,
+              attemptNumber: iteration,
+              maxAttempts: this.config.loop.maxIterations,
+              changedFiles: this.changedFiles,
+              originalSnapshots: this.originalSnapshots,
+              previousStrategies: this.previousStrategies,
+            },
+          );
+          this.contextManager.addMessage({
+            role: "system",
+            content: recoveryPrompt,
+          });
+        }
+
+        // HierarchicalPlanner 리플래닝도 시도
+        if (this.activePlan) {
+          await this.attemptReplan(errorSummary);
+        }
       }
 
       // 체크포인트 저장: 토큰 예산 80% 이상 사용 시 자동 저장 (1회만)
@@ -1218,6 +1348,16 @@ export class AgentLoop extends EventEmitter {
           // 변경 파일 추적 (메모리 업데이트용)
           if (!this.changedFiles.includes(filePathStr)) {
             this.changedFiles.push(filePathStr);
+            // 원본 스냅샷 저장 (rollback용) — 최초 변경 시에만
+            if (!this.originalSnapshots.has(filePathStr)) {
+              try {
+                const { readFile } = await import("node:fs/promises");
+                const original = await readFile(filePathStr, "utf-8");
+                this.originalSnapshots.set(filePathStr, original);
+              } catch {
+                // 파일이 새로 생성된 경우 스냅샷 없음
+              }
+            }
           }
 
           this.emitEvent({
@@ -1225,6 +1365,11 @@ export class AgentLoop extends EventEmitter {
             path: filePathStr,
             diff: result.output,
           });
+
+          // ImpactAnalyzer: 변경 영향 분석 (비동기, 실패 무시)
+          if (this.impactAnalyzer) {
+            this.analyzeFileImpact(filePathStr).catch(() => {});
+          }
         }
 
         // AutoFixLoop: 결과 검증
@@ -1507,6 +1652,27 @@ export class AgentLoop extends EventEmitter {
     return this.continuationEngine;
   }
 
+  /**
+   * FailureRecovery 인스턴스를 반환한다.
+   */
+  getFailureRecovery(): FailureRecovery {
+    return this.failureRecovery;
+  }
+
+  /**
+   * ExecutionPolicyEngine 인스턴스를 반환한다.
+   */
+  getPolicyEngine(): ExecutionPolicyEngine | null {
+    return this.policyEngine;
+  }
+
+  /**
+   * 마지막 수집된 WorldState를 반환한다.
+   */
+  getWorldState(): WorldStateSnapshot | null {
+    return this.worldState;
+  }
+
   // ─── Interrupt Helpers ───
 
   /**
@@ -1556,6 +1722,49 @@ export class AgentLoop extends EventEmitter {
       this.interruptManager.on("interrupt:resume", onResume);
       this.interruptManager.on("interrupt:hard", onHard);
     });
+  }
+
+  // ─── Impact Analysis ───
+
+  /**
+   * 파일 변경 후 영향 분석을 실행하고 결과를 컨텍스트에 주입.
+   * 고위험 변경이면 경고를 emit.
+   */
+  private async analyzeFileImpact(filePath: string): Promise<void> {
+    if (!this.impactAnalyzer) return;
+
+    try {
+      const report = await this.impactAnalyzer.analyzeChanges([filePath]);
+      if (report.riskLevel === "high" || report.riskLevel === "critical") {
+        this.emitEvent({
+          kind: "agent:thinking",
+          content: `Impact analysis: ${report.riskLevel} risk. ${report.affectedFiles.length} affected files, ${report.breakingChanges.length} breaking changes.`,
+        });
+
+        // 고위험 변경 정보를 LLM에 주입
+        const impactPrompt = this.impactAnalyzer.formatForPrompt(report);
+        this.contextManager.addMessage({
+          role: "system",
+          content: impactPrompt,
+        });
+      }
+    } catch {
+      // Impact analysis 실패는 치명적이지 않음
+    }
+  }
+
+  /**
+   * CostOptimizer 인스턴스를 반환한다.
+   */
+  getCostOptimizer(): CostOptimizer {
+    return this.costOptimizer;
+  }
+
+  /**
+   * ImpactAnalyzer 인스턴스를 반환한다.
+   */
+  getImpactAnalyzer(): ImpactAnalyzer | null {
+    return this.impactAnalyzer;
   }
 
   // ─── MCP Helpers ───

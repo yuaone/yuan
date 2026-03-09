@@ -144,6 +144,26 @@ export interface BlastRadiusResult {
   riskLevel: "low" | "medium" | "high";
 }
 
+/** A file related through the import graph. */
+export interface RelatedFile {
+  /** Absolute file path */
+  path: string;
+  /** How this file is related to the queried file */
+  relation: "imports" | "imported_by" | "co_changed";
+  /** Distance in the import graph from the queried file */
+  depth: number;
+}
+
+/** An entry in a call chain search result. */
+export interface CallChainEntry {
+  /** Absolute file path containing the call */
+  file: string;
+  /** Line number of the call site (1-based) */
+  line: number;
+  /** Source line text around the call */
+  context: string;
+}
+
 // ─── Constants ───
 
 const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx"]);
@@ -504,6 +524,163 @@ export class CodebaseContext {
       affectedTests,
       affectedExports,
       riskLevel,
+    };
+  }
+
+  // ─── Relation API ───
+
+  /**
+   * Find files related to the given file through imports/exports.
+   * Walks the import graph up to `maxDepth` hops.
+   *
+   * @param filePath - Absolute or project-relative path of the file
+   * @param maxDepth - Maximum depth to walk (default 2)
+   * @returns Array of related files with relation type and depth
+   */
+  async getRelatedFiles(filePath: string, maxDepth = 2): Promise<RelatedFile[]> {
+    const absFile = resolve(filePath);
+    const results: RelatedFile[] = [];
+    const seen = new Set<string>([absFile]);
+    const knownFiles = [...this.index.files.keys()];
+
+    // BFS forward (files this file imports)
+    const importQueue: { path: string; depth: number }[] = [];
+    const analysis = this.index.files.get(absFile);
+    if (analysis) {
+      for (const imp of analysis.imports) {
+        if (!imp.source.startsWith(".")) continue;
+        const resolved = this.resolveImportPath(absFile, imp.source, knownFiles);
+        if (resolved && !seen.has(resolved)) {
+          seen.add(resolved);
+          results.push({ path: resolved, relation: "imports", depth: 1 });
+          importQueue.push({ path: resolved, depth: 1 });
+        }
+      }
+    }
+
+    // Continue BFS for deeper imports
+    while (importQueue.length > 0) {
+      const current = importQueue.shift()!;
+      if (current.depth >= maxDepth) continue;
+      const currentAnalysis = this.index.files.get(current.path);
+      if (!currentAnalysis) continue;
+      for (const imp of currentAnalysis.imports) {
+        if (!imp.source.startsWith(".")) continue;
+        const resolved = this.resolveImportPath(current.path, imp.source, knownFiles);
+        if (resolved && !seen.has(resolved)) {
+          seen.add(resolved);
+          results.push({ path: resolved, relation: "imports", depth: current.depth + 1 });
+          importQueue.push({ path: resolved, depth: current.depth + 1 });
+        }
+      }
+    }
+
+    // BFS reverse (files that import this file)
+    const reverseQueue: { path: string; depth: number }[] = [];
+    const directDeps = this.reverseDepMap.get(absFile);
+    if (directDeps) {
+      for (const dep of directDeps) {
+        if (!seen.has(dep)) {
+          seen.add(dep);
+          results.push({ path: dep, relation: "imported_by", depth: 1 });
+          reverseQueue.push({ path: dep, depth: 1 });
+        }
+      }
+    }
+
+    while (reverseQueue.length > 0) {
+      const current = reverseQueue.shift()!;
+      if (current.depth >= maxDepth) continue;
+      const deps = this.reverseDepMap.get(current.path);
+      if (!deps) continue;
+      for (const dep of deps) {
+        if (!seen.has(dep)) {
+          seen.add(dep);
+          results.push({ path: dep, relation: "imported_by", depth: current.depth + 1 });
+          reverseQueue.push({ path: dep, depth: current.depth + 1 });
+        }
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * Find where a function is called across the project.
+   * Searches all indexed file contents for occurrences of the function name
+   * that look like call sites.
+   *
+   * @param functionName - Name of the function to search for
+   * @param filePath - File where the function is defined (excluded from results)
+   * @returns Array of call chain entries with file, line, and context
+   */
+  async getCallChain(functionName: string, filePath: string): Promise<CallChainEntry[]> {
+    const absFile = resolve(filePath);
+    const results: CallChainEntry[] = [];
+    const callPattern = new RegExp(`\\b${functionName}\\s*(?:<[^>]*>)?\\s*\\(`, "g");
+
+    for (const [file, content] of this.fileContents) {
+      if (file === absFile) continue;
+      const lines = content.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        if (callPattern.test(lines[i])) {
+          results.push({
+            file,
+            line: i + 1,
+            context: lines[i].trim(),
+          });
+        }
+        callPattern.lastIndex = 0;
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * Calculate the impact radius of a file — how many files depend on it
+   * directly and transitively, with a risk score.
+   *
+   * @param filePath - Absolute or project-relative path of the file
+   * @returns Direct/transitive dependent counts and a risk score
+   */
+  async getImpactRadius(filePath: string): Promise<{
+    directDependents: number;
+    transitiveDependents: number;
+    riskScore: number;
+  }> {
+    const absFile = resolve(filePath);
+
+    // Direct dependents
+    const directDeps = this.reverseDepMap.get(absFile);
+    const directCount = directDeps ? directDeps.size : 0;
+
+    // Transitive dependents (BFS)
+    const visited = new Set<string>([absFile]);
+    const queue = directDeps ? [...directDeps] : [];
+    for (const d of queue) visited.add(d);
+    let transitiveCount = 0;
+
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      transitiveCount++;
+      const deps = this.reverseDepMap.get(current);
+      if (!deps) continue;
+      for (const dep of deps) {
+        if (!visited.has(dep)) {
+          visited.add(dep);
+          queue.push(dep);
+        }
+      }
+    }
+
+    // Transitive count includes direct dependents; subtract to get only indirect
+    const indirectCount = transitiveCount - directCount;
+
+    return {
+      directDependents: directCount,
+      transitiveDependents: indirectCount,
+      riskScore: directCount * 2 + indirectCount,
     };
   }
 
