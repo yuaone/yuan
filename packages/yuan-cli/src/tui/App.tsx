@@ -263,7 +263,8 @@ function App({
     },
   });
 
-  const isRunning = agentStream.state.status !== "idle";
+  const st = agentStream.state.status;
+  const isRunning = st !== "idle" && st !== "completed" && st !== "error" && st !== "interrupted";
 
   // Calculate how many rows the slash menu takes
   const slashMenuRows = slashState.isOpen
@@ -316,8 +317,8 @@ function App({
         isRunning={isRunning}
       />
 
-      {/* Bottom keybind hints */}
-      <FooterBar isRunning={isRunning} slashMenuOpen={slashState.isOpen} />
+      {/* Bottom status indicator + keybind hints */}
+      <FooterBar agentState={agentStream.state} slashMenuOpen={slashState.isOpen} />
     </Box>
   );
 }
