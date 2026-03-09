@@ -1,5 +1,5 @@
 /**
- * @yuan/tools — grep tool
+ * @yuaone/tools — grep tool
  *
  * Searches file contents using regex patterns.
  * - Node.js built-in implementation (no ripgrep dependency)

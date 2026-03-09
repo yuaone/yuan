@@ -3,7 +3,7 @@
  * Terminal UI for Design Mode.
  */
 
-import type { DevServerState, DesignEvent, DOMSnapshot } from "@yuan/core";
+import type { DevServerState, DesignEvent, DOMSnapshot } from "@yuaone/core";
 
 let chalk: any;
 async function getChalk() {

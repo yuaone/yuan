@@ -1,10 +1,10 @@
 /**
- * @yuan/tools — Common validation utilities
+ * @yuaone/tools — Common validation utilities
  *
  * Security-first validators for path traversal, shell injection,
  * sensitive file detection, binary detection, and output truncation.
  *
- * Security rules SSOT: @yuan/core/security.ts
+ * Security rules SSOT: @yuaone/core/security.ts
  * This module delegates to the SSOT and provides tool-specific wrappers.
  */
 
@@ -15,7 +15,7 @@ import {
   validateCommand as coreValidateCommand,
   isSensitiveFile as securityIsSensitiveFile,
   SHELL_META_PATTERN,
-} from '@yuan/core';
+} from '@yuaone/core';
 
 // ─── Symlink-Aware Path Resolution ──────────────────────────────────
 
@@ -110,7 +110,7 @@ export function validatePath(inputPath: string, workDir: string): string {
 /**
  * Validate that neither executable nor args contain shell metacharacters.
  * Prevents shell injection when using execFile.
- * Delegates to SHELL_META_PATTERN from @yuan/core/security (SSOT).
+ * Delegates to SHELL_META_PATTERN from @yuaone/core/security (SSOT).
  */
 export function validateNoShellMeta(executable: string, args: string[]): void {
   if (SHELL_META_PATTERN.test(executable)) {
@@ -123,12 +123,12 @@ export function validateNoShellMeta(executable: string, args: string[]): void {
   }
 }
 
-// ─── Blocked Commands (delegates to @yuan/core/security SSOT) ───────
+// ─── Blocked Commands (delegates to @yuaone/core/security SSOT) ───────
 
 /**
  * Check whether an executable + args combination is blocked.
  * Throws with explanation if blocked.
- * Delegates to @yuan/core/security.validateCommand (SSOT).
+ * Delegates to @yuaone/core/security.validateCommand (SSOT).
  */
 export function validateCommand(executable: string, args: string[]): void {
   const result = coreValidateCommand(executable, args);
@@ -137,11 +137,11 @@ export function validateCommand(executable: string, args: string[]): void {
   }
 }
 
-// ─── Sensitive File Detection (delegates to @yuan/core/security SSOT) ───
+// ─── Sensitive File Detection (delegates to @yuaone/core/security SSOT) ───
 
 /**
  * Check whether a file path matches known sensitive file patterns.
- * Delegates to @yuan/core/security.isSensitiveFile (SSOT).
+ * Delegates to @yuaone/core/security.isSensitiveFile (SSOT).
  */
 export function isSensitiveFile(filePath: string): boolean {
   return securityIsSensitiveFile(filePath);

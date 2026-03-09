@@ -8,7 +8,7 @@
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { ToolRegistry } from "@yuan/tools";
+import type { ToolRegistry } from "@yuaone/tools";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 

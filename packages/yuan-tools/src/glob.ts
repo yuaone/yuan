@@ -1,5 +1,5 @@
 /**
- * @yuan/tools — glob tool
+ * @yuaone/tools — glob tool
  *
  * Finds files matching glob patterns.
  * - Uses fast-glob for performance

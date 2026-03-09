@@ -11,7 +11,7 @@
 
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
-import type { DOMSnapshot, AgentTermination } from "@yuan/core";
+import type { DOMSnapshot, AgentTermination } from "@yuaone/core";
 import { DesignRenderer } from "./design-renderer.js";
 import { ConfigManager } from "./config.js";
 
@@ -58,8 +58,8 @@ export async function runDesignMode(
     createDefaultRegistry,
     setDesignBrowserSession,
     clearDesignBrowserSession,
-  } = await import("@yuan/tools");
-  const { DesignLoop, DEFAULT_LOOP_CONFIG } = await import("@yuan/core");
+  } = await import("@yuaone/tools");
+  const { DesignLoop, DEFAULT_LOOP_CONFIG } = await import("@yuaone/core");
 
   const serverManager = new DevServerManager();
   const browserTool = new BrowserTool();

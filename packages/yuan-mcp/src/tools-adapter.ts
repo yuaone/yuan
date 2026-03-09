@@ -1,7 +1,7 @@
 /**
  * @yuan/mcp-server — Tools Adapter
  *
- * Converts @yuan/tools ToolRegistry tools into MCP tool registrations.
+ * Converts @yuaone/tools ToolRegistry tools into MCP tool registrations.
  *
  * MCP tool schema:
  * - name: string
@@ -14,7 +14,7 @@
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { ToolRegistry } from "@yuan/tools";
+import type { ToolRegistry } from "@yuaone/tools";
 import { z } from "zod";
 
 /**

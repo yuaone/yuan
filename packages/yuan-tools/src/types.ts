@@ -1,7 +1,7 @@
 /**
- * @yuan/tools — Type definitions
+ * @yuaone/tools — Type definitions
  *
- * Core types (ToolDefinition, ToolCall, ToolResult, etc.) are re-exported from @yuan/core.
+ * Core types (ToolDefinition, ToolCall, ToolResult, etc.) are re-exported from @yuaone/core.
  * Tool-specific I/O types remain here.
  */
 
@@ -11,7 +11,7 @@ export type {
   ToolCall,
   ToolResult,
   ToolParameterSchema,
-} from '@yuan/core';
+} from '@yuaone/core';
 
 // ─── Parameter Definition (tools-local, used by BaseTool subclasses) ─
 export interface ParameterDef {

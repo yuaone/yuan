@@ -1,5 +1,5 @@
 /**
- * @yuan/tools — Validator unit tests
+ * @yuaone/tools — Validator unit tests
  *
  * Tests security validators: command blocking, path traversal,
  * shell metacharacters, sensitive file detection, binary detection.
@@ -102,7 +102,7 @@ describe('validateNoShellMeta', () => {
   });
 });
 
-// ─── Command Validation (delegates to @yuan/core) ───────────────────
+// ─── Command Validation (delegates to @yuaone/core) ───────────────────
 
 describe('validateCommand', () => {
   it('should allow safe commands: ls', () => {

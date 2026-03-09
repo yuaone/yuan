@@ -1,5 +1,5 @@
 /**
- * @yuan/tools — Browser Visual Debugging Tool
+ * @yuaone/tools — Browser Visual Debugging Tool
  *
  * Provides browser automation for visual debugging:
  * - browser open:       Launch browser and navigate to URL
@@ -38,7 +38,7 @@ async function getPlaywright(): Promise<any> {
       playwrightModule = await (Function('m', 'return import(m)') as (m: string) => Promise<any>)(moduleName);
     } catch {
       throw new Error(
-        'Playwright is not installed. Run: pnpm --filter @yuan/tools add playwright && npx playwright install chromium',
+        'Playwright is not installed. Run: pnpm --filter @yuaone/tools add playwright && npx playwright install chromium',
       );
     }
   }

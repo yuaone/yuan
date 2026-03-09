@@ -1,5 +1,5 @@
 /**
- * @yuan/tools — FileEditTool unit tests
+ * @yuaone/tools — FileEditTool unit tests
  *
  * Tests file editing: replacement, ambiguity, replace_all,
  * deletion, whitespace sensitivity, large files, fuzzy suggestions.

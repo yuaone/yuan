@@ -1,5 +1,5 @@
 /**
- * @yuan/tools — shell_exec tool
+ * @yuaone/tools — shell_exec tool
  *
  * Executes a command using execFile (no shell interpretation).
  * - executable + args[] pattern (not a string command)

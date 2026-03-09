@@ -1,5 +1,5 @@
 /**
- * @yuan/tools — code_search tool
+ * @yuaone/tools — code_search tool
  *
  * Phase 1: Symbol-based code search using regex patterns.
  * (Embedding-based semantic search planned for Phase 2)

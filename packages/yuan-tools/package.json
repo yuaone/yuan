@@ -1,5 +1,5 @@
 {
-  "name": "@yuan/tools",
+  "name": "@yuaone/tools",
   "version": "0.1.0",
   "description": "YUAN Agent Tool Implementations",
   "license": "AGPL-3.0",
@@ -31,7 +31,7 @@
     "test": "node --test dist/__tests__/*.test.js"
   },
   "dependencies": {
-    "@yuan/core": "workspace:*",
+    "@yuaone/core": "workspace:*",
     "fast-glob": "^3.3.3",
     "playwright": "^1.52.0"
   },

@@ -2,7 +2,7 @@
  * YUAN CLI — Session Manager
  *
  * Handles saving/loading agent sessions for `yuan resume`.
- * Connects to @yuan/core SessionPersistence for disk-level persistence
+ * Connects to @yuaone/core SessionPersistence for disk-level persistence
  * with checkpointing and crash recovery support.
  */
 
@@ -16,7 +16,7 @@ import {
   type PersistentSessionData,
   type CheckpointData,
   type SessionStatus,
-} from "@yuan/core";
+} from "@yuaone/core";
 
 const YUAN_DIR = path.join(os.homedir(), ".yuan");
 const SESSIONS_DIR = path.join(YUAN_DIR, "sessions");
@@ -46,7 +46,7 @@ export interface SessionData {
 /**
  * SessionManager — save/load/resume agent sessions.
  *
- * Wraps @yuan/core SessionPersistence with CLI-friendly interface.
+ * Wraps @yuaone/core SessionPersistence with CLI-friendly interface.
  * Sessions are stored in ~/.yuan/sessions/<sessionId>/ with:
  * - state.json: metadata
  * - messages.json: conversation history

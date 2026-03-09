@@ -1,5 +1,5 @@
 /**
- * @yuan/tools — file_read tool
+ * @yuaone/tools — file_read tool
  *
  * Reads a file with optional offset/limit.
  * - 50KB size limit (auto-split guidance on overflow)

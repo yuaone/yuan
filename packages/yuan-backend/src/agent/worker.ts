@@ -2,15 +2,15 @@
  * Worker entry-point -- forked by ProcessManager.
  *
  * Reads agent config from `YUAN_AGENT_CONFIG` env or the first IPC `init`
- * message, instantiates the ExecutionEngine from @yuan/core, and relays
+ * message, instantiates the ExecutionEngine from @yuaone/core, and relays
  * events back to the parent via `process.send()`.
  *
  * @module
  */
 
-import { ExecutionEngine } from "@yuan/core";
-import type { ExecutionEngineConfig, LLMProvider } from "@yuan/core";
-import { createDefaultRegistry } from "@yuan/tools";
+import { ExecutionEngine } from "@yuaone/core";
+import type { ExecutionEngineConfig, LLMProvider } from "@yuaone/core";
+import { createDefaultRegistry } from "@yuaone/tools";
 
 // ---------------------------------------------------------------------------
 // Types (duplicated minimally to avoid importing parent code)

@@ -1,5 +1,5 @@
 {
-  "name": "yuan",
+  "name": "@yuaone/cli",
   "version": "0.1.0",
   "description": "YUAN — Autonomous Coding Agent CLI",
   "license": "AGPL-3.0",
@@ -34,8 +34,8 @@
     "start": "node dist/cli.js"
   },
   "dependencies": {
-    "@yuan/core": "workspace:*",
-    "@yuan/tools": "workspace:*",
+    "@yuaone/core": "workspace:*",
+    "@yuaone/tools": "workspace:*",
     "commander": "^13.1.0"
   },
   "devDependencies": {

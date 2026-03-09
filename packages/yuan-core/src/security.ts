@@ -5,7 +5,7 @@
  * QA에서 지적된 이슈 해결: Governor(constants.ts)와 tools/validators.ts에
  * 보안 규칙이 이중 정의되어 있던 문제를 이 모듈로 통일.
  *
- * Governor와 @yuan/tools 모두 여기서 import.
+ * Governor와 @yuaone/tools 모두 여기서 import.
  */
 
 // ─── Types ─────────────────────────────────────────────────────────

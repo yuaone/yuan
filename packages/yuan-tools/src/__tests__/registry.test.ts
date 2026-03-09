@@ -1,5 +1,5 @@
 /**
- * @yuan/tools — ToolRegistry unit tests
+ * @yuaone/tools — ToolRegistry unit tests
  *
  * Tests registry: default tools, get/has, definitions, executor.
  */

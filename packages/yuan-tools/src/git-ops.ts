@@ -1,5 +1,5 @@
 /**
- * @yuan/tools — git_ops tool
+ * @yuaone/tools — git_ops tool
  *
  * Git operations: status, diff, log, add, commit, create_branch, stash, restore.
  * - commit/create_branch require approval (riskLevel dynamically elevated)

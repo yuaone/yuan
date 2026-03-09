@@ -1,5 +1,5 @@
 /**
- * @module @yuan/core
+ * @module @yuaone/core
  * @description YUAN Agent Core Runtime — 메인 진입점.
  *
  * 핵심 모듈:

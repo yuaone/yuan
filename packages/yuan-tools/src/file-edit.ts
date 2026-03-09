@@ -1,5 +1,5 @@
 /**
- * @yuan/tools — file_edit tool
+ * @yuaone/tools — file_edit tool
  *
  * Performs exact string replacement in files.
  * - old_string must exist in file

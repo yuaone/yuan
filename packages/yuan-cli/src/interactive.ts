@@ -3,7 +3,7 @@
  *
  * REPL loop for interactive agent sessions.
  * Supports slash commands, multiline input, and streaming responses.
- * Wired to @yuan/core AgentLoop + @yuan/tools for real LLM-powered execution.
+ * Wired to @yuaone/core AgentLoop + @yuaone/tools for real LLM-powered execution.
  */
 
 import * as fs from "node:fs";
@@ -22,8 +22,8 @@ import {
   type BYOKConfig,
   type ApprovalRequest,
   type ApprovalResponse,
-} from "@yuan/core";
-import { createDefaultRegistry } from "@yuan/tools";
+} from "@yuaone/core";
+import { createDefaultRegistry } from "@yuaone/tools";
 import { CloudClient, type AgentEvent as CloudAgentEvent } from "./cloud-client.js";
 
 const ESC = "\x1b[";

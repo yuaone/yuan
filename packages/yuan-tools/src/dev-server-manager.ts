@@ -1,5 +1,5 @@
 /**
- * @yuan/tools — DevServerManager
+ * @yuaone/tools — DevServerManager
  *
  * Detects framework, starts/stops dev servers, detects port from stdout.
  */
@@ -9,7 +9,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createServer } from "node:net";
 import { EventEmitter } from "node:events";
-import type { DesignFramework, DevServerState } from "@yuan/core";
+import type { DesignFramework, DevServerState } from "@yuaone/core";
 
 const FRAMEWORK_DETECTORS: Array<{
   key: string;

@@ -1,5 +1,5 @@
 /**
- * @yuan/tools — test_run tool
+ * @yuaone/tools — test_run tool
  *
  * Test framework auto-detection + execution.
  *

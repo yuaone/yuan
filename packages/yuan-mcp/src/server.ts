@@ -17,7 +17,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { createDefaultRegistry } from "@yuan/tools";
+import { createDefaultRegistry } from "@yuaone/tools";
 import { registerToolsOnServer } from "./tools-adapter.js";
 import { registerResources } from "./resources.js";
 

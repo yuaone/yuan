@@ -1,14 +1,14 @@
 /**
- * @yuan/tools — Tool Registry
+ * @yuaone/tools — Tool Registry
  *
  * Central registry for all YUAN agent tools.
  * - Register/retrieve tools by name
  * - Generate LLM-ready tool definitions
  * - Execute tools by name
- * - toExecutor() bridges to @yuan/core's ToolExecutor interface
+ * - toExecutor() bridges to @yuaone/core's ToolExecutor interface
  */
 
-import type { ToolDefinition, ToolResult, ToolCall, ToolExecutor } from '@yuan/core';
+import type { ToolDefinition, ToolResult, ToolCall, ToolExecutor } from '@yuaone/core';
 import type { BaseTool } from './base-tool.js';
 
 export class ToolRegistry {
@@ -102,7 +102,7 @@ export class ToolRegistry {
   }
 
   /**
-   * Create a ToolExecutor adapter that implements @yuan/core's ToolExecutor interface.
+   * Create a ToolExecutor adapter that implements @yuaone/core's ToolExecutor interface.
    *
    * The adapter:
    * - Provides tool definitions in JSON Schema format

@@ -1,17 +1,17 @@
 /**
- * @yuan/tools — YUAN Agent Tool Implementations
+ * @yuaone/tools — YUAN Agent Tool Implementations
  *
  * Provides the complete tool system for the YUAN coding agent:
  * file_read, file_write, file_edit, shell_exec, grep, glob, git_ops, test_run, code_search, security_scan
  */
 
-// Core types (re-exported from @yuan/core via types.ts)
+// Core types (re-exported from @yuaone/core via types.ts)
 export type {
   ToolDefinition,
   ToolCall,
   ToolResult,
   ToolParameterSchema,
-} from '@yuan/core';
+} from '@yuaone/core';
 
 // Tool-local types
 export type {

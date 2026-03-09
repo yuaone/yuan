@@ -1,5 +1,5 @@
 {
-  "name": "@yuan/backend",
+  "name": "@yuaone/backend",
   "version": "0.1.0",
   "description": "YUAN Agent Backend — Independent API server for coding agent execution",
   "license": "AGPL-3.0",
@@ -13,8 +13,8 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@yuan/core": "workspace:*",
-    "@yuan/tools": "workspace:*",
+    "@yuaone/core": "workspace:*",
+    "@yuaone/tools": "workspace:*",
     "cors": "^2.8.5",
     "dotenv": "^16.3.0",
     "express": "^4.18.2",

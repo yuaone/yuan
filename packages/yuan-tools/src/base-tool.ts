@@ -1,5 +1,5 @@
 /**
- * @yuan/tools — BaseTool abstract class
+ * @yuaone/tools — BaseTool abstract class
  *
  * Every tool inherits from BaseTool which provides:
  * - Tool definition metadata
@@ -7,11 +7,11 @@
  * - Output truncation
  * - Common execute contract
  *
- * ToolResult now uses @yuan/core's format:
+ * ToolResult now uses @yuaone/core's format:
  *   { tool_call_id, name, output, success, durationMs }
  */
 
-import type { ToolResult, ToolDefinition, ToolParameterSchema } from '@yuan/core';
+import type { ToolResult, ToolDefinition, ToolParameterSchema } from '@yuaone/core';
 import type { ParameterDef, RiskLevel } from './types.js';
 import { validatePath as _validatePath, truncateOutput as _truncateOutput } from './validators.js';
 

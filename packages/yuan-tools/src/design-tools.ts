@@ -1,5 +1,5 @@
 /**
- * @yuan/tools — Design Mode Tools
+ * @yuaone/tools — Design Mode Tools
  *
  * 6 design-specific tools that wrap BrowserTool for visual design iteration:
  * - design_snapshot:   Get DOM accessibility tree
@@ -14,7 +14,7 @@
  */
 
 import type { ParameterDef, RiskLevel } from './types.js';
-import type { ToolResult } from '@yuan/core';
+import type { ToolResult } from '@yuaone/core';
 import { BaseTool } from './base-tool.js';
 import { BrowserTool } from './browser-tool.js';
 

@@ -1,5 +1,5 @@
 /**
- * @yuan/tools — file_write tool
+ * @yuaone/tools — file_write tool
  *
  * Writes content to a file.
  * - Auto-creates directories (mkdir -p)

@@ -15,7 +15,7 @@ import { join, relative, extname } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { ParameterDef, RiskLevel } from './types.js';
-import type { ToolResult } from '@yuan/core';
+import type { ToolResult } from '@yuaone/core';
 import { BaseTool } from './base-tool.js';
 
 const execFileAsync = promisify(execFile);
