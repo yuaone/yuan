@@ -1,13 +1,17 @@
 /**
- * MessageList — scrollable message area with virtual scroll.
+ * MessageList — scrollable message area.
  * Uses MessageBubble for individual message rendering.
- * Supports PageUp/PageDown scroll, auto-scroll on new messages.
+ * Supports PageUp/PageDown scroll, auto-pins to bottom on new content.
+ *
+ * Anti-overlap strategy: estimate each message's line count and only
+ * render enough messages to fill the container height. This prevents
+ * Ink's unreliable overflow="hidden" from causing messages to bleed
+ * into adjacent components.
  */
 
-import React from "react";
+import React, { memo, useState, useEffect, useRef } from "react";
 import { Box, Text, useInput } from "ink";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
-import { useScrollPosition } from "../hooks/useScrollPosition.js";
 import { MessageBubble } from "./MessageBubble.js";
 import { Spinner } from "./Spinner.js";
 import { TOKENS } from "../lib/tokens.js";
@@ -22,7 +26,37 @@ export interface MessageListProps {
   maxHeight?: number;
 }
 
-export function MessageList({
+/**
+ * Estimate how many terminal lines a message will occupy.
+ * Conservative (overestimates) to guarantee no overflow.
+ */
+function estimateLines(msg: TUIMessage, columns: number): number {
+  const contentWidth = Math.max(20, columns - 8); // padding/indentation
+  const textLen = msg.content?.length ?? 0;
+  const contentLines = textLen === 0 ? 0 : Math.ceil(textLen / contentWidth);
+
+  switch (msg.role) {
+    case "user":
+      // Bubble: word-wrapped lines + 1 marginBottom
+      return Math.max(1, contentLines) + 1;
+    case "assistant": {
+      // Header(1) + content lines + tool calls + marginBottom(1)
+      const toolLines = msg.toolCalls?.length ?? 0;
+      return 1 + Math.max(0, contentLines) + toolLines + 1;
+    }
+    case "tool":
+      return 1;
+    case "system": {
+      // System messages can be multi-line (newlines in content)
+      const newlines = (msg.content?.match(/\n/g) ?? []).length;
+      return Math.max(1, newlines + 1);
+    }
+    default:
+      return 1;
+  }
+}
+
+export const MessageList = memo(function MessageList({
   messages,
   isThinking,
   maxHeight,
@@ -30,47 +64,69 @@ export function MessageList({
   const { columns, rows } = useTerminalSize();
   const height = maxHeight ?? rows - 4;
 
-  // Approximate: each message takes ~3 lines on average
-  const viewportMsgCount = Math.max(3, Math.floor(height / 3));
+  // Pinned = auto-scroll mode (show newest). false = user browsing history.
+  const [pinned, setPinned] = useState(true);
+  // Manual offset from the end (0 = latest, positive = scrolled up)
+  const [scrollBack, setScrollBack] = useState(0);
+  const prevMsgCountRef = useRef(messages.length);
 
-  const [scroll, scrollActions] = useScrollPosition(
-    messages.length,
-    viewportMsgCount,
-  );
+  // Auto-pin when new messages arrive (if already pinned)
+  useEffect(() => {
+    if (messages.length > prevMsgCountRef.current && pinned) {
+      setScrollBack(0);
+    }
+    prevMsgCountRef.current = messages.length;
+  }, [messages.length, pinned]);
 
   // Key handling for scroll
   useInput((_input, key) => {
     if (key.pageUp) {
-      scrollActions.pageUp();
+      setPinned(false);
+      setScrollBack((prev) => Math.min(prev + 5, Math.max(0, messages.length - 1)));
     } else if (key.pageDown) {
-      scrollActions.pageDown();
+      setScrollBack((prev) => {
+        const next = Math.max(0, prev - 5);
+        if (next === 0) setPinned(true);
+        return next;
+      });
     }
   });
 
-  // Compute visible slice
-  const startIdx = scroll.offset;
-  const endIdx = Math.min(messages.length, startIdx + viewportMsgCount);
-  const visibleMessages = messages.slice(startIdx, endIdx);
+  // Compute visible slice — fit messages within height budget
+  const endIdx = Math.max(0, messages.length - scrollBack);
 
-  const hasAbove = scroll.aboveCount > 0;
-  const hasBelow = scroll.belowCount > 0;
+  // Walk backwards from endIdx, accumulating estimated lines until we hit the height budget
+  const reservedLines = 2; // scroll indicators + thinking
+  let budget = height - reservedLines;
+  let startIdx = endIdx;
+  for (let i = endIdx - 1; i >= 0 && budget > 0; i--) {
+    const lines = estimateLines(messages[i]!, columns);
+    if (budget - lines < 0 && startIdx < endIdx) break; // don't add if it overflows (unless it's the first)
+    budget -= lines;
+    startIdx = i;
+  }
+
+  const visibleMessages = messages.slice(startIdx, endIdx);
+  const hasAbove = startIdx > 0;
+  const hasBelow = scrollBack > 0;
 
   return (
-    <Box flexDirection="column" height={height} overflow="hidden">
+    <Box flexDirection="column" height={height} overflow="hidden" justifyContent="flex-end">
       {/* Scroll-up indicator */}
       {hasAbove && (
-        <Box justifyContent="center">
-          <Text dimColor>↑ {scroll.aboveCount} more</Text>
+        <Box justifyContent="center" flexShrink={0}>
+          <Text dimColor>--- {startIdx} more (PgUp) ---</Text>
         </Box>
       )}
 
-      {/* Messages */}
+      {/* Empty state */}
       {visibleMessages.length === 0 && !isThinking && (
-        <Box justifyContent="center" marginTop={Math.floor(height / 3)}>
+        <Box justifyContent="center" flexGrow={1}>
           <Text dimColor>Type a message to start...</Text>
         </Box>
       )}
 
+      {/* Messages */}
       {visibleMessages.map((msg, i) => (
         <MessageBubble
           key={msg.id}
@@ -82,7 +138,7 @@ export function MessageList({
 
       {/* Thinking indicator */}
       {isThinking && !messages.some((m) => m.isStreaming) && (
-        <Box marginTop={0}>
+        <Box marginTop={0} flexShrink={0}>
           <Text>  </Text>
           <Spinner label={`${TOKENS.brand.name} ·····`} />
         </Box>
@@ -90,10 +146,10 @@ export function MessageList({
 
       {/* Scroll-down indicator */}
       {hasBelow && (
-        <Box justifyContent="center">
-          <Text dimColor>↓ {scroll.belowCount} more</Text>
+        <Box justifyContent="center" flexShrink={0}>
+          <Text dimColor>--- {scrollBack} more (PgDn) ---</Text>
         </Box>
       )}
     </Box>
   );
-}
+});

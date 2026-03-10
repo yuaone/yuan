@@ -2065,7 +2065,7 @@ ${[...this.changedFiles].join(", ")}
             (event.durationMs as number) ?? 0,
             (event.success as boolean) ?? true,
           );
-          this.emit("tool:result", event.tool as string, event.output as string);
+          this.emit("tool:result", event.tool as string, event.output as string, (event.durationMs as number) ?? 0);
           if (this.perfOptimizer) {
             this.perfOptimizer.recordToolCall(
               event.tool as string,

@@ -15,7 +15,7 @@
  *   interrupted   ✗ interrupted  3.4s             / commands  ↑↓ history  ^C exit
  */
 
-import React from "react";
+import React, { memo } from "react";
 import { Box, Text } from "ink";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
 import type { AgentStreamState } from "../types.js";
@@ -60,8 +60,8 @@ function Indicator({ agentState }: { agentState: AgentStreamState }): React.JSX.
   const { status, elapsedMs, lastElapsedMs, currentToolName, currentToolArgs, lastError, totalTokensUsed, filesChangedCount } = agentState;
   const elapsed = formatElapsed(elapsedMs);
 
-  // Spinner frame based on elapsed time
-  const spinnerIdx = Math.floor((elapsedMs / 80) % SPINNER_FRAMES.length);
+  // Spinner frame — derived from elapsed seconds (stable with 1s timer tick)
+  const spinnerIdx = Math.floor(elapsedMs / 1000) % SPINNER_FRAMES.length;
   const spinner = SPINNER_FRAMES[spinnerIdx];
 
   switch (status) {
@@ -90,7 +90,7 @@ function Indicator({ agentState }: { agentState: AgentStreamState }): React.JSX.
     case "streaming":
       return (
         <Text>
-          <Text color="white" bold>◆</Text>
+          <Text color="white" bold>●</Text>
           <Text dimColor> streaming  {elapsed}</Text>
         </Text>
       );
@@ -209,13 +209,17 @@ function KeybindHints({ agentState, slashMenuOpen }: { agentState: AgentStreamSt
   );
 }
 
-export function FooterBar({ agentState, slashMenuOpen }: FooterBarProps): React.JSX.Element {
+export const FooterBar = memo(function FooterBar({ agentState, slashMenuOpen }: FooterBarProps): React.JSX.Element {
   const { columns } = useTerminalSize();
 
   return (
     <Box width={columns} height={1} flexShrink={0} justifyContent="space-between">
-      <Indicator agentState={agentState} />
-      <KeybindHints agentState={agentState} slashMenuOpen={slashMenuOpen} />
+      <Box minWidth={35}>
+        <Indicator agentState={agentState} />
+      </Box>
+      <Box minWidth={30}>
+        <KeybindHints agentState={agentState} slashMenuOpen={slashMenuOpen} />
+      </Box>
     </Box>
   );
-}
+});

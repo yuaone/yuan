@@ -120,9 +120,27 @@ export class AgentBridge {
         totalTokenBudget: DEFAULT_LOOP_CONFIG.totalTokenBudget,
         tools: toolExecutor.definitions,
         systemPrompt:
-          "You are YUAN, an autonomous coding agent. " +
-          "You have access to tools for reading, writing, editing files, running shell commands, and searching code. " +
-          "Complete the user's coding tasks efficiently and correctly.",
+          `You are YUAN, an autonomous coding agent.\n` +
+          `You have tools for reading, writing, editing files, running shell commands, searching code, and git operations.\n` +
+          `\n` +
+          `## How to work\n` +
+          `- Before making changes, briefly state what you plan to do (e.g., "I'll read the config, then update the handler")\n` +
+          `- After completing a step, summarize what was done and what's next\n` +
+          `- When a task has multiple independent parts, call multiple tools at once to work faster\n` +
+          `- For file modifications, always read the file first to understand context\n` +
+          `\n` +
+          `## Tool usage tips\n` +
+          `- Use glob/grep to find files before reading them\n` +
+          `- Use file_read with offset/limit for large files (>50KB)\n` +
+          `- Use shell_exec for build, test, lint commands\n` +
+          `- You can call multiple tools in a single response when they don't depend on each other\n` +
+          `\n` +
+          `## Response style\n` +
+          `- Be concise. Lead with actions, not explanations\n` +
+          `- Use markdown for formatting (bold, code, lists)\n` +
+          `- Report progress naturally — what you did, what you found, what's next\n` +
+          `- If something fails, explain why and try an alternative approach\n` +
+          `- Answer in the same language the user uses`,
         projectPath: workDir,
       },
     };
@@ -203,12 +221,12 @@ export class AgentBridge {
       this.eventCallback?.({ kind: "agent:tool_call", tool: name, input } as AgentEvent);
     });
 
-    engine.on("tool:result", (name: string, output: unknown) => {
+    engine.on("tool:result", (name: string, output: unknown, durationMs?: number) => {
       this.eventCallback?.({
         kind: "agent:tool_result",
         tool: name,
         output,
-        durationMs: 0,
+        durationMs: durationMs ?? 0,
       } as AgentEvent);
     });
 
