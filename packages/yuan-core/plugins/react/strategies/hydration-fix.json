@@ -1,0 +1,42 @@
+{
+  "id": "hydration-fix",
+  "name": "Hydration Mismatch Fix",
+  "description": "Multi-phase strategy to diagnose and resolve React hydration mismatches in SSR/Next.js applications",
+  "problemClass": "hydration_error",
+  "phases": [
+    {
+      "name": "Reproduce & Collect Evidence",
+      "tools": ["shell_exec", "grep", "file_read"],
+      "maxIterations": 3,
+      "successCriteria": "Hydration error message identified with specific component and line reference. Build output collected showing the exact mismatch text."
+    },
+    {
+      "name": "Diagnose Root Cause",
+      "tools": ["grep", "file_read"],
+      "maxIterations": 5,
+      "successCriteria": "Root cause identified: one of (1) browser API in render path, (2) date/random in render, (3) conditional rendering based on typeof window, (4) third-party component accessing browser globals, (5) data mismatch between server and client. Affected files and line numbers documented."
+    },
+    {
+      "name": "Apply Fix",
+      "tools": ["file_edit", "file_read"],
+      "maxIterations": 5,
+      "successCriteria": "Fix applied using appropriate strategy: (a) useEffect wrapper for client-only code, (b) next/dynamic with ssr:false for client-only components, (c) useIsClient hook for conditional rendering, (d) suppressHydrationWarning for intentional mismatches. No new TypeScript errors introduced."
+    },
+    {
+      "name": "Verify Fix",
+      "tools": ["shell_exec", "grep"],
+      "maxIterations": 3,
+      "successCriteria": "next build passes without errors. Dev server shows zero hydration warnings in console. Server-rendered HTML verified with curl to contain expected content. Existing tests pass."
+    }
+  ],
+  "exitCriteria": [
+    "next build completes successfully",
+    "Zero hydration mismatch warnings in browser console",
+    "Server-rendered HTML contains expected content",
+    "All existing tests pass",
+    "No new TypeScript errors"
+  ],
+  "fallback": "ssr-disable-component",
+  "estimatedTokens": 3000,
+  "confidence": 0.90
+}

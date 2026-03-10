@@ -1,0 +1,88 @@
+{
+  "$schema": "https://yuaone.com/schemas/patterns.json",
+  "name": "React Anti-Patterns",
+  "version": "1.0.0",
+  "description": "Common React anti-patterns to detect and warn about",
+  "patterns": [
+    {
+      "id": "index-as-key",
+      "name": "Array Index as Key",
+      "description": "Using array index as key in lists causes bugs when items are reordered, inserted, or deleted.",
+      "detect": "\\.map\\s*\\(\\s*\\([^,)]+,\\s*(\\w+)\\)\\s*=>.*key\\s*=\\s*\\{\\s*\\1\\s*\\}",
+      "action": "warn",
+      "template": "// BAD: key={index}\nitems.map((item, index) => <Item key={index} />)\n\n// GOOD: key={item.id}\nitems.map(item => <Item key={item.id} />)\n\n// If no ID, generate one at creation time:\nconst newItem = { id: crypto.randomUUID(), ...data };"
+    },
+    {
+      "id": "use-effect-no-deps",
+      "name": "useEffect Without Dependency Array",
+      "description": "useEffect without dependency array runs on EVERY render. Usually a bug.",
+      "detect": "useEffect\\(\\s*\\(\\)\\s*=>\\s*\\{[^}]+\\}\\s*\\)\\s*;",
+      "action": "warn",
+      "template": "// BAD: runs every render\nuseEffect(() => { fetchData(); });\n\n// GOOD: runs once on mount\nuseEffect(() => { fetchData(); }, []);\n\n// GOOD: runs when dependency changes\nuseEffect(() => { fetchData(id); }, [id]);"
+    },
+    {
+      "id": "props-in-state",
+      "name": "Copying Props into State",
+      "description": "Copying props into state creates a stale data source. Compute derived values directly from props.",
+      "detect": "useState\\(\\s*props\\.|const\\s*\\[\\w+,\\s*set\\w+\\]\\s*=\\s*useState\\(\\w+\\)",
+      "action": "warn",
+      "template": "// BAD: derived state from props\nfunction UserGreeting({ user }) {\n  const [name, setName] = useState(user.name); // Stale!\n  return <h1>{name}</h1>;\n}\n\n// GOOD: compute directly from props\nfunction UserGreeting({ user }) {\n  const displayName = user.name.toUpperCase(); // Always fresh\n  return <h1>{displayName}</h1>;\n}\n\n// Exception: only use state for props as initial values\nfunction EditableField({ initialValue }) {\n  const [value, setValue] = useState(initialValue);\n  // User edits diverge from initial value intentionally\n}"
+    },
+    {
+      "id": "direct-dom-manipulation",
+      "name": "Direct DOM Manipulation",
+      "description": "Avoid direct DOM manipulation (querySelector, getElementById, innerHTML). Use refs and React state.",
+      "detect": "document\\.(querySelector|getElementById|getElementsBy|createElement)|innerHTML\\s*=",
+      "action": "warn",
+      "template": "// BAD: direct DOM manipulation\ndocument.getElementById('title').textContent = 'Hello';\ndocument.querySelector('.list').innerHTML = '<li>item</li>';\n\n// GOOD: use React state and refs\nconst [title, setTitle] = useState('Hello');\nconst listRef = useRef<HTMLUListElement>(null);\nreturn (\n  <>\n    <h1>{title}</h1>\n    <ul ref={listRef}>{items.map(i => <li key={i.id}>{i.name}</li>)}</ul>\n  </>\n);"
+    },
+    {
+      "id": "dangerous-inner-html",
+      "name": "dangerouslySetInnerHTML Without Sanitization",
+      "description": "Using dangerouslySetInnerHTML without sanitization exposes XSS vulnerabilities.",
+      "detect": "dangerouslySetInnerHTML\\s*=\\s*\\{\\s*\\{\\s*__html",
+      "action": "warn",
+      "template": "// BAD: unsanitized HTML\n<div dangerouslySetInnerHTML={{ __html: userInput }} />\n\n// GOOD: sanitize with DOMPurify\nimport DOMPurify from 'dompurify';\n<div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(userInput) }} />\n\n// BETTER: use a markdown renderer or structured content\nimport ReactMarkdown from 'react-markdown';\n<ReactMarkdown>{userContent}</ReactMarkdown>"
+    },
+    {
+      "id": "prop-drilling-deep",
+      "name": "Deep Prop Drilling",
+      "description": "Passing props through 3+ levels of components that don't use them. Use context or composition.",
+      "detect": "\\{\\s*\\.{3}props\\s*\\}|\\{\\s*\\.{3}rest\\s*\\}",
+      "action": "warn",
+      "template": "// BAD: prop drilling through intermediate components\n<App theme={theme}>\n  <Layout theme={theme}>\n    <Sidebar theme={theme}>\n      <NavItem theme={theme} /> {/* Only NavItem needs theme */}\n    </Sidebar>\n  </Layout>\n</App>\n\n// GOOD: use context\nconst ThemeContext = createContext<Theme>(defaultTheme);\n\n// Provider at top:\n<ThemeContext.Provider value={theme}><App /></ThemeContext.Provider>\n\n// Consumer where needed:\nfunction NavItem() {\n  const theme = useContext(ThemeContext);\n}\n\n// ALSO GOOD: composition\n<Layout sidebar={<Sidebar><NavItem theme={theme} /></Sidebar>} />"
+    },
+    {
+      "id": "use-effect-in-render",
+      "name": "Side Effect in Render Body",
+      "description": "Side effects (API calls, subscriptions, mutations) should be in useEffect, not in the render body.",
+      "detect": "function\\s+\\w+.*\\{[^}]*(fetch\\(|axios\\.|console\\.log|document\\.|window\\.addEventListener)",
+      "action": "warn",
+      "template": "// BAD: side effect during render\nfunction UserProfile({ id }) {\n  fetch(`/api/users/${id}`); // Runs EVERY render!\n  const data = localStorage.getItem('user'); // SSR unsafe!\n}\n\n// GOOD: side effect in useEffect\nfunction UserProfile({ id }) {\n  const [data, setData] = useState(null);\n  useEffect(() => {\n    fetch(`/api/users/${id}`).then(r => r.json()).then(setData);\n  }, [id]);\n}"
+    },
+    {
+      "id": "conditional-hook",
+      "name": "Conditional Hook Call",
+      "description": "Hooks must not be called conditionally, inside loops, or after early returns. React relies on call order.",
+      "detect": "if\\s*\\([^)]*\\)\\s*\\{[^}]*(useState|useEffect|useCallback|useMemo|useRef|useContext|useReducer)",
+      "action": "warn",
+      "template": "// BAD: hook inside condition\nif (isLoggedIn) {\n  const [user, setUser] = useState(null); // Breaks Rules of Hooks!\n}\n\n// GOOD: always call, conditionally use\nconst [user, setUser] = useState<User | null>(null);\nuseEffect(() => {\n  if (isLoggedIn) fetchUser().then(setUser);\n}, [isLoggedIn]);\n\n// ALSO GOOD: split into a separate component\n{isLoggedIn && <AuthenticatedSection />}"
+    },
+    {
+      "id": "new-object-in-jsx",
+      "name": "New Object/Array Literal in JSX Props",
+      "description": "Creating objects or arrays inline in JSX causes unnecessary re-renders of child components.",
+      "detect": "<\\w+[^>]*\\b(style|className|options|data|config)\\s*=\\s*\\{\\s*(\\{|\\[)",
+      "action": "warn",
+      "template": "// BAD: new object every render\n<Avatar style={{ width: 50, height: 50 }} />\n<Select options={[{ value: 'a' }, { value: 'b' }]} />\n\n// GOOD: hoist to module scope (static values)\nconst avatarStyle = { width: 50, height: 50 } as const;\nconst options = [{ value: 'a' }, { value: 'b' }] as const;\n\n// GOOD: useMemo for dynamic values\nconst style = useMemo(() => ({ width: size, height: size }), [size]);"
+    },
+    {
+      "id": "missing-error-boundary",
+      "name": "Missing Error Boundary",
+      "description": "Components that fetch data or render dynamic content should be wrapped in an error boundary.",
+      "detect": "throw\\s+new\\s+Error|Promise\\.reject|catch\\s*\\(.*\\{\\s*throw",
+      "action": "warn",
+      "template": "// BAD: unhandled error crashes entire app\n<App>\n  <DataComponent /> {/* If this throws, entire app crashes */}\n</App>\n\n// GOOD: error boundary around risky components\n<App>\n  <ErrorBoundary fallback={<ErrorFallback />}>\n    <DataComponent />\n  </ErrorBoundary>\n</App>\n\n// In Next.js App Router, use error.tsx for route-level error boundaries"
+    }
+  ]
+}

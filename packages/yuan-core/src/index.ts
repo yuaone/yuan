@@ -134,7 +134,13 @@ export type { PlannerConfig, FileDependency } from "./planner.js";
 
 // ─── System Prompt ───
 export { buildSystemPrompt } from "./system-prompt.js";
-export type { SystemPromptOptions } from "./system-prompt.js";
+export type {
+  SystemPromptOptions,
+  ExecutionMode,
+  PromptAgentRole,
+  SkillSummary,
+  StrategySummary,
+} from "./system-prompt.js";
 
 // ─── Security (SSOT — single source for all security constants) ───
 export {
@@ -231,9 +237,42 @@ export type {
   SubAgentPhase,
   SubAgentConfig,
   SubAgentResult,
+  VerificationReport,
   DAGContextLike,
   SubAgentEvents,
 } from "./sub-agent.js";
+
+// ─── Sub-Agent Prompts ───
+export { buildSubAgentPrompt, getRolePrompt, getAvailableRoles } from "./sub-agent-prompts.js";
+export type {
+  SubAgentRole,
+  SubAgentPromptConfig,
+} from "./sub-agent-prompts.js";
+
+// ─── Sub-Agent Router ───
+export {
+  routeSubAgent,
+  estimateComplexity,
+  getTierCostMultiplier,
+  getAllTiers,
+} from "./sub-agent-router.js";
+export type {
+  SubAgentTier,
+  RoutingDecision,
+  TaskSignals,
+} from "./sub-agent-router.js";
+
+// ─── Coding Standards ───
+export {
+  getCodingStandards,
+  getSupportedLanguages,
+  getAllLanguages,
+  getLanguagesByCategory,
+  hasStandards,
+  getGeneralStandards,
+  detectLanguage,
+} from "./coding-standards.js";
+export type { LanguageCategory } from "./coding-standards.js";
 
 // ─── Parallel Executor ───
 export { ParallelExecutor } from "./parallel-executor.js";
@@ -290,18 +329,6 @@ export type {
   DynamicRoleRequest,
   DynamicRolePattern,
 } from "./dynamic-role-generator.js";
-
-// ─── Model Router ───
-export { ModelRouter } from "./model-router.js";
-export type {
-  TaskComplexityLevel,
-  ModelTierLevel,
-  RoutingDecision,
-  AvailableProviders,
-  ModelStats,
-  ModelRouterConfig,
-  ModelEntry,
-} from "./model-router.js";
 
 // ─── Agent Modes ───
 export {
@@ -736,3 +763,99 @@ export type {
   BenchmarkSummary,
   BenchmarkRunnerConfig,
 } from "./benchmark-runner.js";
+
+// ─── Plugin System Types ───
+export type {
+  PluginTrustLevel,
+  PluginCategory,
+  PluginType,
+  PluginSandboxMode,
+  PluginTriggerMode,
+  PluginManifest,
+  PluginDetectConfig,
+  SkillDefinition,
+  SkillTrigger,
+  PluginTrigger,
+  ToolSideEffectLevel,
+  PluginToolDefinition,
+  PatternDefinition,
+  StrategyDefinition,
+  StrategyPhase,
+  ValidatorDefinition,
+  PluginPermissions,
+  PluginConfigField,
+  InstalledPlugin,
+  PluginSearchResult,
+  SkillContext,
+  LoadedPlugin,
+  ParsedSkill,
+  ParsedKnownPattern,
+  PluginLifecycle,
+  PluginLifecycleContext,
+  PluginAdvice,
+  PluginAgentResult,
+  PluginProjectInfo,
+} from "./plugin-types.js";
+
+// ─── Plugin Registry ───
+export { PluginRegistry } from "./plugin-registry.js";
+export type { TriggerMatch } from "./plugin-registry.js";
+
+// ─── Skill Loader ───
+export { SkillLoader } from "./skill-loader.js";
+
+// ─── Plugin Validator ───
+export { PluginValidator } from "./plugin-validator.js";
+export type { ValidationResult as PluginValidationResult, ValidationReport, ValidatorStage } from "./plugin-validator.js";
+
+// ─── Plugin Auto-Loader ───
+export { PluginAutoLoader } from "./plugin-auto-loader.js";
+export type { AutoLoaderConfig, LoadResult, LifecycleHookName } from "./plugin-auto-loader.js";
+
+// ─── Specialist Registry ───
+export { SpecialistRegistry } from "./specialist-registry.js";
+export type { SpecialistConfig, SpecialistMatch } from "./specialist-registry.js";
+
+// ─── Tool Planner ───
+export { ToolPlanner } from "./tool-planner.js";
+export type {
+  PlanContext,
+  RepoProfile,
+  ToolPlanStep,
+  ToolPlan,
+  PlanComplianceReport,
+} from "./tool-planner.js";
+
+// ─── Self-Debug Loop ───
+export { SelfDebugLoop } from "./self-debug-loop.js";
+export type {
+  DebugAttempt,
+  DebugStrategy,
+  DebugResult,
+  DebugContext,
+  RootCauseAnalysis,
+  ErrorType,
+  ToolExecutorLike,
+} from "./self-debug-loop.js";
+
+// ─── Skill Learner ───
+export { SkillLearner } from "./skill-learner.js";
+export type { LearnedSkill, LearningEvent } from "./skill-learner.js";
+
+// ─── Repo Knowledge Graph ───
+export { RepoKnowledgeGraph } from "./repo-knowledge-graph.js";
+export type {
+  NodeType,
+  EdgeType,
+  GraphNode,
+  GraphEdge,
+  ImpactReport as GraphImpactReport,
+} from "./repo-knowledge-graph.js";
+
+// ─── Background Agent ───
+export { BackgroundAgent, BackgroundAgentManager } from "./background-agent.js";
+export type {
+  BackgroundAgentConfig,
+  BackgroundEvent,
+  BackgroundAgentEvents,
+} from "./background-agent.js";

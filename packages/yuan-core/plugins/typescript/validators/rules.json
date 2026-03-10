@@ -1,0 +1,28 @@
+{
+  "validators": [
+    {
+      "id": "tsc-noEmit",
+      "stage": "post",
+      "name": "TypeScript Compile Check",
+      "check": "tsc --noEmit"
+    },
+    {
+      "id": "no-any-added",
+      "stage": "quality",
+      "name": "No New Any Types",
+      "check": "git diff --cached | grep '+.*: any' | wc -l"
+    },
+    {
+      "id": "no-ts-ignore",
+      "stage": "quality",
+      "name": "No New @ts-ignore",
+      "check": "git diff --cached | grep '+.*@ts-ignore' | wc -l"
+    },
+    {
+      "id": "strict-deps",
+      "stage": "safety",
+      "name": "Dependencies Type Safety",
+      "check": "tsc --noEmit --strict"
+    }
+  ]
+}

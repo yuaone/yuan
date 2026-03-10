@@ -70,11 +70,9 @@ export const PLAN_LIMITS: Record<PlanTier, PlanLimits> = {
  * 프로바이더별 기본 모델
  */
 export const MODEL_DEFAULTS: Record<LLMProvider, string> = {
-  openai: "gpt-4o",
+  openai: "gpt-4o-mini",
   anthropic: "claude-sonnet-4-20250514",
-  google: "gemini-2.5-flash",
-  yua: "yua-pro",
-  deepseek: "deepseek-chat",
+  yua: "yua-normal",
 };
 
 /**
@@ -83,9 +81,7 @@ export const MODEL_DEFAULTS: Record<LLMProvider, string> = {
 export const PROVIDER_BASE_URLS: Record<LLMProvider, string> = {
   openai: "https://api.openai.com/v1",
   anthropic: "https://api.anthropic.com",
-  google: "https://generativelanguage.googleapis.com/v1beta/openai",
   yua: "https://yuaone.com/api/v1",
-  deepseek: "https://api.deepseek.com/v1",
 };
 
 /**

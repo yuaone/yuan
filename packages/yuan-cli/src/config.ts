@@ -11,7 +11,7 @@ import * as os from "node:os";
 import * as readline from "node:readline";
 
 /** Supported LLM providers */
-export type Provider = "openai" | "anthropic" | "google" | "yua" | "deepseek";
+export type Provider = "openai" | "anthropic" | "yua";
 
 /** YUAN CLI configuration (stored in ~/.yuan/config.json) */
 export interface YuanConfig {
@@ -28,17 +28,15 @@ const YUAN_DIR = path.join(os.homedir(), ".yuan");
 const CONFIG_PATH = path.join(YUAN_DIR, "config.json");
 
 const DEFAULT_MODELS: Record<Provider, string> = {
-  openai: "gpt-4o",
+  openai: "gpt-4o-mini",
   anthropic: "claude-sonnet-4-20250514",
-  google: "gemini-2.5-flash",
-  yua: "yua-pro",
-  deepseek: "deepseek-chat",
+  yua: "yua-normal",
 };
 
 /** Default configuration */
 function defaultConfig(): YuanConfig {
   return {
-    provider: "anthropic",
+    provider: "yua",
     apiKey: "",
     model: undefined,
     baseUrl: undefined,
@@ -184,20 +182,16 @@ export class ConfigManager {
 
     // Provider selection
     console.log("  Select LLM provider:");
-    console.log("    1) OpenAI");
-    console.log("    2) Anthropic");
-    console.log("    3) Google (Gemini)");
-    console.log("    4) YUA");
-    console.log("    5) DeepSeek");
-    const providerChoice = await ask("\n  Provider [1-5] (default: 2): ");
+    console.log("    1) YUA (recommended, self-hosted)");
+    console.log("    2) OpenAI");
+    console.log("    3) Anthropic");
+    const providerChoice = await ask("\n  Provider [1-3] (default: 1): ");
     const providerMap: Record<string, Provider> = {
-      "1": "openai",
-      "2": "anthropic",
-      "3": "google",
-      "4": "yua",
-      "5": "deepseek",
+      "1": "yua",
+      "2": "openai",
+      "3": "anthropic",
     };
-    const provider = providerMap[providerChoice] ?? "anthropic";
+    const provider = providerMap[providerChoice] ?? "yua";
     this.config.provider = provider;
 
     // Execution mode selection

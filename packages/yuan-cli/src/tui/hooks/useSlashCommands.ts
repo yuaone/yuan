@@ -4,28 +4,17 @@
 
 import { useState, useMemo, useCallback } from "react";
 import type { SlashCommand } from "../types.js";
+import { getCommandDefs, isKnownCommand as checkCommand } from "../../commands/index.js";
 
-const DEFAULT_COMMANDS: SlashCommand[] = [
-  { name: "/help", description: "Show available commands", aliases: ["/h"] },
-  { name: "/status", description: "Model, tokens, session info" },
-  { name: "/clear", description: "Clear conversation history" },
-  { name: "/model", description: "Change model" },
-  { name: "/config", description: "Show/edit configuration" },
-  { name: "/session", description: "Session management" },
-  { name: "/diff", description: "Show recent diffs" },
-  { name: "/undo", description: "Undo last change" },
-  { name: "/settings", description: "Auto-update, preferences" },
-  { name: "/exit", description: "Exit YUAN", aliases: ["/quit", "/q"] },
-];
+const DEFAULT_COMMANDS: SlashCommand[] = getCommandDefs().map(def => ({
+  name: def.name,
+  description: def.description,
+  aliases: def.aliases,
+}));
 
 /** Check if a string is a known command name (exact or alias match) */
 export function isKnownCommand(input: string): boolean {
-  const q = input.trim().toLowerCase().split(" ")[0];
-  return DEFAULT_COMMANDS.some(
-    (cmd) =>
-      cmd.name === q ||
-      cmd.aliases?.includes(q),
-  );
+  return checkCommand(input);
 }
 
 export interface SlashCommandState {

@@ -1,0 +1,229 @@
+# @yuaone/plugin-react — React/Next.js Expert Agent Skill Pack
+# SSOT for plugin metadata, skills, triggers, tools, and configuration.
+
+id: "@yuaone/plugin-react"
+name: "React Expert"
+version: "1.0.0"
+description: "React/Next.js expert agent skill pack — bugfix, component generation, hook extraction, testing, and SSR/hydration expertise"
+author: "yuaone"
+license: "MIT"
+category: "coding"
+type: "hybrid"
+trustLevel: "official"
+sandbox: "restricted"
+triggerMode: "auto"
+pluginApiVersion: 1
+estimatedPromptTokens: 3500
+engineVersion: ">=0.2.0"
+
+# Auto-detect — any match triggers plugin load
+detect:
+  files:
+    - "package.json"
+  dependencies:
+    - "react"
+    - "react-dom"
+  glob:
+    - "src/**/*.tsx"
+    - "src/**/*.jsx"
+    - "app/**/*.tsx"
+    - "pages/**/*.tsx"
+    - "components/**/*.tsx"
+
+# Skills — domain knowledge units
+skills:
+  - id: "react-bugfix"
+    name: "React Bugfix"
+    description: "React bug diagnosis and fix — hydration, hook loops, state issues, key props, memory leaks"
+    trigger:
+      kind: "auto"
+      pattern: "(hydration|Maximum update depth|Cannot read propert|React Hook|memory leak|Warning:.*key)"
+      confidence: 0.85
+      cooldown: 5000
+    template: "skills/bugfix.md"
+    enabled: true
+    tags: ["debug", "error", "fix", "react", "hooks", "state"]
+
+  - id: "react-component-gen"
+    name: "Component Generator"
+    description: "React component generation — atomic design, compound patterns, forwardRef, generics"
+    trigger:
+      kind: "command"
+      command: "/react-component"
+    template: "skills/component-gen.md"
+    enabled: true
+    tags: ["generate", "component", "atomic", "compound", "react"]
+
+  - id: "react-hook-extract"
+    name: "Hook Extractor"
+    description: "Extract custom hooks from components — state+effect grouping, hook composition, testability"
+    trigger:
+      kind: "command"
+      command: "/extract-hook"
+    template: "skills/hook-extract.md"
+    enabled: true
+    tags: ["refactor", "hook", "extract", "composition"]
+
+  - id: "react-test"
+    name: "React Test Generator"
+    description: "Generate React tests — RTL best practices, MSW API mocking, user events, async patterns"
+    trigger:
+      kind: "command"
+      command: "/react-test"
+    template: "skills/test.md"
+    enabled: true
+    tags: ["test", "jest", "rtl", "msw", "vitest"]
+
+  - id: "react-ssr"
+    name: "SSR/Hydration Expert"
+    description: "SSR and hydration specialist — Next.js App Router, Server Components, streaming SSR, hydration debugging"
+    trigger:
+      kind: "auto"
+      pattern: "(hydrat|server.?component|use.?client|use.?server|getServerSideProps|getStaticProps)"
+      confidence: 0.80
+      cooldown: 10000
+    template: "skills/ssr.md"
+    enabled: true
+    tags: ["ssr", "hydration", "server", "nextjs", "streaming"]
+
+# Triggers — error/task patterns mapped to skills and strategies
+triggers:
+  - pattern: "Text content does not match|Hydration failed|hydration mismatch"
+    kind: "error"
+    skill: "react-ssr"
+    strategy: "hydration-fix"
+    priority: 10
+    triggerMode: "auto"
+
+  - pattern: "Maximum update depth exceeded|Too many re-renders"
+    kind: "error"
+    skill: "react-bugfix"
+    strategy: "hook-loop-fix"
+    priority: 10
+    triggerMode: "auto"
+
+  - pattern: "Module not found|Cannot find module|Failed to compile"
+    kind: "error"
+    skill: "react-bugfix"
+    strategy: "build-fix"
+    priority: 5
+    triggerMode: "auto"
+
+  - pattern: "Cannot read properties of (null|undefined)"
+    kind: "error"
+    skill: "react-bugfix"
+    priority: 3
+    triggerMode: "auto"
+
+  - pattern: "Invalid hook call|Hooks can only be called inside"
+    kind: "error"
+    skill: "react-bugfix"
+    priority: 8
+    triggerMode: "auto"
+
+  - pattern: "Each child in a list should have a unique.*key"
+    kind: "error"
+    skill: "react-bugfix"
+    priority: 4
+    triggerMode: "auto"
+
+  - pattern: "Can't perform a React state update on an unmounted component"
+    kind: "error"
+    skill: "react-bugfix"
+    priority: 6
+    triggerMode: "auto"
+
+  - pattern: "Server Error.*getServerSideProps|Error.*server.?component"
+    kind: "error"
+    skill: "react-ssr"
+    strategy: "hydration-fix"
+    priority: 7
+    triggerMode: "auto"
+
+# Tools — analysis utilities
+tools:
+  - name: "jsx_analyzer"
+    description: "Analyze JSX/TSX files for React patterns, anti-patterns, and component structure"
+    inputSchema:
+      type: "object"
+      properties:
+        filePath:
+          type: "string"
+          description: "Path to the JSX/TSX file to analyze"
+        analysisType:
+          type: "string"
+          enum: ["patterns", "anti-patterns", "structure", "all"]
+          description: "Type of analysis to perform"
+      required: ["filePath"]
+    requiresApproval: false
+    riskLevel: "low"
+    sideEffectLevel: "read"
+
+  - name: "component_tree"
+    description: "Build and analyze React component tree from source files"
+    inputSchema:
+      type: "object"
+      properties:
+        rootDir:
+          type: "string"
+          description: "Root directory to scan for components"
+        depth:
+          type: "number"
+          description: "Maximum depth of component tree (default: 5)"
+        includeProps:
+          type: "boolean"
+          description: "Include prop types in the tree output"
+      required: ["rootDir"]
+    requiresApproval: false
+    riskLevel: "low"
+    sideEffectLevel: "read"
+
+# Strategy files
+strategies:
+  - "strategies/hydration-fix.json"
+  - "strategies/hook-loop-fix.json"
+  - "strategies/build-fix.json"
+
+# Validator files
+validators:
+  - "validators/rules.json"
+
+# Pattern files
+patterns:
+  - "patterns/components.json"
+  - "patterns/hooks.json"
+  - "patterns/anti-patterns.json"
+
+# Permissions
+permissions:
+  fileRead: true
+  fileWrite: true
+  shellExec: true
+  networkAccess: false
+  gitOps: false
+  maxTokensPerCall: 8000
+
+# User-configurable settings
+config:
+  auto_load:
+    type: "boolean"
+    default: true
+    description: "Automatically load when React project detected"
+  inject_into_prompt:
+    type: "boolean"
+    default: true
+    description: "Inject relevant skill knowledge into system prompt"
+  max_patterns_in_context:
+    type: "number"
+    default: 5
+    description: "Maximum number of patterns to inject into context"
+  preferred_test_runner:
+    type: "select"
+    default: "vitest"
+    description: "Preferred test runner for generated tests"
+    options: ["vitest", "jest"]
+  next_version:
+    type: "select"
+    default: "14"
+    description: "Target Next.js major version for SSR strategies"
+    options: ["13", "14", "15"]

@@ -1,0 +1,43 @@
+{
+  "id": "build-fix",
+  "name": "React/Next.js Build Error Fix",
+  "description": "Four-phase strategy to collect, categorize, fix, and verify React/Next.js build errors",
+  "problemClass": "build_error",
+  "phases": [
+    {
+      "name": "Collect Build Errors",
+      "tools": ["shell_exec"],
+      "maxIterations": 2,
+      "successCriteria": "Full build output captured from 'pnpm build' or 'next build'. All error messages, file paths, and line numbers extracted. Error count documented."
+    },
+    {
+      "name": "Categorize Errors",
+      "tools": ["file_read", "grep"],
+      "maxIterations": 5,
+      "successCriteria": "Each error categorized as one of: (1) TypeScript type error — missing type, wrong type, generic inference failure, (2) Module not found — missing dependency, wrong import path, missing barrel export, (3) ESLint error — hooks rules, unused vars, import order, (4) Next.js specific — server/client boundary violation, metadata export error, route config issue, (5) Runtime error during SSG/ISR — data fetching failure, env var missing. Fix priority established (blocking errors first)."
+    },
+    {
+      "name": "Apply Fixes",
+      "tools": ["file_read", "file_edit", "shell_exec", "grep"],
+      "maxIterations": 10,
+      "successCriteria": "All categorized errors addressed. TypeScript errors fixed with proper types (no 'any' escape hatches). Missing modules installed or import paths corrected. ESLint errors fixed at source (not disabled). Next.js boundary issues resolved with 'use client'/'use server' directives. Each fix verified with incremental tsc --noEmit check."
+    },
+    {
+      "name": "Verify Clean Build",
+      "tools": ["shell_exec"],
+      "maxIterations": 3,
+      "successCriteria": "Full 'pnpm build' or 'next build' passes with zero errors. No new warnings introduced. Build output size is reasonable (no accidental bundle bloat). All existing tests pass. TypeScript strict mode passes (tsc --noEmit)."
+    }
+  ],
+  "exitCriteria": [
+    "pnpm build (or next build) passes with zero errors",
+    "tsc --noEmit passes",
+    "No new ESLint warnings or errors",
+    "All existing tests pass",
+    "No 'any' type escape hatches introduced",
+    "Bundle size has not increased significantly"
+  ],
+  "fallback": null,
+  "estimatedTokens": 4000,
+  "confidence": 0.80
+}

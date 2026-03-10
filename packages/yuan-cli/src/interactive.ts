@@ -6,11 +6,8 @@
  * Wired to @yuaone/core AgentLoop + @yuaone/tools for real LLM-powered execution.
  */
 
-import * as fs from "node:fs";
 import * as readline from "node:readline";
-import { execFileSync } from "node:child_process";
 import { TerminalRenderer, colors } from "./renderer.js";
-import { DiffRenderer } from "./diff-renderer.js";
 import { SessionManager, type SessionData } from "./session.js";
 import { ConfigManager } from "./config.js";
 import {
@@ -25,6 +22,7 @@ import {
 } from "@yuaone/core";
 import { createDefaultRegistry } from "@yuaone/tools";
 import { CloudClient, type AgentEvent as CloudAgentEvent } from "./cloud-client.js";
+import { executeCommand, type CommandContext } from "./commands/index.js";
 
 const ESC = "\x1b[";
 
@@ -32,23 +30,11 @@ function c(color: string, text: string): string {
   return `${color}${text}${ESC}0m`;
 }
 
-/** Slash commands available in interactive mode */
-const SLASH_COMMANDS: Record<string, string> = {
-  "/help": "Show this help message",
-  "/clear": "Clear the screen",
-  "/undo": "Undo the last agent action",
-  "/diff": "Show current file changes",
-  "/quit": "Exit YUAN (also: Ctrl+C)",
-  "/config": "Show current configuration",
-  "/session": "Show session info",
-};
-
 /**
  * InteractiveSession — the main REPL for `yuan` interactive mode
  */
 export class InteractiveSession {
   private renderer: TerminalRenderer;
-  private diffRenderer: DiffRenderer;
   private sessionManager: SessionManager;
   private configManager: ConfigManager;
   private session: SessionData;
@@ -65,7 +51,6 @@ export class InteractiveSession {
     existingSession?: SessionData
   ) {
     this.renderer = renderer;
-    this.diffRenderer = new DiffRenderer();
     this.sessionManager = sessionManager;
     this.configManager = configManager;
 
@@ -151,148 +136,53 @@ export class InteractiveSession {
 
   /** Handle a slash command. Returns false if session should end. */
   private handleSlashCommand(command: string): boolean {
-    const cmd = command.toLowerCase().split(" ")[0];
+    const ctx: CommandContext = {
+      output: (msg) => console.log(msg),
+      config: this.configManager,
+      version: "0.1.3",
+      provider: this.session.provider,
+      model: this.session.model,
+      workDir: this.session.workDir,
+      filesChanged: this.changedFiles,
+      agentInfo: {
+        status: this.isStreaming ? "streaming" : "idle",
+        messageCount: this.session.messages.length,
+        totalTokens: 0,
+        tokensPerSecond: 0,
+      },
+      sessionInfo: {
+        id: this.session.id,
+        createdAt: this.session.createdAt,
+      },
+      onModelChange: (newModel) => {
+        this.session.model = newModel;
+        console.log(`Model changed to: ${newModel}`);
+      },
+      onModeChange: (newMode) => {
+        console.log(`Mode changed to: ${newMode}`);
+      },
+    };
 
-    switch (cmd) {
-      case "/help":
-        this.showHelp();
-        return true;
-
-      case "/clear":
-        console.clear();
-        this.renderer.banner();
-        return true;
-
-      case "/undo":
-        this.handleUndo();
-        return true;
-
-      case "/diff":
-        this.handleDiff();
-        return true;
-
-      case "/quit":
-      case "/exit":
-      case "/q":
-        this.stop();
-        return false;
-
-      case "/config":
-        console.log();
-        console.log(this.configManager.show());
-        console.log();
-        return true;
-
-      case "/session":
-        this.showSessionInfo();
-        return true;
-
-      default:
-        this.renderer.warn(`Unknown command: ${cmd}. Type /help for available commands.`);
-        return true;
+    const result = executeCommand(ctx, command);
+    if (!result) {
+      this.renderer.warn(`Unknown command: ${command}. Type /help for available commands.`);
+      return true;
     }
-  }
-
-  /** Show available slash commands */
-  private showHelp(): void {
-    console.log();
-    console.log(c(colors.bold, "  Available Commands"));
-    console.log(c(colors.dim, "  " + "-".repeat(40)));
-    for (const [cmd, desc] of Object.entries(SLASH_COMMANDS)) {
-      console.log(
-        `  ${c(colors.cyan, cmd.padEnd(12))} ${c(colors.dim, desc)}`
-      );
+    if (result.exit) {
+      this.stop();
+      return false;
     }
-    console.log();
-  }
-
-  /** Show current session info */
-  private showSessionInfo(): void {
-    const s = this.session;
-    console.log();
-    console.log(c(colors.bold, "  Session Info"));
-    console.log(c(colors.dim, "  " + "-".repeat(40)));
-    console.log(`  ID       : ${c(colors.dim, s.id)}`);
-    console.log(`  Created  : ${c(colors.dim, new Date(s.createdAt).toLocaleString())}`);
-    console.log(`  Messages : ${c(colors.dim, String(s.messages.length))}`);
-    console.log(`  Work Dir : ${c(colors.dim, s.workDir)}`);
-    console.log();
-  }
-
-  /**
-   * Handle /undo command.
-   * Reverts the last file change using git checkout or .yuan-backup files.
-   */
-  private handleUndo(): void {
-    if (this.changedFiles.length === 0) {
-      this.renderer.warn("No file changes to undo in this session.");
-      return;
+    if (result.clear) {
+      console.clear();
+      this.renderer.banner();
+      return true;
     }
-
-    const lastFile = this.changedFiles[this.changedFiles.length - 1];
-    try {
-      // Try git checkout first (most reliable)
-      execFileSync("git", ["checkout", "--", lastFile], {
-        cwd: this.session.workDir,
-        stdio: "pipe",
-      });
-      this.changedFiles.pop();
-      this.renderer.success(`Reverted: ${lastFile}`);
-    } catch {
-      // If git checkout fails, try .yuan-backup
-      try {
-        const backupPath = `${lastFile}.yuan-backup`;
-        fs.renameSync(backupPath, lastFile);
-        this.changedFiles.pop();
-        this.renderer.success(`Restored from backup: ${lastFile}`);
-      } catch {
-        this.renderer.error(
-          `Cannot undo: ${lastFile} — not in git and no backup found.`
-        );
-      }
-    }
-  }
-
-  /**
-   * Handle /diff command.
-   * Shows git diff for files changed during this session.
-   */
-  private handleDiff(): void {
-    try {
-      // Show git diff of working directory changes
-      const diffOutput = execFileSync("git", ["diff"], {
-        cwd: this.session.workDir,
-        stdio: "pipe",
-        encoding: "utf-8",
-        maxBuffer: 1024 * 1024,
-      });
-
-      if (!diffOutput.trim()) {
-        // Also check staged changes
-        const stagedOutput = execFileSync("git", ["diff", "--cached"], {
-          cwd: this.session.workDir,
-          stdio: "pipe",
-          encoding: "utf-8",
-          maxBuffer: 1024 * 1024,
-        });
-
-        if (!stagedOutput.trim()) {
-          this.renderer.info("No file changes detected (working tree clean).");
-          return;
-        }
-
-        console.log();
-        console.log(c(colors.bold, "  Staged Changes"));
-        this.diffRenderer.renderRawDiff(stagedOutput);
-        return;
-      }
-
+    if (result.output) {
       console.log();
-      console.log(c(colors.bold, "  Working Directory Changes"));
-      this.diffRenderer.renderRawDiff(diffOutput);
-    } catch {
-      this.renderer.warn("Not a git repository or git not available. Cannot show diff.");
+      console.log(result.output);
+      console.log();
     }
+    return true;
   }
 
   /**
@@ -502,7 +392,7 @@ export class InteractiveSession {
 
     // Build BYOK config
     const byokConfig: BYOKConfig = {
-      provider: config.provider as "openai" | "anthropic" | "google",
+      provider: config.provider as "openai" | "anthropic" | "yua",
       apiKey: config.apiKey,
       model: config.model,
       baseUrl: config.baseUrl,

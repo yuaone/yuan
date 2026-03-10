@@ -1,0 +1,37 @@
+{
+  "id": "strict-migration",
+  "name": "TypeScript Strict Mode Migration",
+  "description": "점진적 strict 모드 활성화 전략",
+  "phases": [
+    {
+      "name": "audit",
+      "tools": ["file_read", "shell_exec"],
+      "maxIterations": 2,
+      "successCriteria": "현재 strict 설정 파악 + 에러 수 측정"
+    },
+    {
+      "name": "enable-noImplicitAny",
+      "tools": ["file_edit", "shell_exec"],
+      "maxIterations": 20,
+      "successCriteria": "noImplicitAny 에러 0개"
+    },
+    {
+      "name": "enable-strictNullChecks",
+      "tools": ["file_edit", "shell_exec"],
+      "maxIterations": 20,
+      "successCriteria": "strictNullChecks 에러 0개"
+    },
+    {
+      "name": "enable-full-strict",
+      "tools": ["file_edit", "shell_exec"],
+      "maxIterations": 10,
+      "successCriteria": "strict: true, 에러 0개"
+    },
+    {
+      "name": "verify",
+      "tools": ["shell_exec"],
+      "maxIterations": 1,
+      "successCriteria": "tsc --noEmit --strict 에러 0개 + 테스트 통과"
+    }
+  ]
+}

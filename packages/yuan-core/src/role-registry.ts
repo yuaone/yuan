@@ -73,7 +73,7 @@ const ROLE_CONFIGS: Record<FixedAgentRole, RoleConfig> = {
 
   reviewer: {
     role: "reviewer",
-    model: "gemini-pro",
+    model: "gpt-4o-mini",
     maxIterations: 10,
     allowedTools: ["file_read", "grep", "glob", "shell_exec", "test_run"],
     priority: 3,

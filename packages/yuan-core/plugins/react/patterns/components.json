@@ -1,0 +1,80 @@
+{
+  "$schema": "https://yuaone.com/schemas/patterns.json",
+  "name": "React Component Patterns",
+  "version": "1.0.0",
+  "description": "Common React component patterns for detection and suggestion",
+  "patterns": [
+    {
+      "id": "compound-component",
+      "name": "Compound Component",
+      "description": "Parent provides context, children consume it. Great for Select, Tabs, Accordion, Menu.",
+      "detect": "(createContext|useContext).*\\.(Provider|Consumer)",
+      "action": "suggest",
+      "template": "const {Name}Context = createContext<{Name}ContextType | null>(null);\n\nfunction use{Name}Context() {\n  const ctx = useContext({Name}Context);\n  if (!ctx) throw new Error('{Name} compound components must be used within <{Name}>');\n  return ctx;\n}\n\nfunction {Name}({ children }: { children: React.ReactNode }) {\n  const [state, setState] = useState(initialState);\n  return (\n    <{Name}Context.Provider value={{ state, setState }}>\n      {children}\n    </{Name}Context.Provider>\n  );\n}\n\n{Name}.Item = function {Name}Item({ value }: { value: string }) {\n  const { state, setState } = use{Name}Context();\n  return <div onClick={() => setState(value)}>{value}</div>;\n};\n\nexport { {Name} };"
+    },
+    {
+      "id": "hoc-pattern",
+      "name": "Higher-Order Component",
+      "description": "Wrap a component to inject props or behavior. Use sparingly -- prefer hooks for most cases.",
+      "detect": "function\\s+with[A-Z]\\w+\\s*\\(|const\\s+with[A-Z]\\w+\\s*=",
+      "action": "suggest",
+      "template": "function with{Behavior}<P extends object>(\n  WrappedComponent: React.ComponentType<P & {Injected}Props>\n) {\n  function Enhanced(props: P) {\n    const injected = use{Behavior}();\n    return <WrappedComponent {...props} {...injected} />;\n  }\n  Enhanced.displayName = `with{Behavior}(${WrappedComponent.displayName || WrappedComponent.name})`;\n  return Enhanced;\n}"
+    },
+    {
+      "id": "render-props",
+      "name": "Render Props / Children as Function",
+      "description": "Component accepts a render function as children or prop. Useful for headless behavior injection.",
+      "detect": "children\\s*\\(|render\\s*=\\s*\\{\\s*\\(",
+      "action": "suggest",
+      "template": "interface {Name}Props<T> {\n  children: (state: { data: T; loading: boolean; error: Error | null }) => React.ReactNode;\n}\n\nfunction {Name}<T>({ children }: {Name}Props<T>) {\n  const { data, loading, error } = use{DataSource}<T>();\n  return <>{children({ data, loading, error })}</>;\n}"
+    },
+    {
+      "id": "forward-ref",
+      "name": "forwardRef Component",
+      "description": "Component that forwards ref to an inner DOM element. Required for ref-based integrations.",
+      "detect": "React\\.forwardRef|forwardRef\\s*<",
+      "action": "suggest",
+      "template": "interface {Name}Props extends React.HTMLAttributes<HTMLDivElement> {\n  variant?: 'primary' | 'secondary';\n}\n\nconst {Name} = React.forwardRef<HTMLDivElement, {Name}Props>(\n  ({ variant = 'primary', className, children, ...props }, ref) => {\n    return (\n      <div ref={ref} className={cn(styles[variant], className)} {...props}>\n        {children}\n      </div>\n    );\n  }\n);\n\n{Name}.displayName = '{Name}';\nexport { {Name} };"
+    },
+    {
+      "id": "generic-component",
+      "name": "Generic TypeScript Component",
+      "description": "Component with generic type parameter for type-safe data rendering (List, Table, Select).",
+      "detect": "function\\s+\\w+\\s*<\\s*T\\s*(extends|,|>)",
+      "action": "suggest",
+      "template": "interface {Name}Props<T> {\n  items: T[];\n  renderItem: (item: T, index: number) => React.ReactNode;\n  keyExtractor: (item: T) => string;\n  emptyMessage?: string;\n}\n\nfunction {Name}<T>({ items, renderItem, keyExtractor, emptyMessage }: {Name}Props<T>) {\n  if (items.length === 0) {\n    return <p>{emptyMessage ?? 'No items'}</p>;\n  }\n  return (\n    <ul>\n      {items.map((item, i) => (\n        <li key={keyExtractor(item)}>{renderItem(item, i)}</li>\n      ))}\n    </ul>\n  );\n}"
+    },
+    {
+      "id": "controlled-uncontrolled",
+      "name": "Controlled + Uncontrolled Dual Mode",
+      "description": "Component supports both controlled (value+onChange) and uncontrolled (defaultValue) modes.",
+      "detect": "(value|defaultValue).*onChange|controlled.*uncontrolled",
+      "action": "suggest",
+      "template": "interface {Name}Props {\n  value?: string;\n  defaultValue?: string;\n  onChange?: (value: string) => void;\n}\n\nfunction {Name}({ value: controlledValue, defaultValue = '', onChange }: {Name}Props) {\n  const [internalValue, setInternalValue] = useState(defaultValue);\n  const isControlled = controlledValue !== undefined;\n  const currentValue = isControlled ? controlledValue : internalValue;\n\n  const handleChange = (newValue: string) => {\n    if (!isControlled) setInternalValue(newValue);\n    onChange?.(newValue);\n  };\n\n  return <input value={currentValue} onChange={(e) => handleChange(e.target.value)} />;\n}"
+    },
+    {
+      "id": "polymorphic-component",
+      "name": "Polymorphic Component (as prop)",
+      "description": "Component that renders as a different HTML element or component via 'as' prop.",
+      "detect": "as\\s*[=:]\\s*(keyof|ElementType|ComponentType)",
+      "action": "suggest",
+      "template": "type {Name}Props<C extends React.ElementType = 'div'> = {\n  as?: C;\n  children: React.ReactNode;\n} & Omit<React.ComponentPropsWithoutRef<C>, 'as' | 'children'>;\n\nfunction {Name}<C extends React.ElementType = 'div'>({ as, children, ...props }: {Name}Props<C>) {\n  const Component = as || 'div';\n  return <Component {...props}>{children}</Component>;\n}\n\n// Usage: <Box as=\"section\" /> or <Box as={Link} href=\"/\" />"
+    },
+    {
+      "id": "error-boundary",
+      "name": "Error Boundary",
+      "description": "Class component that catches JavaScript errors in child tree and shows fallback UI.",
+      "detect": "componentDidCatch|getDerivedStateFromError|ErrorBoundary",
+      "action": "suggest",
+      "template": "interface ErrorBoundaryProps {\n  fallback: React.ReactNode | ((error: Error, reset: () => void) => React.ReactNode);\n  children: React.ReactNode;\n  onError?: (error: Error, errorInfo: React.ErrorInfo) => void;\n}\n\ninterface ErrorBoundaryState {\n  error: Error | null;\n}\n\nclass ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {\n  state: ErrorBoundaryState = { error: null };\n\n  static getDerivedStateFromError(error: Error) {\n    return { error };\n  }\n\n  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {\n    this.props.onError?.(error, errorInfo);\n  }\n\n  reset = () => this.setState({ error: null });\n\n  render() {\n    if (this.state.error) {\n      const { fallback } = this.props;\n      return typeof fallback === 'function'\n        ? fallback(this.state.error, this.reset)\n        : fallback;\n    }\n    return this.props.children;\n  }\n}"
+    },
+    {
+      "id": "slot-pattern",
+      "name": "Slot Pattern (Named Children)",
+      "description": "Component accepts named slots for flexible layout composition.",
+      "detect": "(header|footer|sidebar|left|right|icon|prefix|suffix)\\s*[=:]\\s*React\\.ReactNode",
+      "action": "suggest",
+      "template": "interface {Name}Props {\n  header?: React.ReactNode;\n  footer?: React.ReactNode;\n  sidebar?: React.ReactNode;\n  children: React.ReactNode;\n}\n\nfunction {Name}({ header, footer, sidebar, children }: {Name}Props) {\n  return (\n    <div className=\"layout\">\n      {header && <header className=\"layout-header\">{header}</header>}\n      <div className=\"layout-body\">\n        {sidebar && <aside className=\"layout-sidebar\">{sidebar}</aside>}\n        <main className=\"layout-main\">{children}</main>\n      </div>\n      {footer && <footer className=\"layout-footer\">{footer}</footer>}\n    </div>\n  );\n}"
+    }
+  ]
+}

@@ -1,0 +1,186 @@
+{
+  "patterns": [
+    {
+      "id": "missing-type-prefix",
+      "name": "Missing Type Prefix",
+      "detect": "^(?!feat|fix|chore|docs|style|refactor|perf|test|build|ci|revert)[a-zA-Z]",
+      "severity": "error",
+      "action": "auto-fix",
+      "template": "Commit message must start with a valid type prefix: feat, fix, chore, docs, style, refactor, perf, test, build, ci",
+      "example": {
+        "bad": "add user authentication",
+        "good": "feat: add user authentication"
+      }
+    },
+    {
+      "id": "uppercase-type",
+      "name": "Uppercase Type Prefix",
+      "detect": "^(Feat|Fix|Chore|Docs|Style|Refactor|Perf|Test|Build|Ci|FEAT|FIX|CHORE|DOCS)[(:]",
+      "severity": "error",
+      "action": "auto-fix",
+      "template": "Type prefix must be lowercase: `{type}` → `{typeLower}`",
+      "example": {
+        "bad": "Feat: add login",
+        "good": "feat: add login"
+      }
+    },
+    {
+      "id": "missing-colon-separator",
+      "name": "Missing Colon After Type",
+      "detect": "^(feat|fix|chore|docs|style|refactor|perf|test|build|ci)(\\([^)]*\\))?[^:!]",
+      "severity": "error",
+      "action": "auto-fix",
+      "template": "Type (and optional scope) must be followed by `: ` — e.g., `feat: description` or `feat(scope): description`",
+      "example": {
+        "bad": "feat add login",
+        "good": "feat: add login"
+      }
+    },
+    {
+      "id": "missing-space-after-colon",
+      "name": "Missing Space After Colon",
+      "detect": "^(feat|fix|chore|docs|style|refactor|perf|test|build|ci)(\\([^)]*\\))?!?:[^ ]",
+      "severity": "warning",
+      "action": "auto-fix",
+      "template": "Add a space after the colon: `{type}:description` → `{type}: description`",
+      "example": {
+        "bad": "feat:add login",
+        "good": "feat: add login"
+      }
+    },
+    {
+      "id": "subject-too-short",
+      "name": "Subject Too Short",
+      "detect": "^(feat|fix|chore|docs|style|refactor|perf|test|build|ci)(\\([^)]*\\))?!?: .{1,5}$",
+      "severity": "warning",
+      "action": "suggest",
+      "template": "Subject is too short ({length} chars). Provide a meaningful description of the change (10+ chars recommended).",
+      "example": {
+        "bad": "fix: typo",
+        "good": "fix(auth): correct typo in OAuth2 callback URL"
+      }
+    },
+    {
+      "id": "subject-too-long",
+      "name": "Subject Too Long",
+      "detect": "^.{73,}$",
+      "severity": "warning",
+      "action": "suggest",
+      "template": "Subject line exceeds 72 characters ({length} chars). Move details to the commit body.",
+      "example": {
+        "bad": "feat(auth): add comprehensive OAuth2 authentication flow with Google, GitHub, and Microsoft providers including PKCE support",
+        "good": "feat(auth): add multi-provider OAuth2 with PKCE"
+      }
+    },
+    {
+      "id": "subject-ends-with-period",
+      "name": "Subject Ends With Period",
+      "detect": "^(feat|fix|chore|docs|style|refactor|perf|test|build|ci)(\\([^)]*\\))?!?: .*\\.$",
+      "severity": "warning",
+      "action": "auto-fix",
+      "template": "Subject should not end with a period.",
+      "example": {
+        "bad": "feat: add user login.",
+        "good": "feat: add user login"
+      }
+    },
+    {
+      "id": "subject-starts-uppercase",
+      "name": "Subject Starts With Uppercase",
+      "detect": "^(feat|fix|chore|docs|style|refactor|perf|test|build|ci)(\\([^)]*\\))?!?: [A-Z]",
+      "severity": "info",
+      "action": "suggest",
+      "template": "Consider starting the subject with a lowercase letter for consistency.",
+      "example": {
+        "bad": "feat: Add user login",
+        "good": "feat: add user login"
+      }
+    },
+    {
+      "id": "non-imperative-mood",
+      "name": "Non-Imperative Mood",
+      "detect": "^(feat|fix|chore|docs|style|refactor|perf|test|build|ci)(\\([^)]*\\))?!?: (added|removed|changed|updated|fixed|deleted|created|modified|implemented|refactored) ",
+      "severity": "warning",
+      "action": "suggest",
+      "template": "Use imperative mood in subject: `{pastTense}` → `{imperative}` (e.g., 'added' → 'add', 'fixed' → 'fix')",
+      "corrections": {
+        "added": "add",
+        "removed": "remove",
+        "changed": "change",
+        "updated": "update",
+        "fixed": "fix",
+        "deleted": "delete",
+        "created": "create",
+        "modified": "modify",
+        "implemented": "implement",
+        "refactored": "refactor"
+      },
+      "example": {
+        "bad": "feat: added user authentication",
+        "good": "feat: add user authentication"
+      }
+    },
+    {
+      "id": "invalid-type",
+      "name": "Invalid Conventional Type",
+      "detect": "^(feature|bugfix|hotfix|update|change|improve|wip|temp|misc|other|cleanup)[(:]",
+      "severity": "error",
+      "action": "suggest",
+      "template": "'{invalidType}' is not a valid Conventional Commits type. Use one of: feat, fix, chore, docs, style, refactor, perf, test, build, ci",
+      "corrections": {
+        "feature": "feat",
+        "bugfix": "fix",
+        "hotfix": "fix",
+        "update": "feat",
+        "change": "refactor",
+        "improve": "perf",
+        "wip": "chore",
+        "temp": "chore",
+        "misc": "chore",
+        "other": "chore",
+        "cleanup": "refactor"
+      },
+      "example": {
+        "bad": "feature: add login",
+        "good": "feat: add login"
+      }
+    },
+    {
+      "id": "empty-scope",
+      "name": "Empty Scope Parentheses",
+      "detect": "^(feat|fix|chore|docs|style|refactor|perf|test|build|ci)\\(\\):",
+      "severity": "error",
+      "action": "auto-fix",
+      "template": "Empty scope parentheses. Either add a scope or remove the parentheses.",
+      "example": {
+        "bad": "feat(): add login",
+        "good": "feat: add login"
+      }
+    },
+    {
+      "id": "breaking-change-no-body",
+      "name": "Breaking Change Without Body",
+      "detect": "^(feat|fix|chore|docs|style|refactor|perf|test|build|ci)(\\([^)]*\\))?!: .+$",
+      "severity": "warning",
+      "action": "suggest",
+      "template": "Breaking changes (!) should include a body with BREAKING CHANGE footer explaining what changed and how to migrate.",
+      "requiresBodyCheck": true,
+      "example": {
+        "bad": "feat!: change API response format",
+        "good": "feat!: change API response format\n\nBREAKING CHANGE: response.data is now wrapped in { result: data }\nMigration: update all response.data.x to response.data.result.x"
+      }
+    },
+    {
+      "id": "wip-commit",
+      "name": "WIP Commit Message",
+      "detect": "^(WIP|wip|Wip)[: ]|^(work in progress|working on|TODO|FIXME|HACK|temp|temporary)[: ]",
+      "severity": "info",
+      "action": "suggest",
+      "template": "WIP commits should be squashed before merging. Use `git rebase -i` to clean up history.",
+      "example": {
+        "bad": "WIP: login stuff",
+        "good": "feat(auth): add login form with validation"
+      }
+    }
+  ]
+}

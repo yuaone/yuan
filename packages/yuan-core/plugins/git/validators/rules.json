@@ -1,0 +1,348 @@
+{
+  "validators": {
+    "pre": [
+      {
+        "id": "commit-message-format",
+        "name": "Commit Message Format",
+        "description": "커밋 메시지가 Conventional Commits 형식을 따르는지 검증",
+        "when": "before-commit",
+        "check": {
+          "pattern": "^(feat|fix|chore|docs|style|refactor|perf|test|build|ci|revert)(\\([a-z0-9._-]+\\))?!?: .{3,}",
+          "flags": "i",
+          "target": "commit-message",
+          "multiline": false
+        },
+        "severity": "error",
+        "message": "Commit message must follow Conventional Commits format: <type>[scope]: <description>",
+        "autoFix": {
+          "enabled": true,
+          "strategy": "prompt-rewrite",
+          "description": "분석된 diff를 기반으로 올바른 커밋 메시지를 제안"
+        },
+        "examples": {
+          "pass": [
+            "feat: add user authentication",
+            "fix(api): resolve null pointer in session handler",
+            "chore(deps): bump typescript to 5.7",
+            "feat(core)!: redesign plugin loading API"
+          ],
+          "fail": [
+            "added stuff",
+            "WIP",
+            "fix",
+            "Update file",
+            "Feat: Wrong Casing"
+          ]
+        }
+      },
+      {
+        "id": "commit-message-length",
+        "name": "Commit Subject Length",
+        "description": "커밋 메시지 subject가 적절한 길이인지 검증",
+        "when": "before-commit",
+        "check": {
+          "type": "length",
+          "target": "commit-message-subject",
+          "min": 10,
+          "max": 72
+        },
+        "severity": "warning",
+        "message": "Commit subject should be between 10 and 72 characters (current: {length})",
+        "autoFix": {
+          "enabled": true,
+          "strategy": "truncate-to-body",
+          "description": "72자 초과 시 subject를 줄이고 나머지를 body로 이동"
+        }
+      },
+      {
+        "id": "branch-name-format",
+        "name": "Branch Name Format",
+        "description": "브랜치명이 네이밍 컨벤션을 따르는지 검증",
+        "when": "before-push",
+        "check": {
+          "pattern": "^(main|master|develop|feature/|feat/|fix/|bugfix/|hotfix/|release/|chore/|docs/|refactor/|ci/|test/|perf/|build/)",
+          "target": "branch-name"
+        },
+        "severity": "warning",
+        "message": "Branch name should start with a recognized prefix (feature/, fix/, release/, hotfix/, etc.)",
+        "exclude": ["main", "master", "develop"],
+        "autoFix": {
+          "enabled": false,
+          "description": "브랜치 rename은 위험하므로 수동 처리 권장"
+        }
+      },
+      {
+        "id": "no-direct-push-to-protected",
+        "name": "No Direct Push to Protected Branches",
+        "description": "main/develop 브랜치에 직접 push하지 않도록 검증",
+        "when": "before-push",
+        "check": {
+          "type": "branch-protection",
+          "protectedBranches": ["main", "master", "develop"],
+          "target": "current-branch"
+        },
+        "severity": "error",
+        "message": "Direct push to {branch} is not allowed. Create a feature branch and open a PR.",
+        "autoFix": {
+          "enabled": true,
+          "strategy": "create-branch",
+          "description": "현재 커밋을 새 feature 브랜치로 이동"
+        }
+      },
+      {
+        "id": "no-secrets-in-commit",
+        "name": "No Secrets in Commit",
+        "description": "커밋에 시크릿/크레덴셜이 포함되지 않았는지 검증",
+        "when": "before-commit",
+        "check": {
+          "type": "pattern-scan",
+          "target": "staged-diff",
+          "patterns": [
+            {
+              "name": "AWS Access Key",
+              "pattern": "AKIA[0-9A-Z]{16}"
+            },
+            {
+              "name": "AWS Secret Key",
+              "pattern": "[0-9a-zA-Z/+]{40}"
+            },
+            {
+              "name": "GitHub Token",
+              "pattern": "gh[ps]_[A-Za-z0-9_]{36,}"
+            },
+            {
+              "name": "Generic API Key",
+              "pattern": "(api[_-]?key|apikey|api[_-]?secret)\\s*[:=]\\s*['\"][^'\"]{8,}"
+            },
+            {
+              "name": "Private Key",
+              "pattern": "-----BEGIN (RSA |EC |DSA )?PRIVATE KEY-----"
+            },
+            {
+              "name": "JWT Token",
+              "pattern": "eyJ[A-Za-z0-9-_]+\\.eyJ[A-Za-z0-9-_]+"
+            },
+            {
+              "name": "Database URL with Credentials",
+              "pattern": "(postgres|mysql|mongodb)://[^:]+:[^@]+@"
+            }
+          ]
+        },
+        "severity": "error",
+        "message": "Potential secret detected: {secretType}. Remove the secret and use environment variables instead.",
+        "autoFix": {
+          "enabled": false,
+          "description": "시크릿은 자동 수정 불가 — 수동으로 제거하고 .env로 이동"
+        }
+      }
+    ],
+    "post": [
+      {
+        "id": "no-conflict-markers",
+        "name": "No Conflict Markers Remaining",
+        "description": "merge 후 conflict 마커가 코드에 남아있지 않은지 검증",
+        "when": "after-merge",
+        "check": {
+          "type": "pattern-scan",
+          "target": "working-tree",
+          "patterns": [
+            {
+              "name": "Conflict Start",
+              "pattern": "^<{7} "
+            },
+            {
+              "name": "Conflict Separator",
+              "pattern": "^={7}$"
+            },
+            {
+              "name": "Conflict End",
+              "pattern": "^>{7} "
+            }
+          ],
+          "exclude": ["*.md", "*.txt", "*.json"]
+        },
+        "severity": "error",
+        "message": "Conflict markers found in {file}:{line}. Resolve all conflicts before committing.",
+        "autoFix": {
+          "enabled": false,
+          "description": "conflict-resolve 스킬로 위임"
+        }
+      },
+      {
+        "id": "build-passes-after-merge",
+        "name": "Build Passes After Merge",
+        "description": "merge 후 빌드가 정상적으로 통과하는지 검증",
+        "when": "after-merge",
+        "check": {
+          "type": "command",
+          "commands": [
+            {
+              "command": "tsc --noEmit",
+              "description": "TypeScript 컴파일 체크",
+              "conditional": "tsconfig.json exists"
+            },
+            {
+              "command": "pnpm build",
+              "description": "전체 빌드"
+            }
+          ],
+          "timeout": 300000
+        },
+        "severity": "error",
+        "message": "Build failed after merge. Fix build errors before pushing.",
+        "autoFix": {
+          "enabled": true,
+          "strategy": "error-based-fix",
+          "maxRetries": 3,
+          "description": "빌드 에러 메시지를 분석하여 자동 수정 시도"
+        }
+      },
+      {
+        "id": "tests-pass-after-merge",
+        "name": "Tests Pass After Merge",
+        "description": "merge 후 테스트가 통과하는지 검증",
+        "when": "after-merge",
+        "check": {
+          "type": "command",
+          "commands": [
+            {
+              "command": "pnpm test",
+              "description": "전체 테스트 실행"
+            }
+          ],
+          "timeout": 300000
+        },
+        "severity": "warning",
+        "message": "Tests failed after merge. Review failing tests.",
+        "autoFix": {
+          "enabled": false,
+          "description": "테스트 실패는 의도 파악이 필요하므로 수동 처리"
+        }
+      }
+    ],
+    "quality": [
+      {
+        "id": "pr-has-description",
+        "name": "PR Has Description",
+        "description": "PR에 의미 있는 설명이 포함되어 있는지 검증",
+        "when": "pr-create",
+        "check": {
+          "type": "content",
+          "target": "pr-body",
+          "minLength": 50,
+          "requiredSections": ["Summary", "Changes"],
+          "forbiddenPatterns": ["TODO: fill in", "WIP", "TBD"]
+        },
+        "severity": "warning",
+        "message": "PR description is too short or missing required sections. Use the PR template.",
+        "autoFix": {
+          "enabled": true,
+          "strategy": "generate-description",
+          "description": "커밋 히스토리와 diff를 분석하여 PR description 자동 생성"
+        }
+      },
+      {
+        "id": "pr-includes-tests",
+        "name": "PR Includes Tests",
+        "description": "기능 변경 PR에 테스트가 포함되어 있는지 검증",
+        "when": "pr-create",
+        "check": {
+          "type": "file-pattern",
+          "target": "pr-diff",
+          "requirePattern": "\\.(test|spec)\\.(ts|tsx|js|jsx)$",
+          "whenChanged": "\\.(ts|tsx|js|jsx)$",
+          "excludeTypes": ["docs", "style", "chore", "ci"]
+        },
+        "severity": "info",
+        "message": "This PR changes source files but does not include test changes. Consider adding tests.",
+        "autoFix": {
+          "enabled": false,
+          "description": "테스트 작성은 자동화 대상이 아님 — 리마인더만 제공"
+        }
+      },
+      {
+        "id": "pr-size-check",
+        "name": "PR Size Check",
+        "description": "PR 크기가 적절한지 검증",
+        "when": "pr-create",
+        "check": {
+          "type": "diff-stats",
+          "target": "pr-diff",
+          "thresholds": {
+            "additions": {
+              "warn": 400,
+              "error": 1000
+            },
+            "filesChanged": {
+              "warn": 15,
+              "error": 30
+            }
+          },
+          "excludePatterns": ["*.lock", "*.snap", "*.generated.*"]
+        },
+        "severity": "warning",
+        "message": "PR is large ({additions} additions, {filesChanged} files). Consider splitting into smaller PRs.",
+        "autoFix": {
+          "enabled": false,
+          "description": "PR 분리 전략을 제안 (stacked PRs)"
+        }
+      },
+      {
+        "id": "no-fixup-commits",
+        "name": "No Fixup/WIP Commits",
+        "description": "PR에 WIP/fixup 커밋이 남아있지 않은지 검증",
+        "when": "pr-create",
+        "check": {
+          "type": "commit-messages",
+          "target": "pr-commits",
+          "forbiddenPatterns": [
+            "^(WIP|wip|Wip)[: ]",
+            "^fixup!",
+            "^squash!",
+            "^(temp|tmp|test123|asdf|xxx)"
+          ]
+        },
+        "severity": "warning",
+        "message": "PR contains WIP/fixup commits. Squash or clean up history before requesting review.",
+        "autoFix": {
+          "enabled": true,
+          "strategy": "suggest-rebase",
+          "description": "history-clean 스킬로 위임하여 rebase 제안"
+        }
+      },
+      {
+        "id": "changelog-updated",
+        "name": "Changelog Updated",
+        "description": "사용자 대면 변경 시 CHANGELOG가 업데이트되었는지 검증",
+        "when": "pr-create",
+        "check": {
+          "type": "file-changed",
+          "target": "pr-diff",
+          "requiredFile": "CHANGELOG.md",
+          "whenCommitTypes": ["feat", "fix"],
+          "whenBreakingChange": true
+        },
+        "severity": "info",
+        "message": "This PR includes user-facing changes but CHANGELOG.md was not updated.",
+        "autoFix": {
+          "enabled": true,
+          "strategy": "generate-changelog-entry",
+          "description": "release-flow 전략의 changelog phase를 활용하여 엔트리 생성"
+        }
+      }
+    ]
+  },
+  "config": {
+    "enablePre": true,
+    "enablePost": true,
+    "enableQuality": true,
+    "strictMode": false,
+    "treatWarningsAsErrors": false,
+    "excludePaths": [
+      "node_modules/",
+      "dist/",
+      ".git/",
+      "*.lock"
+    ]
+  }
+}

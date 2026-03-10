@@ -25,6 +25,7 @@ import { useSlashCommands } from "./hooks/useSlashCommands.js";
 import { AgentBridge } from "./agent-bridge.js";
 import type { AgentEvent } from "@yuaone/core";
 import { checkForUpdate, loadSettings, saveSettings } from "./lib/update-checker.js";
+import { executeCommand, type CommandContext } from "../commands/index.js";
 
 export interface AppProps {
   version: string;
@@ -97,91 +98,56 @@ function App({
     agentStream.interrupt();
   }, [agentStream]);
 
-  // Slash commands
+  // Slash commands — unified dispatcher
   const handleSlashCommand = useCallback(
     (cmd: string) => {
       slashActions.close();
 
-      if (cmd === "/exit" || cmd === "/quit" || cmd === "/q") {
+      const ctx: CommandContext = {
+        output: (msg) => agentStream.addSystemMessage(msg),
+        config: undefined as any, // ConfigManager not available in TUI — commands that need it will use fallback
+        version,
+        provider,
+        model,
+        workDir: process.cwd(),
+        filesChanged: bridgeRef.current.filesChanged,
+        agentInfo: {
+          status: agentStream.state.status,
+          messageCount: agentStream.state.messages.length,
+          totalTokens: agentStream.state.totalTokensUsed,
+          tokensPerSecond: agentStream.state.tokensPerSecond,
+        },
+        sessionInfo: {
+          id: "tui-session",
+          createdAt: Date.now(),
+        },
+        onModelChange: (newModel) => {
+          agentStream.addSystemMessage(`Model changed to: ${newModel} (takes effect on next message)`);
+        },
+        onModeChange: (newMode) => {
+          agentStream.addSystemMessage(`Mode changed to: ${newMode} (takes effect on next message)`);
+        },
+      };
+
+      const result = executeCommand(ctx, cmd);
+      if (!result) {
+        agentStream.addSystemMessage(`Unknown command: ${cmd}. Type /help for available commands.`);
+        return;
+      }
+      if (result.exit) {
         onExit?.();
         exit();
         return;
       }
-      if (cmd === "/clear") {
+      if (result.clear) {
         agentStream.clearMessages();
         return;
       }
-      if (cmd === "/help" || cmd === "/h") {
-        agentStream.addSystemMessage([
-          "Available commands:",
-          "  /help      — Show this help",
-          "  /status    — Model, tokens, session info",
-          "  /clear     — Clear conversation",
-          "  /model     — Change model",
-          "  /config    — Show configuration",
-          "  /session   — Session info",
-          "  /diff      — Show file changes",
-          "  /undo      — Undo last change",
-          "  /settings  — Auto-update preferences",
-          "  /exit      — Exit YUAN",
-          "",
-          "  yuaone.com",
-        ].join("\n"));
-        return;
+      if (result.output) {
+        agentStream.addSystemMessage(result.output);
       }
-      if (cmd === "/status") {
-        const s = agentStream.state;
-        const files = bridgeRef.current.filesChanged;
-        agentStream.addSystemMessage([
-          `YUAN v${version}`,
-          `  Provider : ${provider}`,
-          `  Model    : ${model}`,
-          `  Status   : ${s.status}`,
-          `  Messages : ${s.messages.length}`,
-          `  Tokens   : ${s.totalTokensUsed.toLocaleString()} total`,
-          s.tokensPerSecond > 0 ? `  Speed    : ${s.tokensPerSecond} tok/s` : "",
-          `  Files    : ${files.length} changed`,
-          "",
-          "  yuaone.com",
-        ].filter(Boolean).join("\n"));
-        return;
-      }
-      if (cmd === "/diff") {
-        const files = bridgeRef.current.filesChanged;
-        const content = files.length > 0
-          ? `Changed files:\n${files.map((f) => `  ${f}`).join("\n")}`
-          : "No files changed in this session.";
-        agentStream.addSystemMessage(content);
-        return;
-      }
-      if (cmd === "/settings") {
-        const settings = loadSettings();
-        const current = settings.autoUpdate;
-        const options = ["prompt", "auto", "never"] as const;
-        const currentIdx = options.indexOf(current);
-        // Cycle to next option
-        const nextIdx = (currentIdx + 1) % options.length;
-        const next = options[nextIdx];
-        settings.autoUpdate = next;
-        saveSettings(settings);
-
-        const labels = {
-          prompt: "Ask before updating",
-          auto: "Auto-update on launch",
-          never: "Never check for updates",
-        };
-        agentStream.addSystemMessage(
-          `Auto-update: ${labels[next]}\n` +
-          `  1. prompt — ${current === "prompt" ? "●" : "○"} Ask before updating\n` +
-          `  2. auto   — ${current === "auto" ? "●" : "○"} Auto-update on launch\n` +
-          `  3. never  — ${current === "never" ? "●" : "○"} Never check\n` +
-          `\n  Changed to: ${labels[next]} (run /settings again to cycle)`,
-        );
-        return;
-      }
-      agentStream.addSystemMessage(`Unknown command: ${cmd}. Type /help for available commands.`);
     },
-    [agentStream, onExit, exit, slashActions],
+    [agentStream, onExit, exit, slashActions, version, provider, model],
   );
 
   // Check for updates on mount (non-blocking)
@@ -304,6 +270,9 @@ function App({
         />
       )}
 
+      {/* Status indicator — above input */}
+      <FooterBar agentState={agentStream.state} slashMenuOpen={slashState.isOpen} />
+
       {/* Input */}
       <InputBox
         onSubmit={handleSubmit}
@@ -316,9 +285,6 @@ function App({
         onSlashClose={slashActions.close}
         isRunning={isRunning}
       />
-
-      {/* Bottom status indicator + keybind hints */}
-      <FooterBar agentState={agentStream.state} slashMenuOpen={slashState.isOpen} />
     </Box>
   );
 }

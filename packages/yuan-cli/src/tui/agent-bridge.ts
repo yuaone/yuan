@@ -86,7 +86,7 @@ export class AgentBridge {
 
     // Build BYOK config
     const byokConfig: BYOKConfig = {
-      provider: provider as "openai" | "anthropic" | "google",
+      provider: provider as "openai" | "anthropic" | "yua",
       apiKey,
       model,
       baseUrl,

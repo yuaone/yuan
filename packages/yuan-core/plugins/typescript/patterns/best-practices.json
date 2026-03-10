@@ -1,0 +1,25 @@
+{
+  "patterns": [
+    {
+      "id": "prefer-const",
+      "name": "Prefer Const",
+      "detect": "let\\s+\\w+\\s*=",
+      "action": "suggest",
+      "template": "Use `const` unless reassigned"
+    },
+    {
+      "id": "explicit-return-type",
+      "name": "Explicit Return Type",
+      "detect": "export\\s+(async\\s+)?function\\s+\\w+\\([^)]*\\)\\s*\\{",
+      "action": "suggest",
+      "template": "Add explicit return type annotation for exported functions"
+    },
+    {
+      "id": "avoid-any",
+      "name": "Avoid Any Type",
+      "detect": ":\\s*any\\b",
+      "action": "warn",
+      "template": "Replace `any` with a specific type or `unknown`"
+    }
+  ]
+}

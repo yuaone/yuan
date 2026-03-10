@@ -1,0 +1,74 @@
+name: "@yuaone/plugin-typescript"
+version: "1.0.0"
+description: "TypeScript 전문 에이전트 스킬팩 — 타입 에러 해결, strict 모드 마이그레이션, 리팩토링"
+author: "yuaone"
+license: "MIT"
+yuan_version: ">=0.1.0"
+
+detect:
+  files:
+    - "tsconfig.json"
+  dependencies:
+    - "typescript"
+
+type: "hybrid"
+trustLevel: "official"
+category: "coding"
+
+skills:
+  - id: "ts-strict"
+    name: "TypeScript Strict Mode"
+    description: "strict 모드 활성화 + 기존 코드 마이그레이션"
+    trigger:
+      kind: "command"
+      command: "/skill ts-strict"
+
+  - id: "ts-migrate"
+    name: "JS → TS Migration"
+    description: "JavaScript 프로젝트를 TypeScript로 점진적 마이그레이션"
+    trigger:
+      kind: "command"
+      command: "/skill ts-migrate"
+
+  - id: "ts-refactor"
+    name: "Type-Safe Refactoring"
+    description: "타입 안전성을 보장하면서 리팩토링"
+    trigger:
+      kind: "file_pattern"
+      pattern: "*.ts"
+
+  - id: "ts-debug"
+    name: "TypeScript Error Debug"
+    description: "TS 컴파일 에러 자동 진단 + 수정"
+    trigger:
+      kind: "auto"
+      confidence: 0.8
+
+triggers:
+  - id: "ts-compile-error"
+    errorPattern: "TS\\d{4}:"
+    skillId: "ts-debug"
+    priority: 90
+  - id: "ts-type-mismatch"
+    errorPattern: "Type '.*' is not assignable to type"
+    skillId: "ts-debug"
+    priority: 85
+
+tools:
+  - name: "tsc-check"
+    description: "TypeScript 컴파일 체크 (tsc --noEmit)"
+    inputSchema:
+      type: "object"
+      properties:
+        project:
+          type: "string"
+          description: "tsconfig.json 경로"
+    requiresApproval: false
+    riskLevel: "low"
+
+permissions:
+  fileRead: true
+  fileWrite: true
+  shellExec: true
+  networkAccess: false
+  gitOps: false

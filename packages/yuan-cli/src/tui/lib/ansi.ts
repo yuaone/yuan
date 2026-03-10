@@ -49,9 +49,13 @@ export function enterTUI(): void {
   );
 }
 
-/** Exit TUI mode: restore everything */
+/** Exit TUI mode: restore everything + clear residue */
 export function exitTUI(): void {
   process.stdout.write(
     ANSI.mouseDisable + ANSI.cursorShow + ANSI.altScreenExit,
   );
+  // Clear any residual lines from before TUI entered alternate screen
+  process.stdout.write(ANSI.clearScreen);
+  // Print a clean goodbye so terminal isn't blank
+  process.stdout.write("\x1b[90mYUAN session ended.\x1b[0m\n");
 }
