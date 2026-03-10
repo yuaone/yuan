@@ -1,9 +1,9 @@
 /**
  * @module llm-client
- * @description BYOK LLM API 클라이언트 — OpenAI/Anthropic/Google 호출 추상화
+ * @description BYOK LLM API 클라이언트 — OpenAI/Anthropic 호출 추상화
  *
- * openai SDK를 사용하여 OpenAI 호환 포맷으로 통신.
- * Anthropic/Google은 별도 포맷 변환 후 호출.
+ * openai SDK를 사용하여 OpenAI 호환 포맷으로 통신 (YUA도 OpenAI-compatible).
+ * Anthropic은 별도 네이티브 포맷 변환 후 호출.
  */
 
 import OpenAI from "openai";
@@ -226,18 +226,31 @@ export class BYOKClient {
     messages: Message[],
     tools?: ToolDefinition[],
   ): Promise<LLMResponse> {
-    const systemMessage = messages.find((m) => m.role === "system");
+    const systemMessages = messages.filter((m) => m.role === "system");
+    const systemTexts = systemMessages
+      .map((m) => typeof m.content === "string" ? m.content : (Array.isArray(m.content) ? m.content.filter((b): b is { type: "text"; text: string } => b.type === "text").map((b) => b.text).join("\n") : ""))
+      .filter(Boolean);
+
+    // Build system content with cache_control for Anthropic prompt caching
+    const systemPayload = this.buildAnthropicSystemPayload(systemTexts);
     const nonSystemMessages = messages.filter((m) => m.role !== "system");
 
     const body: Record<string, unknown> = {
       model: this.model,
       max_tokens: 8192,
-      ...(systemMessage?.content
-        ? { system: typeof systemMessage.content === "string" ? systemMessage.content : systemMessage.content.filter((b): b is { type: "text"; text: string } => b.type === "text").map((b) => b.text).join("\n") }
-        : {}),
+      ...(systemPayload ? { system: systemPayload } : {}),
       messages: nonSystemMessages.map((m) => this.toAnthropicMessage(m)),
       ...(tools && tools.length > 0
-        ? { tools: tools.map((t) => this.toAnthropicTool(t)) }
+        ? {
+            tools: tools.map((t, i) => {
+              const anthropicTool = this.toAnthropicTool(t);
+              // Cache the last tool definition for prompt caching
+              if (i === tools.length - 1) {
+                (anthropicTool as Record<string, unknown>).cache_control = { type: "ephemeral" };
+              }
+              return anthropicTool;
+            }),
+          }
         : {}),
     };
 
@@ -249,6 +262,7 @@ export class BYOKClient {
           "Content-Type": "application/json",
           "x-api-key": this.config.apiKey,
           "anthropic-version": "2023-06-01",
+          "anthropic-beta": "prompt-caching-2024-07-31",
         },
         body: JSON.stringify(body),
       },
@@ -270,19 +284,32 @@ export class BYOKClient {
     messages: Message[],
     tools?: ToolDefinition[],
   ): AsyncGenerator<LLMStreamChunk> {
-    const systemMessage = messages.find((m) => m.role === "system");
+    const systemMessages = messages.filter((m) => m.role === "system");
+    const systemTexts = systemMessages
+      .map((m) => typeof m.content === "string" ? m.content : (Array.isArray(m.content) ? m.content.filter((b): b is { type: "text"; text: string } => b.type === "text").map((b) => b.text).join("\n") : ""))
+      .filter(Boolean);
+
+    // Build system content with cache_control for Anthropic prompt caching
+    const systemPayload = this.buildAnthropicSystemPayload(systemTexts);
     const nonSystemMessages = messages.filter((m) => m.role !== "system");
 
     const body: Record<string, unknown> = {
       model: this.model,
       max_tokens: 8192,
       stream: true,
-      ...(systemMessage?.content
-        ? { system: typeof systemMessage.content === "string" ? systemMessage.content : systemMessage.content.filter((b): b is { type: "text"; text: string } => b.type === "text").map((b) => b.text).join("\n") }
-        : {}),
+      ...(systemPayload ? { system: systemPayload } : {}),
       messages: nonSystemMessages.map((m) => this.toAnthropicMessage(m)),
       ...(tools && tools.length > 0
-        ? { tools: tools.map((t) => this.toAnthropicTool(t)) }
+        ? {
+            tools: tools.map((t, i) => {
+              const anthropicTool = this.toAnthropicTool(t);
+              // Cache the last tool definition for prompt caching
+              if (i === tools.length - 1) {
+                (anthropicTool as Record<string, unknown>).cache_control = { type: "ephemeral" };
+              }
+              return anthropicTool;
+            }),
+          }
         : {}),
     };
 
@@ -294,6 +321,7 @@ export class BYOKClient {
           "Content-Type": "application/json",
           "x-api-key": this.config.apiKey,
           "anthropic-version": "2023-06-01",
+          "anthropic-beta": "prompt-caching-2024-07-31",
         },
         body: JSON.stringify(body),
       },
@@ -570,6 +598,35 @@ export class BYOKClient {
       role: msg.role === "system" ? "user" : msg.role,
       content: msg.content ?? "",
     };
+  }
+
+  /**
+   * Build system payload with cache_control markers for Anthropic prompt caching.
+   * Caches the first block (stable base prompt) to maximize token savings.
+   */
+  private buildAnthropicSystemPayload(
+    systemTexts: string[],
+  ): Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }> | undefined {
+    if (systemTexts.length === 0) return undefined;
+
+    if (systemTexts.length === 1) {
+      return [
+        { type: "text" as const, text: systemTexts[0], cache_control: { type: "ephemeral" as const } },
+      ];
+    }
+
+    // Multiple system messages: cache the first block (stable base prompt)
+    // Anthropic caches everything up to the cache_control marker
+    return systemTexts.map((text, i) => {
+      const block: { type: "text"; text: string; cache_control?: { type: "ephemeral" } } = {
+        type: "text" as const,
+        text,
+      };
+      if (i === 0) {
+        block.cache_control = { type: "ephemeral" as const };
+      }
+      return block;
+    });
   }
 
   private toAnthropicTool(

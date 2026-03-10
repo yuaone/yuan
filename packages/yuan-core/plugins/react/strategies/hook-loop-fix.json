@@ -1,0 +1,36 @@
+{
+  "id": "hook-loop-fix",
+  "name": "useEffect Infinite Loop Fix",
+  "description": "Three-phase strategy to identify, fix, and verify useEffect infinite loop / maximum update depth issues",
+  "problemClass": "infinite_render_loop",
+  "phases": [
+    {
+      "name": "Identify Loop Source",
+      "tools": ["grep", "file_read"],
+      "maxIterations": 5,
+      "successCriteria": "Specific useEffect identified that causes the loop. Dependency array analyzed. Root cause classified as one of: (1) missing dependency array, (2) object/array reference in deps creating new reference each render, (3) state setter in effect body with that state in deps, (4) function reference in deps recreated each render, (5) mutual state updates between multiple effects. Call stack or component name identified."
+    },
+    {
+      "name": "Fix Dependencies",
+      "tools": ["file_read", "file_edit"],
+      "maxIterations": 5,
+      "successCriteria": "Fix applied using appropriate technique: (a) add missing dependency array, (b) stabilize object/array deps with useMemo, (c) use functional state updater to remove state from deps, (d) wrap function deps in useCallback, (e) extract primitive values from objects for deps, (f) refactor mutual updates into useReducer. No eslint-disable comments added for react-hooks/exhaustive-deps. No TypeScript errors."
+    },
+    {
+      "name": "Verify Stability",
+      "tools": ["shell_exec", "grep"],
+      "maxIterations": 3,
+      "successCriteria": "Build passes. No 'Maximum update depth exceeded' errors. No 'Too many re-renders' errors. Component renders expected number of times (verify with React DevTools Profiler or console.log count). All existing tests pass. No new ESLint warnings from react-hooks/exhaustive-deps."
+    }
+  ],
+  "exitCriteria": [
+    "No infinite loop or maximum update depth errors",
+    "Build passes without errors",
+    "Component renders correct number of times",
+    "eslint react-hooks/exhaustive-deps passes without disable comments",
+    "All existing tests pass"
+  ],
+  "fallback": null,
+  "estimatedTokens": 2000,
+  "confidence": 0.85
+}

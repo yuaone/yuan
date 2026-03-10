@@ -1,0 +1,32 @@
+{
+  "patterns": [
+    {
+      "id": "implicit-any",
+      "name": "Implicit Any Parameter",
+      "detect": "Parameter '\\w+' implicitly has an 'any' type",
+      "action": "auto-fix",
+      "template": "Add explicit type annotation: `{param}: {suggestedType}`"
+    },
+    {
+      "id": "null-assignment",
+      "name": "Null Assignment",
+      "detect": "Type 'null' is not assignable",
+      "action": "auto-fix",
+      "template": "Use optional type: `{type} | null` or `{type} | undefined`"
+    },
+    {
+      "id": "missing-property",
+      "name": "Missing Object Property",
+      "detect": "Property '\\w+' does not exist on type",
+      "action": "suggest",
+      "template": "Extend interface or use type assertion"
+    },
+    {
+      "id": "module-not-found",
+      "name": "Module Not Found",
+      "detect": "Cannot find module '.*'",
+      "action": "auto-fix",
+      "template": "Install missing dependency: `pnpm add {module}` or `pnpm add -D @types/{module}`"
+    }
+  ]
+}

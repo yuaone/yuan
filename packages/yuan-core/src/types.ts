@@ -6,7 +6,7 @@
 // ─── BYOK (Bring Your Own Key) ───
 
 /** LLM provider 식별자 */
-export type LLMProvider = "openai" | "anthropic" | "google" | "yua" | "deepseek";
+export type LLMProvider = "openai" | "anthropic" | "yua";
 
 /** BYOK 설정 — 사용자가 직접 제공하는 API 키 */
 export interface BYOKConfig {

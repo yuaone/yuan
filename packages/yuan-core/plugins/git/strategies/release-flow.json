@@ -1,0 +1,292 @@
+{
+  "id": "release-flow",
+  "name": "Release Flow Strategy",
+  "description": "릴리스 브랜치 생성부터 태그 배포까지의 표준 릴리스 플로우.",
+  "phases": [
+    {
+      "id": "create-release-branch",
+      "name": "Create Release Branch",
+      "order": 1,
+      "description": "릴리스 준비를 위한 전용 브랜치를 생성한다.",
+      "preconditions": [
+        "develop 브랜치(또는 main)가 릴리스 가능 상태",
+        "모든 target 기능이 merge 완료",
+        "CI가 green 상태"
+      ],
+      "steps": [
+        {
+          "command": "git fetch origin",
+          "purpose": "최신 원격 상태 동기화"
+        },
+        {
+          "command": "git checkout {baseBranch}",
+          "purpose": "릴리스 기반 브랜치로 이동",
+          "baseBranch": "develop (Git Flow) 또는 main (Trunk-based)"
+        },
+        {
+          "command": "git pull origin {baseBranch}",
+          "purpose": "최신 상태 확인"
+        },
+        {
+          "command": "git checkout -b release/{version}",
+          "purpose": "릴리스 브랜치 생성"
+        },
+        {
+          "command": "git push -u origin release/{version}",
+          "purpose": "원격에 릴리스 브랜치 푸시"
+        }
+      ],
+      "versionScheme": {
+        "format": "semver",
+        "pattern": "{major}.{minor}.{patch}",
+        "examples": ["1.2.0", "2.0.0", "0.3.1"],
+        "prerelease": {
+          "rc": "{version}-rc.{n}",
+          "beta": "{version}-beta.{n}",
+          "alpha": "{version}-alpha.{n}"
+        }
+      },
+      "outputs": {
+        "releaseBranch": "release/{version}",
+        "previousVersion": "이전 릴리스 버전"
+      }
+    },
+    {
+      "id": "version-bump",
+      "name": "Version Bump",
+      "order": 2,
+      "description": "패키지 버전을 올리고 관련 파일을 업데이트한다.",
+      "steps": [
+        {
+          "tool": "file_read",
+          "target": "package.json",
+          "purpose": "현재 버전 확인"
+        },
+        {
+          "tool": "file_edit",
+          "target": "package.json",
+          "purpose": "version 필드 업데이트"
+        },
+        {
+          "tool": "file_edit",
+          "target": "모노레포 내 의존 패키지들의 package.json",
+          "purpose": "workspace 의존성 버전 업데이트 (해당 시)",
+          "conditional": "모노레포일 때"
+        },
+        {
+          "command": "pnpm install --lockfile-only",
+          "purpose": "lock file 업데이트 (의존성 재설치 없이)",
+          "conditional": "lock file이 버전을 반영할 때"
+        }
+      ],
+      "bumpRules": {
+        "major": {
+          "trigger": "BREAKING CHANGE가 포함된 커밋이 있을 때",
+          "description": "호환성이 깨지는 변경"
+        },
+        "minor": {
+          "trigger": "feat 타입 커밋이 있고 breaking change가 없을 때",
+          "description": "새 기능 추가 (하위 호환)"
+        },
+        "patch": {
+          "trigger": "fix 타입 커밋만 있을 때",
+          "description": "버그 수정"
+        }
+      },
+      "monorepoStrategy": {
+        "independent": "각 패키지가 독립적으로 버전 관리",
+        "fixed": "모든 패키지가 동일 버전 사용",
+        "recommendation": "core 패키지는 independent, 앱 패키지는 fixed"
+      },
+      "outputs": {
+        "newVersion": "업데이트된 버전",
+        "bumpType": "major | minor | patch",
+        "updatedFiles": "버전이 변경된 파일 목록"
+      }
+    },
+    {
+      "id": "changelog",
+      "name": "Generate Changelog",
+      "order": 3,
+      "description": "커밋 히스토리 기반으로 CHANGELOG를 생성하거나 업데이트한다.",
+      "steps": [
+        {
+          "command": "git log --oneline {previousTag}..HEAD",
+          "purpose": "이전 릴리스 이후 커밋 목록 수집"
+        },
+        {
+          "tool": "file_read",
+          "target": "CHANGELOG.md",
+          "purpose": "기존 CHANGELOG 확인",
+          "optional": true
+        },
+        {
+          "action": "generate",
+          "purpose": "커밋을 카테고리별로 분류하여 CHANGELOG 섹션 생성"
+        },
+        {
+          "tool": "file_edit",
+          "target": "CHANGELOG.md",
+          "purpose": "새 릴리스 섹션을 CHANGELOG 최상단에 추가"
+        }
+      ],
+      "changelogFormat": {
+        "template": "## [{version}] - {date}\n\n### Added\n{feats}\n\n### Fixed\n{fixes}\n\n### Changed\n{refactors}\n\n### Breaking Changes\n{breaking}\n",
+        "categories": [
+          {
+            "heading": "Added",
+            "types": ["feat"],
+            "description": "새 기능"
+          },
+          {
+            "heading": "Fixed",
+            "types": ["fix"],
+            "description": "버그 수정"
+          },
+          {
+            "heading": "Changed",
+            "types": ["refactor", "perf"],
+            "description": "기존 기능 변경"
+          },
+          {
+            "heading": "Documentation",
+            "types": ["docs"],
+            "description": "문서 변경"
+          },
+          {
+            "heading": "Breaking Changes",
+            "types": [],
+            "filter": "BREAKING CHANGE footer 또는 ! 표기가 있는 커밋",
+            "description": "호환성 깨지는 변경"
+          },
+          {
+            "heading": "Internal",
+            "types": ["chore", "ci", "build", "test"],
+            "description": "내부 변경 (선택적 포함)"
+          }
+        ],
+        "entryFormat": "- {scope}: {description} ({commitShort})",
+        "dateFormat": "YYYY-MM-DD"
+      },
+      "outputs": {
+        "changelogEntry": "생성된 CHANGELOG 섹션",
+        "commitCount": "포함된 커밋 수"
+      }
+    },
+    {
+      "id": "tag-and-merge",
+      "name": "Tag & Merge",
+      "order": 4,
+      "description": "릴리스를 태그하고 main/develop 브랜치에 병합한다.",
+      "steps": [
+        {
+          "command": "git add -A",
+          "purpose": "버전 bump 및 CHANGELOG 변경 staging"
+        },
+        {
+          "command": "git commit -m \"chore(release): {version}\"",
+          "purpose": "릴리스 커밋 생성"
+        },
+        {
+          "command": "git checkout main",
+          "purpose": "main 브랜치로 이동"
+        },
+        {
+          "command": "git merge --no-ff release/{version}",
+          "purpose": "릴리스 브랜치를 main에 병합 (merge commit 생성)"
+        },
+        {
+          "command": "git tag -a v{version} -m \"Release v{version}\"",
+          "purpose": "annotated 태그 생성"
+        },
+        {
+          "command": "git checkout develop",
+          "purpose": "develop 브랜치로 이동 (Git Flow만)",
+          "conditional": "Git Flow 사용 시"
+        },
+        {
+          "command": "git merge --no-ff release/{version}",
+          "purpose": "릴리스 브랜치를 develop에도 병합 (Git Flow만)",
+          "conditional": "Git Flow 사용 시"
+        },
+        {
+          "command": "git push origin main develop --tags",
+          "purpose": "main, develop, 태그를 원격에 푸시"
+        },
+        {
+          "command": "git branch -d release/{version}",
+          "purpose": "릴리스 브랜치 삭제 (로컬)"
+        },
+        {
+          "command": "git push origin --delete release/{version}",
+          "purpose": "릴리스 브랜치 삭제 (원격)"
+        }
+      ],
+      "tagConventions": {
+        "format": "v{major}.{minor}.{patch}",
+        "examples": ["v1.2.0", "v2.0.0", "v0.3.1"],
+        "annotated": true,
+        "signed": false,
+        "message": "Release v{version}"
+      },
+      "postRelease": {
+        "actions": [
+          {
+            "name": "GitHub Release",
+            "command": "gh release create v{version} --title \"v{version}\" --notes-file RELEASE_NOTES.md",
+            "description": "GitHub Release 생성 (CHANGELOG에서 해당 버전 섹션 추출)",
+            "optional": true
+          },
+          {
+            "name": "npm Publish",
+            "command": "pnpm publish --no-git-checks",
+            "description": "npm 레지스트리에 패키지 배포",
+            "conditional": "npm 패키지일 때",
+            "requiresApproval": true
+          },
+          {
+            "name": "Notify",
+            "description": "팀/채널에 릴리스 알림",
+            "optional": true
+          }
+        ]
+      },
+      "outputs": {
+        "tag": "생성된 태그",
+        "mergedTo": "병합된 브랜치 목록",
+        "releaseUrl": "GitHub Release URL (생성 시)"
+      }
+    }
+  ],
+  "config": {
+    "defaultBaseBranch": "main",
+    "gitFlowBaseBranch": "develop",
+    "requireCI": true,
+    "requireReview": true,
+    "autoDeleteReleaseBranch": true,
+    "signTags": false,
+    "publishToNpm": false,
+    "createGitHubRelease": true
+  },
+  "hotfix": {
+    "description": "긴급 프로덕션 버그 수정을 위한 축약 릴리스 플로우",
+    "steps": [
+      "git checkout main",
+      "git checkout -b hotfix/{version}",
+      "버그 수정 + 테스트 추가",
+      "version bump (patch)",
+      "CHANGELOG 업데이트",
+      "git checkout main && git merge --no-ff hotfix/{version}",
+      "git tag -a v{version}",
+      "git checkout develop && git merge --no-ff hotfix/{version}",
+      "git push origin main develop --tags",
+      "git branch -d hotfix/{version}"
+    ],
+    "urgencyLevels": {
+      "P0": "즉시 — 서비스 다운, 데이터 손실",
+      "P1": "4시간 내 — 주요 기능 장애",
+      "P2": "24시간 내 — 부분 기능 장애",
+      "P3": "다음 정기 릴리스 — 경미한 이슈"
+    }
+  }
+}

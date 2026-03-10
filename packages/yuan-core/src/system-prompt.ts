@@ -27,6 +27,18 @@ export interface SystemPromptOptions {
   projectPath?: string;
   /** OS / 환경 정보 */
   environment?: EnvironmentInfo;
+  /** Active skill summaries for current task */
+  activeSkills?: SkillSummary[];
+  /** Active strategy summaries */
+  activeStrategies?: StrategySummary[];
+  /** Execution mode determines prompt verbosity and depth */
+  executionMode?: ExecutionMode;
+  /** Agent role determines role-specific constraints */
+  agentRole?: PromptAgentRole;
+  /** Experience-based hints from past runs */
+  experienceHints?: string[];
+  /** Current task type (from TaskClassifier) */
+  currentTaskType?: string;
 }
 
 /** 환경 정보 */
@@ -35,6 +47,23 @@ export interface EnvironmentInfo {
   shell?: string;
   nodeVersion?: string;
   gitBranch?: string;
+}
+
+export type ExecutionMode = "FAST" | "NORMAL" | "DEEP" | "SUPERPOWER" | "COMPACT";
+export type PromptAgentRole = "generalist" | "planner" | "coder" | "critic" | "verifier" | "specialist" | "recovery";
+
+export interface SkillSummary {
+  pluginId: string;
+  skillName: string;
+  summary: string;
+  commonPitfalls?: string[];
+  validation?: string;
+}
+
+export interface StrategySummary {
+  name: string;
+  description: string;
+  toolSequence?: string[];
 }
 
 /**
@@ -61,10 +90,15 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
     sections.push(buildProjectSection(options.projectStructure));
   }
 
-  // 5. YUAN.md 내용 (프로젝트 메모리)
+  // 5. YUAN.md 내용 (프로젝트 메모리) — 토큰 예산 보호를 위해 최대 8000자
   if (options.yuanMdContent) {
+    let yuanContent = options.yuanMdContent;
+    const MAX_YUAN_MD_CHARS = 8000;
+    if (yuanContent.length > MAX_YUAN_MD_CHARS) {
+      yuanContent = yuanContent.slice(0, MAX_YUAN_MD_CHARS) + "\n\n[...truncated to preserve token budget]";
+    }
     sections.push(
-      `# Project Memory (YUAN.md)\n\nThis is the project's persistent memory. Follow any instructions here as they represent established conventions and decisions.\n\n${options.yuanMdContent}`,
+      `# Project Memory (YUAN.md)\n\nThis is the project's persistent memory. Follow any instructions here as they represent established conventions and decisions.\n\n${yuanContent}`,
     );
   }
 
@@ -73,16 +107,41 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
     sections.push(buildToolStrategySection(options.tools));
   }
 
-  // 7. 코드 작업 규칙
+  // 7. 실행 모드
+  const execModeSection = buildExecutionModeSection(options.executionMode);
+  if (execModeSection) sections.push(execModeSection);
+
+  // 8. 에이전트 역할
+  const agentRoleSection = buildPromptAgentRoleSection(options.agentRole);
+  if (agentRoleSection) sections.push(agentRoleSection);
+
+  // 9. 활성 스킬
+  const skillsSection = buildActiveSkillsSection(options.activeSkills);
+  if (skillsSection) sections.push(skillsSection);
+
+  // 10. 경험 힌트
+  const experienceSection = buildExperienceSection(options.experienceHints);
+  if (experienceSection) sections.push(experienceSection);
+
+  // 11. 코드 작업 규칙
   sections.push(CODE_RULES);
 
-  // 8. 안전 규칙
+  // 12. 안전 규칙
   sections.push(SAFETY_RULES);
 
-  // 9. 출력 스타일
+  // 13. 복구 프로토콜
+  sections.push(RECOVERY_PROTOCOL);
+
+  // 14. 보고 요구사항
+  sections.push(REPORTING_REQUIREMENTS);
+
+  // 15. 컨텍스트 예산 규칙
+  sections.push(CONTEXT_BUDGET_RULES);
+
+  // 16. 출력 스타일
   sections.push(OUTPUT_STYLE);
 
-  // 10. 추가 규칙
+  // 17. 추가 규칙
   if (options.additionalRules?.length) {
     sections.push(
       `# Additional Rules\n\n${options.additionalRules.map((r) => `- ${r}`).join("\n")}`,
@@ -179,7 +238,7 @@ function buildProjectSection(structure: ProjectStructure): string {
 
 ## Project Structure
 \`\`\`
-${structure.treeView}
+${structure.treeView.length > 3000 ? structure.treeView.slice(0, 3000) + "\n... (truncated)" : structure.treeView}
 \`\`\``;
 }
 
@@ -308,3 +367,162 @@ const OUTPUT_STYLE = `# Communication Style
 - Don't apologize unnecessarily. Don't use filler phrases.
 - Use code blocks for file paths, commands, and code snippets.
 - When you're done with a task, provide a clear summary of all changes made.`;
+
+// ─── Section: Execution Mode ───
+
+function buildExecutionModeSection(mode?: ExecutionMode): string {
+  if (!mode) return "";
+
+  const modeRules: Record<ExecutionMode, string> = {
+    FAST: `Current mode: FAST
+- Minimize exploration. Read only the directly relevant file.
+- Make the smallest correct change. Skip optional verification steps.
+- No cross-file impact analysis unless the change is structural.
+- Prefer file_edit over file_write. One iteration if possible.`,
+    NORMAL: `Current mode: NORMAL
+- Standard exploration depth. Read related files as needed.
+- Verify changes with build/test when available.
+- Check imports and usages before renaming/refactoring.`,
+    DEEP: `Current mode: DEEP
+- Thorough exploration. Read all potentially affected files.
+- Always verify with full build + test suite.
+- Consider cross-file impact and blast radius.
+- Use grep to find all references before modifying any symbol.
+- Activate relevant skills and strategies when available.`,
+    SUPERPOWER: `Current mode: SUPERPOWER
+- Full verification pipeline: build → test → lint → type-check.
+- Activate self-reflection checkpoints after each major change.
+- Consider architectural implications.
+- Use debate/critic loop for critical decisions.
+- Consult all relevant skills and past experience.`,
+    COMPACT: `Current mode: COMPACT
+- Continuation mode. You are resuming from a previous session.
+- Read the checkpoint state and continue from where you left off.
+- Minimize redundant exploration — trust previously gathered context.
+- Focus on completing remaining tasks efficiently.`,
+  };
+
+  return `# Execution Mode\n\n${modeRules[mode]}`;
+}
+
+// ─── Section: Agent Role ───
+
+function buildPromptAgentRoleSection(role?: PromptAgentRole): string {
+  if (!role || role === "generalist") return "";
+
+  const roleRules: Record<Exclude<PromptAgentRole, "generalist">, string> = {
+    planner: `You are acting as a PLANNER.
+- Do NOT write or modify code directly.
+- Analyze the codebase structure and create an execution plan.
+- Identify dependencies between tasks and flag risks.
+- Output a numbered task list with file paths and descriptions.`,
+    coder: `You are acting as a CODER.
+- Focus on writing correct, minimal code changes.
+- Follow the plan exactly — do not deviate or add features.
+- After each change, verify with the specified command.
+- Report what you changed and the verification result.`,
+    critic: `You are acting as a CRITIC.
+- Do NOT write or modify any code.
+- Review the recent changes for: bugs, security issues, performance problems, broken contracts.
+- Be specific: cite file, line, and the exact problem.
+- Flag only real issues, not style preferences.`,
+    verifier: `You are acting as a VERIFIER.
+- Run all verification commands (build, test, lint, type-check).
+- Report pass/fail status for each verification step.
+- If any step fails, provide the exact error and affected file.
+- Do NOT fix issues — only report them.`,
+    specialist: `You are acting as a SPECIALIST.
+- Focus exclusively on your assigned domain.
+- Apply domain-specific best practices and patterns.
+- Use preferred tools and skills for your specialty.
+- Flag issues outside your domain for other specialists.`,
+    recovery: `You are acting as a RECOVERY AGENT.
+- Analyze the failure that triggered this recovery.
+- Classify the error type and identify root cause.
+- Apply the most conservative fix that resolves the issue.
+- Verify the fix and confirm no regressions.
+- If recovery fails after 3 attempts, escalate to user.`,
+  };
+
+  return `# Agent Role\n\n${roleRules[role]}`;
+}
+
+// ─── Section: Active Skills ───
+
+function buildActiveSkillsSection(skills?: SkillSummary[]): string {
+  if (!skills || skills.length === 0) return "";
+
+  const lines = skills.map((s) => {
+    let entry = `- ${s.pluginId}/${s.skillName}\n  - summary: ${s.summary}`;
+    if (s.commonPitfalls?.length) {
+      entry += `\n  - common pitfalls: ${s.commonPitfalls.join(", ")}`;
+    }
+    if (s.validation) {
+      entry += `\n  - validation: ${s.validation}`;
+    }
+    return entry;
+  });
+
+  return `# Active Skills\n\nThe following skills are currently active for this task. Consult them when making decisions:\n\n${lines.join("\n\n")}`;
+}
+
+// ─── Section: Experience Hints ───
+
+function buildExperienceSection(hints?: string[]): string {
+  if (!hints || hints.length === 0) return "";
+  return `# Experience Hints\n\nLessons from previous runs on this project:\n\n${hints.map((h) => `- ${h}`).join("\n")}`;
+}
+
+// ─── Section: Recovery Protocol ───
+
+const RECOVERY_PROTOCOL = `# Recovery Protocol
+
+If a command or verification step fails:
+1. **Classify** the failure (type error, import error, test failure, runtime error, timeout).
+2. **Do not retry unchanged.** If the same command failed, you must change something first.
+3. **Read the error** carefully. Extract the file, line number, and specific message.
+4. **Select strategy:** direct fix → context expansion → alternative approach → rollback → escalate.
+5. **Apply the smallest credible fix** that addresses the root cause.
+6. **Re-run verification** to confirm the fix works.
+7. **Record** what failed and what worked to avoid repeating failed approaches.
+
+Never retry the same failing command more than twice without changing your approach.`;
+
+// ─── Section: Reporting Requirements ───
+
+const REPORTING_REQUIREMENTS = `# Reporting Requirements
+
+At the end of a task, include:
+- **Files changed:** list all created/modified/deleted files
+- **Verification:** what was verified (build/test/lint) and the result
+- **Remaining risk:** any known issues or areas that need attention
+- **Confidence:** your confidence level (low/medium/high) that the change is correct`;
+
+// ─── Section: Context Budget Rules ───
+
+const CONTEXT_BUDGET_RULES = `# Context Budget Rules
+
+You operate under a finite token budget. Every message, tool result, and injection consumes tokens. Follow these rules to prevent context overflow:
+
+## Loading Rules
+- **Prefer summaries over full documents.** Read file excerpts, not entire files, unless the full content is needed.
+- **Load skills only when relevant.** Do not request or inject skill content unless a trigger matches (file pattern, error, or explicit command).
+- **Maximum 3 skills active at once.** If a 4th skill triggers, drop the oldest or lowest-confidence skill.
+- **Avoid repeating previously read files.** If you read a file earlier in this session, do not read it again unless it was modified.
+
+## Injection Rules
+- **System messages are permanent.** Every system message stays in context forever (never compacted). Be frugal with system-level injections.
+- **Consolidate error guidance.** When multiple error-related hints are injected in one iteration (recovery + debug + skill), merge them into a single message.
+- **Truncate large outputs.** Tool results over 5,000 characters should be summarized. Grep results over 20 matches should be narrowed.
+- **No redundant context.** Do not re-inject information already present in the conversation (e.g., repeating the task classification after it was already stated).
+
+## Budget Awareness
+- **Track your usage.** You receive token usage updates. When usage exceeds 70%, switch to COMPACT mode: shorter responses, fewer explorations, no optional verifications.
+- **At 85% usage:** Stop injecting optional context (skills, strategies, experience hints). Focus only on completing the current task.
+- **At 95% usage:** Save checkpoint and stop. Do not attempt new iterations.
+
+## Anti-Patterns
+- Do not read the same file twice without modification.
+- Do not inject full skill markdown into system messages (use summaries).
+- Do not accumulate more than 5 system messages per iteration.
+- Do not grep with overly broad patterns that return 100+ matches.`;

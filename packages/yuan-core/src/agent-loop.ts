@@ -63,6 +63,21 @@ import { FailureRecovery, type RecoveryDecision } from "./failure-recovery.js";
 import { ExecutionPolicyEngine, type ExecutionPolicy } from "./execution-policy-engine.js";
 import { CostOptimizer } from "./cost-optimizer.js";
 import { ImpactAnalyzer, type ImpactReport } from "./impact-analyzer.js";
+import { SelfReflection } from "./self-reflection.js";
+import { DebateOrchestrator } from "./debate-orchestrator.js";
+import {
+  ContinuousReflection,
+  type AgentStateSnapshot,
+} from "./continuous-reflection.js";
+import { PluginRegistry, type TriggerMatch } from "./plugin-registry.js";
+import { SkillLoader } from "./skill-loader.js";
+import type { SkillDefinition } from "./plugin-types.js";
+import { SpecialistRegistry, type SpecialistMatch } from "./specialist-registry.js";
+import { ToolPlanner, type ToolPlan, type PlanContext } from "./tool-planner.js";
+import { SelfDebugLoop, type DebugResult } from "./self-debug-loop.js";
+import { SkillLearner } from "./skill-learner.js";
+import { RepoKnowledgeGraph, type ImpactReport as GraphImpactReport } from "./repo-knowledge-graph.js";
+import { BackgroundAgentManager, type BackgroundEvent } from "./background-agent.js";
 
 /** AgentLoop 설정 */
 export interface AgentLoopOptions {
@@ -94,6 +109,18 @@ export interface AgentLoopOptions {
   mcpServerConfigs?: MCPServerConfig[];
   /** 실행 정책 오버라이드 (미지정 시 .yuan/policy.json 자동 로드) */
   policyOverrides?: Partial<ExecutionPolicy>;
+  /** Self-Reflection 활성화 (6D 검증 + quick verify, 기본 true) */
+  enableSelfReflection?: boolean;
+  /** Multi-Agent Debate 활성화 (complex/massive 태스크에서 Coder→Reviewer→Verifier 루프, 기본 true) */
+  enableDebate?: boolean;
+  /** Plugin registry instance (shared across sessions) */
+  pluginRegistry?: PluginRegistry;
+  /** Enable tool planning (plan optimal tool sequences before execution, default true) */
+  enableToolPlanning?: boolean;
+  /** Enable skill learning (learn from successful fixes, default true) */
+  enableSkillLearning?: boolean;
+  /** Enable background agents (persistent monitors, default false — opt-in) */
+  enableBackgroundAgents?: boolean;
 }
 
 /**
@@ -159,11 +186,35 @@ export class AgentLoop extends EventEmitter {
   private worldState: WorldStateSnapshot | null = null;
   private costOptimizer: CostOptimizer;
   private impactAnalyzer: ImpactAnalyzer | null = null;
+  private selfReflection: SelfReflection | null = null;
+  private debateOrchestrator: DebateOrchestrator | null = null;
+  private continuousReflection: ContinuousReflection | null = null;
+  private readonly enableSelfReflection: boolean;
+  private readonly enableDebate: boolean;
+  private currentComplexity: "trivial" | "simple" | "moderate" | "complex" | "massive" = "simple";
   private readonly policyOverrides?: Partial<ExecutionPolicy>;
   private checkpointSaved = false;
   private iterationCount = 0;
   private originalSnapshots: Map<string, string> = new Map();
   private previousStrategies: import("./failure-recovery.js").RecoveryStrategy[] = [];
+  private pluginRegistry: PluginRegistry;
+  private skillLoader: SkillLoader;
+  private specialistRegistry: SpecialistRegistry;
+  private toolPlanner: ToolPlanner;
+  private selfDebugLoop: SelfDebugLoop;
+  private skillLearner: SkillLearner | null = null;
+  private repoGraph: RepoKnowledgeGraph | null = null;
+  private backgroundAgentManager: BackgroundAgentManager | null = null;
+  private readonly enableToolPlanning: boolean;
+  private readonly enableSkillLearning: boolean;
+  private readonly enableBackgroundAgents: boolean;
+  private currentToolPlan: ToolPlan | null = null;
+  private executedToolNames: string[] = [];
+  /** Context Budget: max 3 active skills at once */
+  private activeSkillIds: string[] = [];
+  private static readonly MAX_ACTIVE_SKILLS = 3;
+  /** Context Budget: track injected system messages per iteration to cap at 5 */
+  private iterationSystemMsgCount = 0;
   private tokenUsage: TokenUsage = {
     input: 0,
     output: 0,
@@ -180,6 +231,8 @@ export class AgentLoop extends EventEmitter {
     this.enablePlanning = options.enablePlanning !== false;
     this.planningThreshold = options.planningThreshold ?? "moderate";
     this.environment = options.environment;
+    this.enableSelfReflection = options.enableSelfReflection !== false;
+    this.enableDebate = options.enableDebate !== false;
 
     // BYOK LLM 클라이언트 생성
     this.llmClient = new BYOKClient(options.config.byok);
@@ -223,6 +276,18 @@ export class AgentLoop extends EventEmitter {
     // InterruptManager 설정 (외부 주입 또는 내부 생성)
     this.interruptManager = options.interruptManager ?? new InterruptManager();
     this.setupInterruptListeners();
+
+    // PluginRegistry + SkillLoader 초기화
+    this.pluginRegistry = options.pluginRegistry ?? new PluginRegistry();
+    this.skillLoader = new SkillLoader();
+
+    // Advanced Intelligence 모듈 초기화
+    this.specialistRegistry = new SpecialistRegistry();
+    this.toolPlanner = new ToolPlanner();
+    this.selfDebugLoop = new SelfDebugLoop();
+    this.enableToolPlanning = options.enableToolPlanning !== false;
+    this.enableSkillLearning = options.enableSkillLearning !== false;
+    this.enableBackgroundAgents = options.enableBackgroundAgents === true;
 
     // 시스템 프롬프트 추가 (메모리 없이 기본 프롬프트로 시작, init()에서 갱신)
     this.contextManager.addMessage({
@@ -350,6 +415,42 @@ export class AgentLoop extends EventEmitter {
       this.reflexionEngine = new ReflexionEngine({ projectPath });
     }
 
+    // SelfReflection 생성 (6D deep verify + quick verify)
+    if (this.enableSelfReflection) {
+      const sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      this.selfReflection = new SelfReflection(sessionId, {
+        enableDeepVerify: true,
+        enableMonologue: true,
+        enableLearning: true,
+        minScoreToPass: 70,
+        criticalDimensions: ["correctness", "security"],
+      });
+
+      // 메모리에서 기존 학습 복원
+      if (this.memoryManager) {
+        try {
+          const memory = await this.memoryManager.load();
+          this.selfReflection.loadFromMemory(memory);
+        } catch {
+          // 학습 복원 실패는 치명적이지 않음
+        }
+      }
+    }
+
+    // DebateOrchestrator 생성 (complex/massive 태스크에서 multi-agent debate)
+    if (this.enableDebate && projectPath) {
+      this.debateOrchestrator = new DebateOrchestrator({
+        projectPath,
+        maxRounds: 3,
+        qualityThreshold: 80,
+        verifyBetweenRounds: true,
+        byokConfig: this.config.byok,
+        toolExecutor: this.toolExecutor,
+        maxTokensPerCall: 16384,
+        totalTokenBudget: Math.floor(this.config.loop.totalTokenBudget * 0.3),
+      });
+    }
+
     // 향상된 시스템 프롬프트 생성
     const enhancedPrompt = buildSystemPrompt({
       projectStructure,
@@ -382,6 +483,156 @@ export class AgentLoop extends EventEmitter {
         }
       }
     }
+
+    // SkillLearner 초기화 (경험에서 학습된 스킬 자동 로드)
+    if (this.enableSkillLearning && projectPath) {
+      try {
+        this.skillLearner = new SkillLearner(projectPath);
+        await this.skillLearner.init();
+        // 학습된 스킬 중 관련 있는 것을 플러그인 레지스트리에 등록
+        const learnedSkills = this.skillLearner.getAllSkills();
+        if (learnedSkills.length > 0) {
+          const skillNames = learnedSkills
+            .filter((s) => s.confidence >= 0.3)
+            .map((s) => s.id);
+          if (skillNames.length > 0) {
+            this.contextManager.addMessage({
+              role: "system",
+              content: `[Learned Skills: ${skillNames.join(", ")}] — Auto-activate on matching error patterns.`,
+            });
+          }
+        }
+      } catch {
+        // SkillLearner 초기화 실패는 치명적이지 않음
+        this.skillLearner = null;
+      }
+    }
+
+    // RepoKnowledgeGraph 초기화 (코드 구조 그래프 — 비동기 빌드)
+    if (projectPath) {
+      try {
+        this.repoGraph = new RepoKnowledgeGraph(projectPath);
+        // 백그라운드에서 그래프 빌드 (블로킹하지 않음)
+        this.repoGraph.buildFromProject(projectPath).catch(() => {
+          // 그래프 빌드 실패는 치명적이지 않음
+        });
+      } catch {
+        this.repoGraph = null;
+      }
+    }
+
+    // BackgroundAgentManager 초기화 (opt-in)
+    if (this.enableBackgroundAgents && projectPath) {
+      try {
+        this.backgroundAgentManager = new BackgroundAgentManager();
+        this.backgroundAgentManager.createDefaults(projectPath);
+        // Background events → agent loop events
+        for (const agent of this.backgroundAgentManager.list()) {
+          const bgAgent = this.backgroundAgentManager.get(agent.id);
+          if (bgAgent) {
+            bgAgent.on("event", (event: BackgroundEvent) => {
+              if (event.type === "error" || event.type === "warning") {
+                this.emitEvent({
+                  kind: "agent:thinking",
+                  content: `[Background: ${event.agentId}] ${event.message}`,
+                });
+              }
+            });
+          }
+        }
+      } catch {
+        this.backgroundAgentManager = null;
+      }
+    }
+
+    // Inject active plugin skills into system prompt (lazy: names only)
+    // Full skill content is loaded on-demand when triggered (file-pattern or error match)
+    const activeSkills = this.pluginRegistry.getAllSkills();
+    if (activeSkills.length > 0) {
+      const skillSummary = activeSkills
+        .map((s) => `${s.pluginId}/${s.skill.name}`)
+        .join(", ");
+      this.contextManager.addMessage({
+        role: "system",
+        content: `[Plugins: ${skillSummary}] — Skills auto-activate on matching files/errors.`,
+      });
+    }
+
+    // ContinuousReflection 생성 (1분 간격 체크포인트 + 자기검증 + 컨텍스트 모니터)
+    this.continuousReflection = new ContinuousReflection({
+      getState: () => this.getStateSnapshot(),
+      checkpoint: async (state, emergency) => {
+        if (!this.continuationEngine) return;
+        const checkpoint: ContinuationCheckpoint = {
+          sessionId: crypto.randomUUID(),
+          goal: state.goal,
+          progress: {
+            completedTasks: state.completedTasks,
+            currentTask: state.currentTask,
+            remainingTasks: state.remainingTasks,
+          },
+          changedFiles: state.changedFiles.map((path) => ({ path, diff: "" })),
+          workingMemory: state.workingMemory,
+          yuanMdUpdates: [],
+          errors: state.errors,
+          contextUsageAtSave: state.contextUsagePercent,
+          totalTokensUsed: state.totalTokensUsed,
+          iterationsCompleted: state.iteration,
+          createdAt: new Date(),
+        };
+        await this.continuationEngine.saveCheckpoint(checkpoint);
+      },
+      selfVerify: async (prompt) => {
+        // 경량 LLM 호출 (~200 토큰)로 자기검증
+        try {
+          const response = await this.llmClient.chat(
+            [{ role: "user", content: prompt }],
+            [],
+          );
+          const text = typeof response.content === "string"
+            ? response.content
+            : "";
+          const parsed = JSON.parse(text);
+          return {
+            onTrack: Boolean(parsed.onTrack),
+            needsCorrection: Boolean(parsed.needsCorrection),
+            issue: String(parsed.issue ?? ""),
+            suggestion: String(parsed.suggestion ?? ""),
+            confidence: Number(parsed.confidence ?? 0.5),
+          };
+        } catch {
+          return {
+            onTrack: true,
+            needsCorrection: false,
+            issue: "",
+            suggestion: "",
+            confidence: 0.5,
+          };
+        }
+      },
+    });
+
+    // Wire ContinuousReflection events to agent loop
+    this.continuousReflection.on("reflection:feedback", (feedback: string) => {
+      this.contextManager.addMessage({
+        role: "system",
+        content: `[ContinuousReflection] ${feedback}`,
+      });
+    });
+    this.continuousReflection.on("reflection:context_warning", (usagePercent: number) => {
+      this.emitEvent({
+        kind: "agent:thinking",
+        content: `Context usage at ${Math.round(usagePercent * 100)}% — emergency checkpoint saved.`,
+      });
+    });
+    this.continuousReflection.on("reflection:context_overflow", () => {
+      // Trigger abort — the continuation checkpoint is already saved
+      this.emitEvent({
+        kind: "agent:thinking",
+        content: "Context usage at 95%+ — saving state and stopping.",
+      });
+      this.abort();
+    });
   }
 
   /**
@@ -436,6 +687,8 @@ export class AgentLoop extends EventEmitter {
     this.iterationCount = 0;
     this.originalSnapshots.clear();
     this.previousStrategies = [];
+    this.activeSkillIds = [];
+    this.iterationSystemMsgCount = 0;
     this.failureRecovery.reset();
     this.costOptimizer.reset();
     this.tokenBudgetManager.reset();
@@ -494,13 +747,108 @@ export class AgentLoop extends EventEmitter {
         });
       }
 
+      // Specialist routing: 태스크 타입에 맞는 전문 에이전트 설정 주입
+      if (classification.specialistDomain) {
+        const specialistMatch = this.specialistRegistry.findSpecialist(
+          classification.specialistDomain,
+        );
+        if (specialistMatch && specialistMatch.confidence >= 0.5) {
+          this.contextManager.addMessage({
+            role: "system",
+            content: `[Specialist: ${specialistMatch.specialist.name}] ${specialistMatch.specialist.systemPrompt.slice(0, 500)}`,
+          });
+        }
+      }
+
+      // Tool Planning: 태스크 타입에 맞는 도구 실행 계획 힌트 주입
+      if (this.enableToolPlanning && classification.confidence >= 0.3) {
+        const planContext: PlanContext = {
+          userMessage,
+        };
+        this.currentToolPlan = this.toolPlanner.planForTask(
+          classification.type,
+          planContext,
+        );
+        this.executedToolNames = [];
+        if (this.currentToolPlan.confidence >= 0.5) {
+          const planHint = this.toolPlanner.formatPlanHint(this.currentToolPlan);
+          this.contextManager.addMessage({
+            role: "system",
+            content: planHint,
+          });
+        }
+      }
+
       // 복잡도 감지 → 필요 시 자동 플래닝
       await this.maybeCreatePlan(userMessage);
 
-      const result = await this.executeLoop();
+      // ContinuousReflection 시작 (1분 간격 체크포인트/자기검증/컨텍스트모니터)
+      if (this.continuousReflection) {
+        this.continuousReflection.start();
+      }
+
+      let result: AgentTermination;
+      try {
+        result = await this.executeLoop();
+      } finally {
+        // ContinuousReflection 정지 (루프 종료 시 반드시 정리)
+        if (this.continuousReflection) {
+          this.continuousReflection.stop();
+        }
+      }
 
       // 실행 완료 후 메모리 자동 업데이트
       await this.updateMemoryAfterRun(userMessage, result, Date.now() - runStartTime);
+
+      // SkillLearner: 성공적 에러 해결 시 새로운 스킬 학습
+      if (this.skillLearner && result.reason === "GOAL_ACHIEVED") {
+        try {
+          const errorToolResults = this.allToolResults.filter((r) => !r.success);
+          if (errorToolResults.length > 0 && this.changedFiles.length > 0) {
+            // 에러가 있었지만 결국 성공 → 학습 가능한 패턴
+            const runAnalysis = this.memoryUpdater.analyzeRun({
+              goal: userMessage,
+              termination: { reason: result.reason, summary: result.summary },
+              toolResults: this.allToolResults.map((r) => ({
+                name: r.name,
+                success: r.success,
+                output: r.output.slice(0, 500),
+              })),
+              changedFiles: this.changedFiles,
+              messages: [],
+              tokensUsed: this.tokenUsage.total,
+              durationMs: Date.now() - runStartTime,
+              iterations: this.iterationCount,
+            });
+            this.skillLearner.extractSkillFromRun(runAnalysis, `session-${Date.now()}`);
+            await this.skillLearner.save();
+          }
+        } catch {
+          // 학습 실패는 치명적이지 않음
+        }
+      }
+
+      // Tool plan compliance check (non-blocking, for metrics)
+      if (this.currentToolPlan && this.executedToolNames.length > 0) {
+        try {
+          this.toolPlanner.validateExecution(
+            this.currentToolPlan,
+            this.executedToolNames,
+          );
+        } catch {
+          // compliance check 실패는 치명적이지 않음
+        }
+      }
+
+      // RepoKnowledgeGraph: 변경 파일 그래프 업데이트
+      if (this.repoGraph && this.changedFiles.length > 0) {
+        this.repoGraph.updateFiles(this.changedFiles).catch(() => {
+          // 그래프 업데이트 실패는 치명적이지 않음
+        });
+      }
+
+      // BackgroundAgentManager: 정리 (stopAll은 abort 시에만)
+      // Background agents는 세션 간 지속되므로 여기서 stop하지 않음
 
       return result;
     } catch (err) {
@@ -636,6 +984,77 @@ export class AgentLoop extends EventEmitter {
     return { ...this.tokenUsage };
   }
 
+  /** Get the plugin registry for external management */
+  getPluginRegistry(): PluginRegistry {
+    return this.pluginRegistry;
+  }
+
+  /** Get the specialist registry for custom specialist registration */
+  getSpecialistRegistry(): SpecialistRegistry {
+    return this.specialistRegistry;
+  }
+
+  /** Get the skill learner for inspection */
+  getSkillLearner(): SkillLearner | null {
+    return this.skillLearner;
+  }
+
+  /** Get the repo knowledge graph */
+  getRepoGraph(): RepoKnowledgeGraph | null {
+    return this.repoGraph;
+  }
+
+  /** Get background agent manager */
+  getBackgroundAgentManager(): BackgroundAgentManager | null {
+    return this.backgroundAgentManager;
+  }
+
+  /**
+   * ContinuousReflection이 사용하는 에이전트 상태 스냅샷을 생성한다.
+   * 읽기 전용 — reflection tick마다 호출된다.
+   */
+  getStateSnapshot(): AgentStateSnapshot {
+    const userMsg = this.contextManager.getMessages().find((m) => m.role === "user");
+    const goal = typeof userMsg?.content === "string" ? userMsg.content : "";
+    const progress = this.extractProgress();
+    const recentTools = this.allToolResults.slice(-3).map((r) => ({
+      tool: r.name,
+      input: typeof r.tool_call_id === "string" ? r.tool_call_id : "",
+      output: r.output.slice(0, 200),
+    }));
+    const errors = this.allToolResults
+      .filter((r) => !r.success)
+      .slice(-5)
+      .map((r) => `${r.name}: ${r.output.slice(0, 200)}`);
+
+    return {
+      goal,
+      iteration: this.iterationCount,
+      maxIteration: this.config.loop.maxIterations,
+      changedFiles: [...this.changedFiles],
+      recentToolCalls: recentTools,
+      errors,
+      contextUsagePercent:
+        this.config.loop.totalTokenBudget > 0
+          ? this.tokenUsage.total / this.config.loop.totalTokenBudget
+          : 0,
+      sessionId: crypto.randomUUID(),
+      totalTokensUsed: this.tokenUsage.total,
+      workingMemory: this.buildWorkingMemorySummary(),
+      completedTasks: progress.completedTasks,
+      currentTask: progress.currentTask,
+      remainingTasks: progress.remainingTasks,
+    };
+  }
+
+  /**
+   * ContinuousReflection 인스턴스를 반환한다.
+   * 외부에서 ESC 토글(pause/resume) 또는 이벤트 구독에 사용.
+   */
+  getContinuousReflection(): ContinuousReflection | null {
+    return this.continuousReflection;
+  }
+
   /**
    * 대화 히스토리를 반환.
    */
@@ -681,6 +1100,7 @@ export class AgentLoop extends EventEmitter {
     if (!this.planner || !this.enablePlanning) return;
 
     const complexity = this.detectComplexity(userMessage);
+    this.currentComplexity = complexity;
 
     // 임계값 미만이면 플래닝 스킵
     const thresholdOrder = { simple: 1, moderate: 2, complex: 3 };
@@ -937,6 +1357,38 @@ export class AgentLoop extends EventEmitter {
       iteration++;
       this.iterationCount = iteration;
       const iterationStart = Date.now();
+      this.iterationSystemMsgCount = 0; // Reset per-iteration system message counter
+
+      // Check file-pattern skill triggers based on changed files
+      // Guard: skip skill injection if over 80% token budget to preserve remaining budget
+      // Guard: max 3 active skills globally (Context Budget Rules)
+      const fileTriggerBudgetRatio = this.config.loop.totalTokenBudget > 0
+        ? this.tokenUsage.total / this.config.loop.totalTokenBudget
+        : 0;
+      if (
+        this.changedFiles.length > 0 &&
+        fileTriggerBudgetRatio <= 0.8 &&
+        this.activeSkillIds.length < AgentLoop.MAX_ACTIVE_SKILLS
+      ) {
+        const lastFile = this.changedFiles[this.changedFiles.length - 1];
+        const fileSkills = this.pluginRegistry.findMatchingSkills({
+          filePath: lastFile,
+        });
+        // Max 2 skills per iteration, capped by global 3-skill limit
+        const slotsRemaining = AgentLoop.MAX_ACTIVE_SKILLS - this.activeSkillIds.length;
+        for (const skill of fileSkills.slice(0, Math.min(2, slotsRemaining))) {
+          if (this.activeSkillIds.includes(skill.id)) continue; // no duplicate
+          const parsed = this.skillLoader.loadTemplate(skill);
+          if (parsed) {
+            this.contextManager.addMessage({
+              role: "system",
+              content: `[File Skill: ${skill.name}] ${parsed.domain ? `[${parsed.domain}] ` : ""}${skill.description}`,
+            });
+            this.activeSkillIds.push(skill.id);
+            this.iterationSystemMsgCount++;
+          }
+        }
+      }
 
       // 1. 컨텍스트 준비
       const messages = this.contextManager.prepareForLLM();
@@ -1022,6 +1474,129 @@ export class AgentLoop extends EventEmitter {
       if (response.toolCalls.length === 0) {
         const content = response.content ?? "";
 
+        // Level 2: Deep verification before declaring completion
+        if (this.selfReflection && this.changedFiles.length > 0) {
+          try {
+            const changedFilesMap = new Map<string, string>();
+            for (const filePath of this.changedFiles) {
+              const lastWrite = this.allToolResults
+                .filter((r) => r.name === "file_write" || r.name === "file_edit")
+                .find((r) => r.output.includes(filePath));
+              if (lastWrite) {
+                changedFilesMap.set(filePath, lastWrite.output);
+              }
+            }
+
+            const verifyFn = async (prompt: string): Promise<string> => {
+              const verifyResponse = await this.llmClient.chat([
+                { role: "system", content: "You are a meticulous code reviewer." },
+                { role: "user", content: prompt },
+              ]);
+              this.tokenBudgetManager.recordUsage(
+                "validator",
+                verifyResponse.usage.input,
+                verifyResponse.usage.output,
+              );
+              return verifyResponse.content ?? "";
+            };
+
+            const deepResult = await this.selfReflection.deepVerify(
+              content || "Complete the task",
+              changedFilesMap,
+              this.originalSnapshots,
+              [], // projectPatterns — could be enhanced with YUAN.md rules
+              verifyFn,
+            );
+
+            if (deepResult.verdict === "fail" && deepResult.confidence >= 0.5) {
+              // Not confident enough — inject feedback and continue loop
+              const issuesList = deepResult.suggestedFixes
+                .map((f) => `[${f.severity}] ${f.description}`)
+                .join("; ");
+
+              this.contextManager.addMessage({
+                role: "assistant",
+                content: content || "",
+              });
+              this.contextManager.addMessage({
+                role: "system",
+                content: `[Self-Reflection L2] Verification failed (score: ${deepResult.overallScore}, confidence: ${deepResult.confidence.toFixed(2)}). ${deepResult.selfCritique}${issuesList ? ` Issues: ${issuesList}` : ""}. Please address these before completing.`,
+              });
+              this.emitEvent({
+                kind: "agent:thinking",
+                content: `Deep verification failed (score: ${deepResult.overallScore}). Continuing to address issues...`,
+              });
+              continue; // Don't return GOAL_ACHIEVED, continue the loop
+            }
+
+            // Level 3: Multi-agent debate for complex/massive tasks
+            if (
+              this.debateOrchestrator &&
+              ["complex", "massive"].includes(this.currentComplexity) &&
+              deepResult.verdict !== "pass"
+            ) {
+              try {
+                this.emitEvent({
+                  kind: "agent:thinking",
+                  content: `Triggering multi-agent debate for ${this.currentComplexity} task verification...`,
+                });
+
+                const debateContext = [
+                  `Changed files: ${this.changedFiles.join(", ")}`,
+                  `Self-reflection score: ${deepResult.overallScore}/100`,
+                  `Concerns: ${deepResult.selfCritique}`,
+                ].join("\n");
+
+                const debateResult = await this.debateOrchestrator.debate(
+                  content || "Verify task completion",
+                  debateContext,
+                );
+
+                // Track debate token usage (split roughly 60/40 input/output)
+                const debateInput = Math.round(debateResult.totalTokensUsed * 0.6);
+                const debateOutput = debateResult.totalTokensUsed - debateInput;
+                this.tokenUsage.input += debateInput;
+                this.tokenUsage.output += debateOutput;
+                this.tokenUsage.total += debateResult.totalTokensUsed;
+
+                if (!debateResult.success) {
+                  this.contextManager.addMessage({
+                    role: "assistant",
+                    content: content || "",
+                  });
+                  this.contextManager.addMessage({
+                    role: "system",
+                    content: `[Debate] Multi-agent debate did not pass (score: ${debateResult.finalScore}). ${debateResult.summary}. Please address the identified issues.`,
+                  });
+                  this.emitEvent({
+                    kind: "agent:thinking",
+                    content: `Debate failed (score: ${debateResult.finalScore}). Continuing to address issues...`,
+                  });
+                  continue; // Continue loop to address debate feedback
+                }
+
+                this.emitEvent({
+                  kind: "agent:thinking",
+                  content: `Debate passed (score: ${debateResult.finalScore}). Proceeding to completion.`,
+                });
+              } catch {
+                // Debate failure is non-fatal — proceed with completion
+              }
+            }
+
+            // Persist learnings from self-reflection
+            if (this.memoryManager) {
+              try {
+                await this.selfReflection.persistLearnings(this.memoryManager);
+              } catch {
+                // Learning persistence failure is non-fatal
+              }
+            }
+          } catch {
+            // Deep verification failure is non-fatal — proceed with completion
+          }
+        }
+
         if (content) {
           this.contextManager.addMessage({
             role: "assistant",
@@ -1056,10 +1631,15 @@ export class AgentLoop extends EventEmitter {
       }
 
       // 4. 도구 실행
-      const toolResults = await this.executeTools(response.toolCalls);
+      const { results: toolResults, deferredFixPrompts } = await this.executeTools(response.toolCalls);
 
       // Reflexion: 도구 결과 수집
       this.allToolResults.push(...toolResults);
+
+      // Tool plan tracking: 실행된 도구 이름 기록
+      for (const result of toolResults) {
+        this.executedToolNames.push(result.name);
+      }
 
       // 5. 도구 결과를 히스토리에 추가 (살균 + 압축)
       for (const result of toolResults) {
@@ -1090,6 +1670,15 @@ export class AgentLoop extends EventEmitter {
         });
       }
 
+      // AutoFix: deferred fix prompts를 tool results 뒤에 추가
+      // (tool results 전에 넣으면 OpenAI 400 에러 발생 — tool_calls 뒤에 tool 메시지가 바로 와야 함)
+      for (const fixPrompt of deferredFixPrompts) {
+        this.contextManager.addMessage({
+          role: "user",
+          content: fixPrompt,
+        });
+      }
+
       // iteration 이벤트
       this.emitEvent({
         kind: "agent:iteration",
@@ -1097,6 +1686,57 @@ export class AgentLoop extends EventEmitter {
         tokensUsed: response.usage.input + response.usage.output,
         durationMs: Date.now() - iterationStart,
       });
+
+      // Level 1: Quick verification after every 3rd iteration
+      if (this.selfReflection && iteration % 3 === 0) {
+        try {
+          const changedFilesMap = new Map<string, string>();
+          for (const filePath of this.changedFiles) {
+            // Collect changed file contents from tool results
+            const lastWrite = this.allToolResults
+              .filter((r) => r.name === "file_write" || r.name === "file_edit")
+              .find((r) => r.output.includes(filePath));
+            if (lastWrite) {
+              changedFilesMap.set(filePath, lastWrite.output);
+            }
+          }
+
+          const quickResult = await this.selfReflection.quickVerify(
+            changedFilesMap,
+            async (prompt: string) => {
+              const verifyResponse = await this.llmClient.chat([
+                { role: "system", content: "You are a code verification assistant." },
+                { role: "user", content: prompt },
+              ]);
+              this.tokenBudgetManager.recordUsage(
+                "validator",
+                verifyResponse.usage.input,
+                verifyResponse.usage.output,
+              );
+              return verifyResponse.content ?? "";
+            },
+          );
+
+          if (quickResult.verdict !== "pass") {
+            const issues = Object.entries(quickResult.dimensions)
+              .filter(([, dim]) => dim.issues.length > 0)
+              .flatMap(([, dim]) => dim.issues);
+
+            if (issues.length > 0) {
+              this.contextManager.addMessage({
+                role: "system",
+                content: `[Self-Reflection L1] Issues detected: ${issues.join(", ")}. Confidence: ${quickResult.confidence}`,
+              });
+              this.emitEvent({
+                kind: "agent:thinking",
+                content: `Self-reflection flagged ${issues.length} issues (confidence: ${quickResult.confidence.toFixed(2)})`,
+              });
+            }
+          }
+        } catch {
+          // Quick verification failure is non-fatal
+        }
+      }
 
       // 에러가 많으면 FailureRecovery + 리플래닝 시도
       const errorResults = toolResults.filter((r) => !r.success);
@@ -1141,8 +1781,9 @@ export class AgentLoop extends EventEmitter {
             kind: "agent:thinking",
             content: `Rolled back changes. ${decision.reason}`,
           });
-        } else {
+        } else if (this.iterationSystemMsgCount < 5) {
           // retry, approach_change, scope_reduce → 복구 프롬프트 주입
+          // Context Budget: consolidated error guidance (recovery + debug in one message)
           const recoveryPrompt = this.failureRecovery.buildRecoveryPrompt(
             decision,
             {
@@ -1154,15 +1795,109 @@ export class AgentLoop extends EventEmitter {
               previousStrategies: this.previousStrategies,
             },
           );
+
+          // SelfDebugLoop: merge debug strategy into recovery message (not separate system msg)
+          let debugSuffix = "";
+          if (iteration >= 3) {
+            const rootCauseAnalysis = this.selfDebugLoop.analyzeError(errorSummary);
+            if (rootCauseAnalysis.confidence >= 0.5) {
+              const debugStrategy = this.selfDebugLoop.selectStrategy(
+                iteration - 2,
+                [],
+              );
+              const debugPrompt = this.selfDebugLoop.buildFixPrompt(debugStrategy, {
+                testCommand: "pnpm build",
+                errorOutput: errorSummary,
+                changedFiles: this.changedFiles,
+                originalSnapshots: this.originalSnapshots,
+                previousAttempts: [],
+                currentStrategy: debugStrategy,
+              });
+              debugSuffix = `\n\n[SelfDebug L${Math.min(iteration - 2, 5)}] Strategy: ${debugStrategy}\n${debugPrompt}`;
+            }
+          }
+
           this.contextManager.addMessage({
             role: "system",
-            content: recoveryPrompt,
+            content: recoveryPrompt + debugSuffix,
           });
+          this.iterationSystemMsgCount++;
         }
 
         // HierarchicalPlanner 리플래닝도 시도
         if (this.activePlan) {
           await this.attemptReplan(errorSummary);
+        }
+
+        // 에러 트리거 예산 비율 계산 (SkillLearner + Plugin 모두 사용)
+        const errorTriggerBudgetRatio = this.config.loop.totalTokenBudget > 0
+          ? this.tokenUsage.total / this.config.loop.totalTokenBudget
+          : 0;
+
+        // Context Budget: skip all optional injections at 85%+ budget
+        if (errorTriggerBudgetRatio <= 0.85 && this.iterationSystemMsgCount < 5) {
+          // SkillLearner: 학습된 스킬 중 현재 에러에 매칭되는 것 주입
+          if (this.skillLearner && this.activeSkillIds.length < AgentLoop.MAX_ACTIVE_SKILLS) {
+            try {
+              const relevantSkills = this.skillLearner.getRelevantSkills({
+                errorMessage: errorSummary,
+                language: undefined,
+              });
+              for (const skill of relevantSkills.slice(0, 1)) {
+                if (this.activeSkillIds.includes(skill.id)) continue;
+                this.contextManager.addMessage({
+                  role: "system",
+                  content: `[Learned Skill: ${skill.id}] Diagnosis: ${skill.diagnosis}\nStrategy: ${skill.strategy}\nTools: ${skill.toolSequence.join(" → ")}`,
+                });
+                this.activeSkillIds.push(skill.id);
+                this.iterationSystemMsgCount++;
+                this.skillLearner.updateConfidence(skill.id, false);
+              }
+            } catch {
+              // 학습 스킬 매칭 실패는 치명적이지 않음
+            }
+          }
+
+          // Plugin trigger matching — match errors/context to plugin skills
+          if (
+            this.activeSkillIds.length < AgentLoop.MAX_ACTIVE_SKILLS &&
+            this.iterationSystemMsgCount < 5
+          ) {
+            const triggerMatches = this.pluginRegistry.matchTriggers({
+              errorMessage: errorSummary,
+              taskDescription: "",
+            });
+
+            if (triggerMatches.length > 0) {
+              const bestMatch = triggerMatches[0];
+              if (bestMatch.skill && !this.activeSkillIds.includes(bestMatch.skill.id)) {
+                const skillTemplate = this.skillLoader.loadTemplate(bestMatch.skill);
+                if (skillTemplate) {
+                  let resolved = this.skillLoader.resolveTemplate(
+                    skillTemplate.content,
+                    {
+                      error: errorSummary,
+                      files: this.changedFiles,
+                    },
+                  );
+                  const MAX_SKILL_INJECT_CHARS = 2000;
+                  if (resolved.length > MAX_SKILL_INJECT_CHARS) {
+                    resolved = resolved.slice(0, MAX_SKILL_INJECT_CHARS) + "\n[...truncated for token budget]";
+                  }
+                  this.contextManager.addMessage({
+                    role: "system",
+                    content: `[Plugin Skill: ${bestMatch.pluginId}/${bestMatch.skill.name}]\n${resolved}`,
+                  });
+                  this.activeSkillIds.push(bestMatch.skill.id);
+                  this.iterationSystemMsgCount++;
+                  this.emitEvent({
+                    kind: "agent:thinking",
+                    content: `Activated plugin skill: ${bestMatch.skill.name} from ${bestMatch.pluginId}`,
+                  });
+                }
+              }
+            }
+          }
         }
       }
 
@@ -1176,6 +1911,20 @@ export class AgentLoop extends EventEmitter {
       ) {
         await this.saveAutoCheckpoint(iteration);
         this.checkpointSaved = true;
+      }
+
+      // ContinuousReflection: 매 5 iteration마다 비상 체크포인트 트리거
+      // (정기 타이머 외에 iteration 기반 추가 안전망)
+      if (
+        this.continuousReflection?.isRunning() &&
+        iteration > 0 &&
+        iteration % 5 === 0
+      ) {
+        try {
+          await this.continuousReflection.emergencyCheckpoint();
+        } catch {
+          // reflection 체크포인트 실패는 치명적이지 않음
+        }
       }
 
       // 예산 초과 체크
@@ -1287,8 +2036,9 @@ export class AgentLoop extends EventEmitter {
    */
   private async executeTools(
     toolCalls: ToolCall[],
-  ): Promise<ToolResult[]> {
+  ): Promise<{ results: ToolResult[]; deferredFixPrompts: string[] }> {
     const results: ToolResult[] = [];
+    const deferredFixPrompts: string[] = [];
 
     for (const toolCall of toolCalls) {
       // Governor: 안전성 검증
@@ -1325,6 +2075,37 @@ export class AgentLoop extends EventEmitter {
           continue;
         }
         // 승인됨 → 계속 실행
+      }
+
+      // Plugin Tool Approval Gate: check plugin tools requiring approval
+      const pluginTools = this.pluginRegistry.getAllTools();
+      const matchedPluginTool = pluginTools.find((pt) => pt.tool.name === toolCall.name);
+      if (
+        matchedPluginTool &&
+        (matchedPluginTool.tool.requiresApproval === true ||
+          matchedPluginTool.tool.sideEffectLevel === "destructive")
+      ) {
+        const pluginApprovalReq: ApprovalRequest = {
+          id: `plugin-approval-${toolCall.id}`,
+          toolName: toolCall.name,
+          arguments: args as Record<string, unknown>,
+          reason: `Plugin tool "${toolCall.name}" (from ${matchedPluginTool.pluginId}) requires approval (${
+            matchedPluginTool.tool.sideEffectLevel === "destructive"
+              ? "destructive side effect"
+              : "requiresApproval=true"
+          })`,
+          riskLevel: matchedPluginTool.tool.riskLevel === "high" ? "high" : "medium",
+          timeout: 120_000,
+        };
+        const pluginApprovalResult = await this.handleApprovalRequest(
+          toolCall,
+          pluginApprovalReq,
+        );
+        if (pluginApprovalResult) {
+          results.push(pluginApprovalResult);
+          continue;
+        }
+        // Approved → proceed with execution
       }
 
       // MCP 도구 호출 확인
@@ -1401,8 +2182,11 @@ export class AgentLoop extends EventEmitter {
           }
         }
 
-        // AutoFixLoop: 결과 검증
-        await this.validateAndFeedback(toolCall.name, result);
+        // AutoFixLoop: 결과 검증 (fix prompt는 tool results 추가 후 context에 넣음)
+        const fixPrompt = await this.validateAndFeedback(toolCall.name, result);
+        if (fixPrompt) {
+          deferredFixPrompts.push(fixPrompt);
+        }
       } catch (err) {
         this.interruptManager.clearToolAbort();
         const durationMs = Date.now() - startTime;
@@ -1423,8 +2207,18 @@ export class AgentLoop extends EventEmitter {
             retryable: false,
           });
 
-          // soft interrupt: 남은 tool calls 건너뛰고 루프 계속
-          // hard interrupt: aborted=true로 루프 종료됨
+          // 남은 tool calls에 대해 placeholder result 추가 (OpenAI 400 방지)
+          const currentIdx = toolCalls.indexOf(toolCall);
+          for (let i = currentIdx + 1; i < toolCalls.length; i++) {
+            results.push({
+              tool_call_id: toolCalls[i].id,
+              name: toolCalls[i].name,
+              output: `[SKIPPED] Previous tool was interrupted.`,
+              success: false,
+              durationMs: 0,
+            });
+          }
+          // soft interrupt: 루프 계속 / hard interrupt: aborted=true로 종료
           break;
         }
 
@@ -1447,7 +2241,7 @@ export class AgentLoop extends EventEmitter {
       }
     }
 
-    return results;
+    return { results, deferredFixPrompts };
   }
 
   /**
@@ -1512,10 +2306,10 @@ export class AgentLoop extends EventEmitter {
   private async validateAndFeedback(
     toolName: string,
     result: ToolResult,
-  ): Promise<void> {
+  ): Promise<string | null> {
     // file_write/file_edit만 검증 (다른 도구는 스킵)
     if (!["file_write", "file_edit"].includes(toolName)) {
-      return;
+      return null;
     }
 
     const validation = await this.autoFixLoop.validateResult(
@@ -1528,7 +2322,7 @@ export class AgentLoop extends EventEmitter {
     if (validation.passed) {
       // 검증 통과 → 수정 시도 기록 초기화
       this.autoFixLoop.resetAttempts();
-      return;
+      return null;
     }
 
     // 검증 실패 → 에러 피드백
@@ -1539,10 +2333,10 @@ export class AgentLoop extends EventEmitter {
         message: `Auto-fix exhausted (${this.autoFixLoop.getAttempts().length} attempts): ${validation.failures[0]?.message ?? "Unknown error"}`,
         retryable: false,
       });
-      return;
+      return null;
     }
 
-    // 수정 프롬프트 생성 → 대화 히스토리에 user 메시지로 추가
+    // 수정 프롬프트 생성 — 히스토리 추가는 caller가 tool result 추가 후 수행
     const errorMsg = validation.failures
       .map((f) => `[${f.type}] ${f.message}\n${f.rawOutput}`)
       .join("\n\n");
@@ -1560,11 +2354,8 @@ export class AgentLoop extends EventEmitter {
       0,
     );
 
-    // 피드백을 히스토리에 추가 (다음 LLM 호출에서 수정 시도)
-    this.contextManager.addMessage({
-      role: "user",
-      content: fixPrompt,
-    });
+    // fixPrompt를 반환 — caller가 tool result 메시지 추가 후 context에 넣음
+    return fixPrompt;
   }
 
   /**

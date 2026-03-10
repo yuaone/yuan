@@ -1,0 +1,128 @@
+name: "@yuaone/plugin-git"
+version: "1.0.0"
+description: "Git 전문 에이전트 스킬팩 — Conventional Commits, 브랜치 전략, conflict 해결, history 정리, PR 리뷰"
+author: "yuaone"
+license: "MIT"
+yuan_version: ">=0.1.0"
+
+detect:
+  files:
+    - ".git"
+  commands:
+    - "git --version"
+
+type: "hybrid"
+trustLevel: "official"
+category: "devops"
+
+skills:
+  - id: "commit-conv"
+    name: "Conventional Commits"
+    description: "Conventional Commits 스펙에 맞는 커밋 메시지 작성 + 검증"
+    trigger:
+      kind: "command"
+      command: "/skill commit-conv"
+
+  - id: "branch-strategy"
+    name: "Branch Strategy"
+    description: "Git Flow / Trunk-based 전략 분석 및 브랜치 관리"
+    trigger:
+      kind: "command"
+      command: "/skill branch-strategy"
+
+  - id: "conflict-resolve"
+    name: "Merge Conflict Resolution"
+    description: "Merge conflict 자동 감지 및 해결 가이드"
+    trigger:
+      kind: "auto"
+      confidence: 0.9
+
+  - id: "history-clean"
+    name: "Git History Cleanup"
+    description: "Git history 정리 — rebase, squash, fixup"
+    trigger:
+      kind: "command"
+      command: "/skill history-clean"
+
+  - id: "pr-review"
+    name: "PR Review & Checklist"
+    description: "PR 리뷰 수행 + 체크리스트 자동 생성"
+    trigger:
+      kind: "command"
+      command: "/skill pr-review"
+
+triggers:
+  - id: "merge-conflict-detected"
+    errorPattern: "CONFLICT \\(content\\): Merge conflict in"
+    skillId: "conflict-resolve"
+    priority: 95
+
+  - id: "merge-conflict-markers"
+    errorPattern: "<<<<<<<|=======|>>>>>>>"
+    skillId: "conflict-resolve"
+    priority: 90
+
+  - id: "push-rejected"
+    errorPattern: "\\[rejected\\].*\\(non-fast-forward\\)"
+    skillId: "history-clean"
+    priority: 85
+
+  - id: "push-failed-diverged"
+    errorPattern: "your branch and .* have diverged"
+    skillId: "history-clean"
+    priority: 80
+
+  - id: "bad-commit-message"
+    errorPattern: "subject .* does not match conventional commit"
+    skillId: "commit-conv"
+    priority: 75
+
+tools:
+  - name: "git-ops-ext"
+    description: "확장 Git 작업 (rebase, cherry-pick, stash, reflog 등)"
+    inputSchema:
+      type: "object"
+      properties:
+        operation:
+          type: "string"
+          enum:
+            - "log"
+            - "diff"
+            - "status"
+            - "branch"
+            - "checkout"
+            - "merge"
+            - "rebase"
+            - "cherry-pick"
+            - "stash"
+            - "reflog"
+            - "tag"
+            - "remote"
+            - "reset"
+            - "bisect"
+          description: "Git 명령 유형"
+        args:
+          type: "array"
+          items:
+            type: "string"
+          description: "Git 명령 인수"
+        workingDir:
+          type: "string"
+          description: "작업 디렉토리 경로"
+      required:
+        - "operation"
+    requiresApproval: true
+    riskLevel: "medium"
+    approvalExempt:
+      - "log"
+      - "diff"
+      - "status"
+      - "branch"
+      - "reflog"
+
+permissions:
+  fileRead: true
+  fileWrite: true
+  shellExec: true
+  networkAccess: false
+  gitOps: true

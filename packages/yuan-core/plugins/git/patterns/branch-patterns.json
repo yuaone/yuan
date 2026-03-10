@@ -1,0 +1,101 @@
+{
+  "patterns": [
+    {
+      "id": "missing-type-prefix",
+      "name": "Missing Branch Type Prefix",
+      "detect": "^(?!feature/|feat/|fix/|bugfix/|hotfix/|release/|chore/|docs/|refactor/|ci/|test/|perf/|build/|main$|master$|develop$)",
+      "severity": "warning",
+      "action": "suggest",
+      "template": "Branch name should start with a type prefix: feature/, fix/, release/, hotfix/, chore/, docs/, etc.",
+      "example": {
+        "bad": "add-user-login",
+        "good": "feature/add-user-login"
+      }
+    },
+    {
+      "id": "uppercase-in-branch",
+      "name": "Uppercase Characters in Branch Name",
+      "detect": "^(feature|feat|fix|bugfix|hotfix|release|chore|docs|refactor)/.*[A-Z].*$",
+      "severity": "info",
+      "action": "suggest",
+      "template": "Use lowercase kebab-case for branch names: `{name}` → `{nameLower}`",
+      "exceptions": ["TICKET-", "JIRA-", "GH-", "ISSUE-"],
+      "example": {
+        "bad": "feature/AddUserLogin",
+        "good": "feature/add-user-login"
+      }
+    },
+    {
+      "id": "special-characters",
+      "name": "Invalid Characters in Branch Name",
+      "detect": "[~^: \\\\?*\\[\\]@{]",
+      "severity": "error",
+      "action": "auto-fix",
+      "template": "Branch name contains invalid characters. Use only alphanumeric, hyphens, underscores, forward slashes, and dots.",
+      "example": {
+        "bad": "feature/user login [WIP]",
+        "good": "feature/user-login"
+      }
+    },
+    {
+      "id": "double-slash",
+      "name": "Nested Slash in Branch Name",
+      "detect": "^(feature|feat|fix|bugfix|hotfix|release|chore|docs|refactor)/[^/]+/",
+      "severity": "warning",
+      "action": "suggest",
+      "template": "Avoid nested slashes in branch names. Use a single slash after the type prefix: `type/description`",
+      "example": {
+        "bad": "feature/auth/add-login",
+        "good": "feature/auth-add-login"
+      }
+    },
+    {
+      "id": "too-long",
+      "name": "Branch Name Too Long",
+      "detect": "^.{61,}$",
+      "severity": "info",
+      "action": "suggest",
+      "template": "Branch name exceeds 60 characters ({length}). Keep branch names concise (3-5 word description).",
+      "example": {
+        "bad": "feature/TICKET-123-add-comprehensive-user-authentication-with-oauth2-and-multi-factor",
+        "good": "feature/TICKET-123-add-oauth2-auth"
+      }
+    },
+    {
+      "id": "missing-ticket-number",
+      "name": "Missing Ticket Reference",
+      "detect": "^(feature|feat|fix|bugfix|hotfix)/(?!.*\\d)[a-z-]+$",
+      "severity": "info",
+      "action": "suggest",
+      "template": "Consider including a ticket/issue number in the branch name for traceability.",
+      "example": {
+        "bad": "feature/add-user-login",
+        "good": "feature/TICKET-123-add-user-login"
+      }
+    },
+    {
+      "id": "trailing-slash",
+      "name": "Trailing Slash",
+      "detect": "/$",
+      "severity": "error",
+      "action": "auto-fix",
+      "template": "Branch name must not end with a slash.",
+      "example": {
+        "bad": "feature/",
+        "good": "feature/add-login"
+      }
+    },
+    {
+      "id": "consecutive-hyphens",
+      "name": "Consecutive Hyphens",
+      "detect": "--",
+      "severity": "info",
+      "action": "auto-fix",
+      "template": "Replace consecutive hyphens with a single hyphen.",
+      "example": {
+        "bad": "feature/add--user--login",
+        "good": "feature/add-user-login"
+      }
+    }
+  ]
+}

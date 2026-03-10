@@ -64,7 +64,7 @@ export async function runOneshot(
 
   // Build BYOK config
   const byokConfig: BYOKConfig = {
-    provider: config.provider as "openai" | "anthropic" | "google",
+    provider: config.provider as "openai" | "anthropic" | "yua",
     apiKey: config.apiKey,
     model: options.model ?? config.model,
     baseUrl: config.baseUrl,

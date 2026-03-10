@@ -1,0 +1,244 @@
+{
+  "id": "conflict-resolve",
+  "name": "Merge Conflict Resolution Strategy",
+  "description": "단계별 merge conflict 해결 전략. 충돌 식별부터 빌드/테스트 검증까지.",
+  "phases": [
+    {
+      "id": "identify",
+      "name": "Identify Conflicts",
+      "order": 1,
+      "description": "충돌 상태를 파악하고 영향 범위를 평가한다.",
+      "steps": [
+        {
+          "command": "git status",
+          "purpose": "현재 merge/rebase 상태 및 충돌 파일 목록 확인",
+          "expect": "both modified, both added, deleted by us/them 상태 파일"
+        },
+        {
+          "command": "git diff --name-only --diff-filter=U",
+          "purpose": "Unmerged 파일만 추출",
+          "expect": "충돌 파일 경로 목록"
+        },
+        {
+          "command": "git log --oneline --left-right HEAD...MERGE_HEAD -20",
+          "purpose": "양쪽 브랜치의 커밋 이력 비교",
+          "expect": "< (ours) 및 > (theirs) 커밋 목록"
+        }
+      ],
+      "outputs": {
+        "conflictFiles": "충돌 파일 목록",
+        "conflictCount": "총 충돌 파일 수",
+        "mergeType": "merge | rebase | cherry-pick"
+      },
+      "failCondition": "git status가 충돌 상태가 아닌 경우",
+      "failAction": "merge/rebase 진행 중이 아니라면 스킵"
+    },
+    {
+      "id": "read-conflicts",
+      "name": "Read & Analyze Conflicts",
+      "order": 2,
+      "description": "각 충돌 파일의 내용을 읽고 충돌 유형을 분류한다.",
+      "steps": [
+        {
+          "tool": "file_read",
+          "target": "각 충돌 파일",
+          "purpose": "conflict 마커 포함 전체 내용 확인"
+        },
+        {
+          "command": "git show :1:{file}",
+          "purpose": "BASE 버전 확인 (공통 조상)",
+          "optional": true
+        },
+        {
+          "command": "git show :2:{file}",
+          "purpose": "OURS 버전 확인 (현재 브랜치)",
+          "optional": true
+        },
+        {
+          "command": "git show :3:{file}",
+          "purpose": "THEIRS 버전 확인 (병합 대상)",
+          "optional": true
+        }
+      ],
+      "classification": {
+        "types": [
+          {
+            "type": "same-line-edit",
+            "description": "같은 줄을 양쪽에서 다르게 수정",
+            "autoResolvable": false,
+            "risk": "high"
+          },
+          {
+            "type": "import-reorder",
+            "description": "import 문 순서 변경",
+            "autoResolvable": true,
+            "risk": "low"
+          },
+          {
+            "type": "adjacent-line",
+            "description": "인접한 줄을 양쪽에서 수정",
+            "autoResolvable": "conditional",
+            "risk": "medium"
+          },
+          {
+            "type": "rename-edit",
+            "description": "한쪽은 파일 rename, 다른 쪽은 내용 수정",
+            "autoResolvable": false,
+            "risk": "medium"
+          },
+          {
+            "type": "delete-modify",
+            "description": "한쪽은 삭제, 다른 쪽은 수정",
+            "autoResolvable": false,
+            "risk": "high"
+          },
+          {
+            "type": "both-add",
+            "description": "같은 위치에 양쪽 모두 새 코드 추가",
+            "autoResolvable": "conditional",
+            "risk": "medium"
+          },
+          {
+            "type": "lockfile",
+            "description": "package-lock.json / pnpm-lock.yaml 충돌",
+            "autoResolvable": true,
+            "risk": "low",
+            "resolution": "accept theirs + reinstall"
+          }
+        ]
+      },
+      "outputs": {
+        "conflictDetails": "파일별 충돌 유형, 위치, 심각도"
+      }
+    },
+    {
+      "id": "resolve",
+      "name": "Resolve Conflicts",
+      "order": 3,
+      "description": "각 충돌을 유형별 전략에 따라 해결한다.",
+      "strategies": {
+        "same-line-edit": {
+          "steps": [
+            "양쪽 커밋 메시지/PR 설명에서 변경 의도 파악",
+            "BASE 버전과 비교하여 각 변경의 목적 이해",
+            "최신 의도를 반영하되 양쪽 기능이 보존되도록 통합",
+            "통합이 불가능하면 팀/작성자에게 확인 요청"
+          ],
+          "priority": "theirs가 최신이면 theirs 우선, 양쪽 다 필요하면 통합"
+        },
+        "import-reorder": {
+          "steps": [
+            "양쪽의 추가/삭제된 import 파악",
+            "모든 필요한 import를 포함",
+            "알파벳 순서로 정렬",
+            "미사용 import 제거"
+          ],
+          "priority": "모두 포함 후 정렬"
+        },
+        "lockfile": {
+          "steps": [
+            "lock file의 conflict를 accept theirs로 해결",
+            "pnpm install 재실행으로 lock file 재생성",
+            "재생성된 lock file을 staging"
+          ],
+          "priority": "항상 재생성"
+        },
+        "delete-modify": {
+          "steps": [
+            "삭제한 쪽의 의도 확인 (리팩토링? 불필요?)",
+            "수정한 쪽의 변경 내용 확인",
+            "리팩토링으로 이동된 경우: 이동된 파일에 수정 적용",
+            "불필요해서 삭제된 경우: 삭제 유지"
+          ],
+          "priority": "의도 기반 판단 필수"
+        }
+      },
+      "steps": [
+        {
+          "tool": "file_edit",
+          "purpose": "conflict 마커 제거 및 최종 코드 작성"
+        },
+        {
+          "command": "git add {resolved_file}",
+          "purpose": "해결 완료 표시"
+        }
+      ],
+      "outputs": {
+        "resolvedFiles": "해결된 파일 목록",
+        "resolutionType": "파일별 해결 방식 (ours/theirs/both/manual)"
+      }
+    },
+    {
+      "id": "verify-build",
+      "name": "Verify Build",
+      "order": 4,
+      "description": "충돌 해결 후 빌드가 정상적으로 통과하는지 확인한다.",
+      "steps": [
+        {
+          "command": "git diff --check",
+          "purpose": "미해결 conflict 마커 잔존 확인",
+          "expect": "출력 없음 (잔존 마커 없음)"
+        },
+        {
+          "command": "grep -rn '<<<<<<<\\|=======\\|>>>>>>>' {resolvedFiles}",
+          "purpose": "conflict 마커 이중 확인",
+          "expect": "매칭 없음"
+        },
+        {
+          "command": "tsc --noEmit",
+          "purpose": "TypeScript 컴파일 체크",
+          "expect": "에러 0개",
+          "conditional": "tsconfig.json이 있을 때만"
+        },
+        {
+          "command": "pnpm build",
+          "purpose": "전체 빌드 확인",
+          "expect": "빌드 성공"
+        }
+      ],
+      "outputs": {
+        "buildStatus": "pass | fail",
+        "errors": "빌드 에러 목록 (실패 시)"
+      },
+      "failAction": "에러 기반 자동 수정 시도 (최대 3회)"
+    },
+    {
+      "id": "verify-tests",
+      "name": "Verify Tests",
+      "order": 5,
+      "description": "테스트 스위트가 통과하는지 확인한다.",
+      "steps": [
+        {
+          "command": "pnpm test",
+          "purpose": "전체 테스트 실행",
+          "expect": "모든 테스트 통과",
+          "optional": true,
+          "timeout": 120000
+        },
+        {
+          "command": "pnpm --filter {affectedPackages} test",
+          "purpose": "영향받는 패키지만 테스트",
+          "expect": "테스트 통과",
+          "conditional": "모노레포일 때"
+        }
+      ],
+      "outputs": {
+        "testStatus": "pass | fail | skipped",
+        "failedTests": "실패한 테스트 목록 (실패 시)"
+      },
+      "failAction": "테스트 실패 원인 분석 및 수정",
+      "completion": {
+        "onSuccess": "git commit 으로 merge 완료 (또는 git rebase --continue)",
+        "onFail": "실패 원인과 수동 개입 필요 사항 보고"
+      }
+    }
+  ],
+  "config": {
+    "maxAutoRetries": 3,
+    "requireBuildPass": true,
+    "requireTestPass": false,
+    "autoResolveTypes": ["import-reorder", "lockfile"],
+    "manualResolveTypes": ["same-line-edit", "delete-modify"],
+    "notifyOnCompletion": true
+  }
+}

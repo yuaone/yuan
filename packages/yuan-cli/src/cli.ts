@@ -32,7 +32,7 @@ const program = new Command();
 
 program
   .name("yuan")
-  .description("YUAN — Autonomous Coding Agent")
+  .description("YUAN — Coding Agent")
   .version(PKG_VERSION);
 
 // ─── Default: Interactive mode (TUI) ───
@@ -118,16 +118,16 @@ configCmd
 configCmd
   .command("set-key")
   .description("Set API key for a provider")
-  .argument("<provider>", "Provider: openai, anthropic, or google")
+  .argument("<provider>", "Provider: openai, anthropic, or yua")
   .argument("<key>", "API key")
   .action((provider: string, key: string) => {
-    const validProviders = ["openai", "anthropic", "google", "yua", "deepseek"] as const;
+    const validProviders = ["openai", "anthropic", "yua"] as const;
     if (!validProviders.includes(provider as typeof validProviders[number])) {
-      renderer.error(`Invalid provider: ${provider}. Use: openai, anthropic, google, yua, or deepseek`);
+      renderer.error(`Invalid provider: ${provider}. Use: openai, anthropic, or yua`);
       process.exit(1);
     }
     const configManager = new ConfigManager();
-    configManager.setKey(provider as "openai" | "anthropic" | "google" | "yua" | "deepseek", key);
+    configManager.setKey(provider as "openai" | "anthropic" | "yua", key);
     renderer.success(`API key saved for ${provider}`);
   });
 

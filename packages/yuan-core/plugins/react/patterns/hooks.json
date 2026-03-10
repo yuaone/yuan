@@ -1,0 +1,72 @@
+{
+  "$schema": "https://yuaone.com/schemas/patterns.json",
+  "name": "React Hook Patterns",
+  "version": "1.0.0",
+  "description": "Common React hook patterns for detection and suggestion",
+  "patterns": [
+    {
+      "id": "use-state-batching",
+      "name": "useState Batching",
+      "description": "Multiple related setState calls should use useReducer or a single state object to avoid intermediate renders.",
+      "detect": "set\\w+\\([^)]+\\);\\s*set\\w+\\(",
+      "action": "suggest",
+      "template": "// Instead of multiple setState calls:\n// setLoading(true); setError(null); setData(null);\n\n// Use useReducer for related state transitions:\ntype State = { data: T | null; loading: boolean; error: Error | null };\ntype Action =\n  | { type: 'FETCH_START' }\n  | { type: 'FETCH_SUCCESS'; data: T }\n  | { type: 'FETCH_ERROR'; error: Error };\n\nfunction reducer(state: State, action: Action): State {\n  switch (action.type) {\n    case 'FETCH_START': return { data: null, loading: true, error: null };\n    case 'FETCH_SUCCESS': return { data: action.data, loading: false, error: null };\n    case 'FETCH_ERROR': return { data: null, loading: false, error: action.error };\n  }\n}\n\nconst [state, dispatch] = useReducer(reducer, { data: null, loading: false, error: null });"
+    },
+    {
+      "id": "use-callback-deps",
+      "name": "useCallback with Dependencies",
+      "description": "useCallback should have correct dependency array. Functions passed to child components should be memoized.",
+      "detect": "useCallback\\(\\s*\\([^)]*\\)\\s*=>",
+      "action": "suggest",
+      "template": "// Stable callback reference to prevent child re-renders:\nconst handleClick = useCallback((id: string) => {\n  // Use functional updater to avoid deps on state:\n  setItems(prev => prev.filter(item => item.id !== id));\n}, []); // Empty deps because functional updater doesn't need current state\n\n// When you DO need external values:\nconst handleSubmit = useCallback(() => {\n  submitForm(formData);\n}, [formData]); // formData in deps"
+    },
+    {
+      "id": "use-memo-computation",
+      "name": "useMemo for Expensive Computation",
+      "description": "useMemo should be used for expensive computations, not for every variable. Profile before memoizing.",
+      "detect": "useMemo\\(\\s*\\(\\)\\s*=>",
+      "action": "suggest",
+      "template": "// Good: expensive computation that depends on data\nconst sortedItems = useMemo(\n  () => items.slice().sort((a, b) => a.name.localeCompare(b.name)),\n  [items]\n);\n\n// Good: object/array passed to child component (stable reference)\nconst contextValue = useMemo(\n  () => ({ user, settings, theme }),\n  [user, settings, theme]\n);\n\n// BAD: simple value derivation (no memoization needed)\n// const fullName = useMemo(() => `${first} ${last}`, [first, last]);\n// Just use: const fullName = `${first} ${last}`;"
+    },
+    {
+      "id": "use-ref-patterns",
+      "name": "useRef Patterns",
+      "description": "useRef for DOM access, mutable values that don't trigger re-renders, and previous value tracking.",
+      "detect": "useRef\\s*<",
+      "action": "suggest",
+      "template": "// 1. DOM reference\nconst inputRef = useRef<HTMLInputElement>(null);\nuseEffect(() => { inputRef.current?.focus(); }, []);\n\n// 2. Mutable value (no re-render on change)\nconst renderCount = useRef(0);\nuseEffect(() => { renderCount.current += 1; });\n\n// 3. Previous value tracking\nfunction usePrevious<T>(value: T): T | undefined {\n  const ref = useRef<T>();\n  useEffect(() => { ref.current = value; });\n  return ref.current;\n}\n\n// 4. Latest callback ref (avoid stale closures in intervals)\nconst callbackRef = useRef(callback);\nuseLayoutEffect(() => { callbackRef.current = callback; });"
+    },
+    {
+      "id": "use-effect-fetch",
+      "name": "useEffect Data Fetching",
+      "description": "Data fetching in useEffect with abort controller, loading state, and error handling.",
+      "detect": "useEffect\\(.*fetch\\(|useEffect\\(.*axios",
+      "action": "suggest",
+      "template": "function useDataFetch<T>(url: string) {\n  const [data, setData] = useState<T | null>(null);\n  const [loading, setLoading] = useState(true);\n  const [error, setError] = useState<Error | null>(null);\n\n  useEffect(() => {\n    const controller = new AbortController();\n    setLoading(true);\n    setError(null);\n\n    fetch(url, { signal: controller.signal })\n      .then(res => {\n        if (!res.ok) throw new Error(`HTTP ${res.status}`);\n        return res.json();\n      })\n      .then(setData)\n      .catch(err => {\n        if (err.name !== 'AbortError') setError(err);\n      })\n      .finally(() => setLoading(false));\n\n    return () => controller.abort();\n  }, [url]);\n\n  return { data, loading, error };\n}"
+    },
+    {
+      "id": "use-debounce",
+      "name": "useDebounce Hook",
+      "description": "Debounce a value to limit update frequency. Common for search inputs and API calls.",
+      "detect": "useDebounce|debounce.*useState|setTimeout.*setState",
+      "action": "suggest",
+      "template": "function useDebounce<T>(value: T, delay: number): T {\n  const [debouncedValue, setDebouncedValue] = useState(value);\n\n  useEffect(() => {\n    const timer = setTimeout(() => setDebouncedValue(value), delay);\n    return () => clearTimeout(timer);\n  }, [value, delay]);\n\n  return debouncedValue;\n}\n\n// Usage:\nconst [search, setSearch] = useState('');\nconst debouncedSearch = useDebounce(search, 300);\n\nuseEffect(() => {\n  if (debouncedSearch) fetchResults(debouncedSearch);\n}, [debouncedSearch]);"
+    },
+    {
+      "id": "use-local-storage",
+      "name": "useLocalStorage Hook",
+      "description": "Persist state to localStorage with SSR safety and type-safe serialization.",
+      "detect": "localStorage\\.(get|set)Item|useLocalStorage",
+      "action": "suggest",
+      "template": "function useLocalStorage<T>(key: string, initialValue: T): [T, (value: T | ((prev: T) => T)) => void] {\n  const [storedValue, setStoredValue] = useState<T>(() => {\n    if (typeof window === 'undefined') return initialValue;\n    try {\n      const item = window.localStorage.getItem(key);\n      return item ? JSON.parse(item) : initialValue;\n    } catch {\n      return initialValue;\n    }\n  });\n\n  const setValue = useCallback((value: T | ((prev: T) => T)) => {\n    setStoredValue(prev => {\n      const newValue = value instanceof Function ? value(prev) : value;\n      try {\n        window.localStorage.setItem(key, JSON.stringify(newValue));\n      } catch (e) {\n        console.warn(`Failed to save ${key} to localStorage`, e);\n      }\n      return newValue;\n    });\n  }, [key]);\n\n  return [storedValue, setValue];\n}"
+    },
+    {
+      "id": "use-media-query",
+      "name": "useMediaQuery Hook",
+      "description": "SSR-safe media query matching for responsive behavior in JavaScript.",
+      "detect": "matchMedia|useMediaQuery|window\\.innerWidth",
+      "action": "suggest",
+      "template": "function useMediaQuery(query: string): boolean {\n  const [matches, setMatches] = useState(false);\n\n  useEffect(() => {\n    const media = window.matchMedia(query);\n    setMatches(media.matches);\n\n    const listener = (e: MediaQueryListEvent) => setMatches(e.matches);\n    media.addEventListener('change', listener);\n    return () => media.removeEventListener('change', listener);\n  }, [query]);\n\n  return matches;\n}\n\n// Usage:\nconst isMobile = useMediaQuery('(max-width: 768px)');\nconst prefersDark = useMediaQuery('(prefers-color-scheme: dark)');"
+    }
+  ]
+}

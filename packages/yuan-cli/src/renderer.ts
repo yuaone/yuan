@@ -77,15 +77,37 @@ export class Spinner {
   }
 }
 
+// ─── Mascot ASCII Art ───
+
+const YUA_FOX = [
+  `    /\\_/\\      `,
+  `   ( ⊙.⊙ )    `,
+  `    > ᴥ <     `,
+  `   ╭━━━━━╮    `,
+  `   ╰┈┈┈┈┈╯~≋  `,
+];
+
 // ─── Terminal Renderer ───
 
 export class TerminalRenderer {
-  /** Print the YUAN banner */
+  /** Print the YUAN banner with mascot */
   banner(): void {
-    console.log(
-      c(colors.bold + colors.cyan, "\n  YUAN") +
-        c(colors.dim, " — Autonomous Coding Agent\n")
-    );
+    const textLines = [
+      c(colors.bold + colors.cyan, "YUAN") + c(colors.dim, " v0.1"),
+      c(colors.dim, "YUAN Coding Agent"),
+      "",
+      c(colors.dim, "Type ") + c(colors.cyan, "/help") + c(colors.dim, " for commands"),
+    ];
+
+    // Fox on the left, text on the right
+    const maxFoxLines = Math.max(YUA_FOX.length, textLines.length);
+    console.log();
+    for (let i = 0; i < maxFoxLines; i++) {
+      const fox = i < YUA_FOX.length ? c(colors.white, YUA_FOX[i]) : "          ";
+      const text = i < textLines.length ? textLines[i] : "";
+      console.log(`  ${fox}  ${text}`);
+    }
+    console.log();
   }
 
   /** Print an info line */

@@ -30,7 +30,7 @@ On first run, YUAN will prompt you to set up an API key if none is configured.
 
 - **Agent Loop** -- Autonomous tool-use loop that plans, executes, and self-corrects
 - **9 Built-in Tools** -- file_read, file_write, file_edit, shell_exec, grep, glob, git_ops, test_run, code_search
-- **Multi-Provider BYOK** -- Works with OpenAI, Anthropic, Google, and DeepSeek API keys
+- **BYOK** -- Works with YUA, OpenAI, and Anthropic API keys
 - **Streaming Output** -- Real-time streaming of agent reasoning and tool results
 - **Approval Flow** -- Dangerous operations require explicit user approval before execution
 - **Interactive REPL** -- Persistent conversation with the agent in your terminal
@@ -43,17 +43,28 @@ On first run, YUAN will prompt you to set up an API key if none is configured.
 
 ## Supported Providers
 
-| Provider  | Default Model               |
-|-----------|-----------------------------|
-| OpenAI    | gpt-4o                      |
-| Anthropic | claude-sonnet-4-20250514    |
-| Google    | gemini-2.0-flash            |
-| DeepSeek  | deepseek-chat               |
+| Provider  | Default Model            | Notes                           |
+|-----------|--------------------------|----------------------------------|
+| YUA       | yua-normal               | Self-hosted, OpenAI-compatible   |
+| OpenAI    | gpt-4o-mini              | BYOK                             |
+| Anthropic | claude-sonnet-4-20250514 | BYOK                             |
+
+### YUA Model Tiers
+
+When using the YUA provider, model names map to internal tiers:
+
+| Model       | Tier     | Backend Engine          | Use Case                  |
+|-------------|----------|-------------------------|---------------------------|
+| yua-basic    | FAST     | gpt-5-mini          | Low-cost, fast responses  |
+| yua-normal   | NORMAL   | gpt-5.2-chat-latest | General-purpose (default) |
+| yua-pro      | DEEP     | gpt-5.2             | High-quality, reasoning   |
+| yua-research | RESEARCH | gpt-5.2-chat-latest | Deep research pipeline    |
 
 You can override the model per-session:
 
 ```bash
-yuan code "refactor the auth module" --model gpt-4o-mini
+yuan code "refactor the auth module" --model yua-pro
+yuan code "quick fix" --model yua-basic
 ```
 
 ---
@@ -76,7 +87,7 @@ npx @yuaone/cli
 ### Requirements
 
 - Node.js >= 20
-- An API key from OpenAI, Anthropic, Google, or DeepSeek
+- An API key from YUA, OpenAI, or Anthropic
 
 ---
 
@@ -92,10 +103,9 @@ Or set values directly:
 
 ```bash
 # Set provider and API key
+yuan config set-key yua yua-...
 yuan config set-key openai sk-...
 yuan config set-key anthropic sk-ant-...
-yuan config set-key google AIza...
-yuan config set-key deepseek sk-...
 
 # Switch to cloud mode (uses YUA hosted service instead of BYOK)
 yuan config set-mode cloud

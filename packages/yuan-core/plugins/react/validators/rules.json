@@ -1,0 +1,92 @@
+{
+  "$schema": "https://yuaone.com/schemas/validators.json",
+  "name": "React Validation Rules",
+  "version": "1.0.0",
+  "description": "Post-edit and quality validation rules for React code",
+  "validators": [
+    {
+      "id": "react-build-check",
+      "stage": "post",
+      "name": "React Build Verification",
+      "check": "pnpm build || next build || react-scripts build",
+      "severity": "error"
+    },
+    {
+      "id": "react-typecheck",
+      "stage": "post",
+      "name": "TypeScript Type Check",
+      "check": "tsc --noEmit",
+      "severity": "error"
+    },
+    {
+      "id": "react-lint-hooks",
+      "stage": "post",
+      "name": "React Hooks Lint",
+      "check": "eslint --rule 'react-hooks/rules-of-hooks: error' --rule 'react-hooks/exhaustive-deps: warn'",
+      "severity": "error"
+    },
+    {
+      "id": "react-test-pass",
+      "stage": "post",
+      "name": "Test Suite Pass",
+      "check": "pnpm test --passWithNoTests || vitest run || jest --passWithNoTests",
+      "severity": "warning"
+    },
+    {
+      "id": "no-prop-drilling-deep",
+      "stage": "quality",
+      "name": "No Deep Prop Drilling",
+      "check": "grep -rn '...props' --include='*.tsx' --include='*.jsx' | awk -F: '{print $1}' | sort | uniq -c | sort -rn | awk '$1 > 3 {print \"WARN: Deep prop drilling in \" $2 \" (\" $1 \" levels)\"}' ",
+      "severity": "warning"
+    },
+    {
+      "id": "no-use-effect-in-render",
+      "stage": "quality",
+      "name": "No Side Effects in Render Body",
+      "check": "grep -rn 'fetch\\|axios\\|XMLHttpRequest' --include='*.tsx' --include='*.jsx' | grep -v 'useEffect\\|useCallback\\|useMemo\\|import\\|require\\|//\\|\\*'",
+      "severity": "warning"
+    },
+    {
+      "id": "no-any-types",
+      "stage": "quality",
+      "name": "No Untyped Any",
+      "check": "grep -rn ': any\\b\\|as any\\b' --include='*.ts' --include='*.tsx' | grep -v 'node_modules\\|.d.ts\\|// eslint-disable'",
+      "severity": "warning"
+    },
+    {
+      "id": "no-dangerous-inner-html-unsanitized",
+      "stage": "safety",
+      "name": "No Unsanitized dangerouslySetInnerHTML",
+      "check": "grep -rn 'dangerouslySetInnerHTML' --include='*.tsx' --include='*.jsx' | grep -v 'DOMPurify\\|sanitize\\|purify\\|xss'",
+      "severity": "critical"
+    },
+    {
+      "id": "no-eval-usage",
+      "stage": "safety",
+      "name": "No eval() or new Function()",
+      "check": "grep -rn 'eval(\\|new Function(' --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' | grep -v 'node_modules\\|.d.ts'",
+      "severity": "critical"
+    },
+    {
+      "id": "no-exposed-secrets",
+      "stage": "safety",
+      "name": "No Exposed Secrets in Client Code",
+      "check": "grep -rn 'NEXT_PUBLIC_.*SECRET\\|NEXT_PUBLIC_.*KEY.*=\\|process\\.env\\.' --include='*.tsx' --include='*.jsx' | grep -v 'NEXT_PUBLIC_\\|node_modules'",
+      "severity": "critical"
+    },
+    {
+      "id": "accessible-interactive-elements",
+      "stage": "quality",
+      "name": "Interactive Elements Have Accessible Names",
+      "check": "grep -rn '<button\\|<a \\|role=\"button\"' --include='*.tsx' --include='*.jsx' | grep -v 'aria-label\\|aria-labelledby\\|>.*</'",
+      "severity": "warning"
+    },
+    {
+      "id": "no-index-key",
+      "stage": "quality",
+      "name": "No Array Index as Key",
+      "check": "grep -rn 'key={.*index\\|}' --include='*.tsx' --include='*.jsx' | grep -v 'node_modules'",
+      "severity": "warning"
+    }
+  ]
+}

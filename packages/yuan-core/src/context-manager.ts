@@ -203,10 +203,11 @@ export class ContextManager {
   private compactHistory(targetTokens: number): Message[] {
     const result: Message[] = [];
 
-    // 1. system 메시지 추출
-    const systemMessages = this.messages.filter(
+    // 1. system 메시지 추출 — rolling window으로 무한 누적 방지
+    const allSystemMessages = this.messages.filter(
       (m) => m.role === "system",
     );
+    const systemMessages = this.pruneSystemMessages(allSystemMessages);
     const nonSystemMessages = this.messages.filter(
       (m) => m.role !== "system",
     );
@@ -280,10 +281,13 @@ export class ContextManager {
     if (tokens > targetTokens && repaired.length > systemMessages.length + this.recentWindow) {
       const keep = systemMessages.length + 1 + this.recentWindow;
       while (repaired.length > keep && tokens > targetTokens) {
-        // Don't remove tool messages that are paired with assistant tool_calls
+        // Don't remove tool messages or assistant messages with tool_calls
+        // (removing either would break the tool_calls ↔ tool result pair contract)
         const candidate = repaired[systemMessages.length + 1];
         if (candidate.role === "tool") {
-          // Skip — removing a tool message would break the pair
+          break;
+        }
+        if (candidate.role === "assistant" && candidate.tool_calls?.length) {
           break;
         }
         repaired.splice(systemMessages.length + 1, 1);
@@ -292,6 +296,24 @@ export class ContextManager {
     }
 
     return repaired;
+  }
+
+  /**
+   * 런타임 시스템 메시지를 rolling window으로 제한.
+   * 첫 번째 시스템 메시지(기본 프롬프트)는 항상 유지하고,
+   * 나머지 런타임 시스템 메시지는 최근 maxRuntime개만 유지.
+   */
+  pruneSystemMessages(systemMessages: Message[], maxRuntime: number = 15): Message[] {
+    if (systemMessages.length <= maxRuntime + 1) {
+      return systemMessages;
+    }
+
+    // 첫 번째(기본 프롬프트) + 최근 maxRuntime개 런타임 메시지
+    const base = systemMessages[0];
+    const runtime = systemMessages.slice(1);
+    const kept = runtime.slice(-maxRuntime);
+
+    return [base, ...kept];
   }
 
   private summarizeMessages(messages: Message[]): string {

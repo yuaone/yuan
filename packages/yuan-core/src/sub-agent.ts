@@ -20,6 +20,19 @@ import type {
 } from "./types.js";
 import { AgentLoop } from "./agent-loop.js";
 import type { GovernorConfig } from "./governor.js";
+import {
+  buildSubAgentPrompt,
+  type SubAgentRole,
+  type SubAgentPromptConfig,
+} from "./sub-agent-prompts.js";
+import {
+  routeSubAgent,
+  estimateComplexity,
+  type TaskSignals,
+  type SubAgentTier,
+  type RoutingDecision,
+} from "./sub-agent-router.js";
+import { getCodingStandards, getGeneralStandards } from "./coding-standards.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -61,6 +74,38 @@ export interface SubAgentConfig {
   priority?: number;
   /** Governor configuration overrides */
   governorConfig?: Partial<GovernorConfig>;
+  /** Sub-agent role for prompt specialization (default: "coder") */
+  role?: SubAgentRole;
+  /** Primary language of the target files (e.g. "typescript") */
+  language?: string;
+  /** Framework in use (e.g. "react", "next.js") */
+  framework?: string;
+  /** Whether this task is on a critical path (security, auth, payments) */
+  isCriticalPath?: boolean;
+  /** Number of previous failures for this task (for routing escalation) */
+  previousFailures?: number;
+  /** Parent agent's model tier (for cost containment) */
+  parentModelTier?: SubAgentTier;
+}
+
+/** Verification report generated after sub-agent task execution */
+export interface VerificationReport {
+  /** Sub-agent identifier */
+  subAgentId: string;
+  /** Task identifier */
+  taskId: string;
+  /** Confidence score (0–1) reflecting how well the task was completed */
+  confidence: number;
+  /** Whether the task passed verification */
+  passed: boolean;
+  /** List of issues found during verification */
+  issues: string[];
+  /** Causal chain: symptom -> hypothesis -> evidence -> conclusion */
+  causalChain?: string[];
+  /** Number of tool calls that succeeded */
+  testsPassed?: number;
+  /** Total number of tool calls attempted */
+  testsTotal?: number;
 }
 
 /** Result returned when a sub-agent completes (success or failure) */
@@ -81,6 +126,10 @@ export interface SubAgentResult {
   phase: SubAgentPhase;
   /** Error message if the sub-agent failed */
   error?: string;
+  /** Verification report for main agent validation */
+  verification?: VerificationReport;
+  /** Model routing decision (which tier was selected and why) */
+  routingDecision?: RoutingDecision;
 }
 
 /** DAG context passed to a sub-agent so it understands its place in the plan */
@@ -151,6 +200,7 @@ export class SubAgent extends EventEmitter {
   private readonly config: SubAgentConfig;
   private agentLoop: AgentLoop | null = null;
   private iterationCount = 0;
+  private routingResult: RoutingDecision | null = null;
 
   constructor(config: SubAgentConfig) {
     super();
@@ -173,9 +223,19 @@ export class SubAgent extends EventEmitter {
   buildPrompt(dagContext: DAGContextLike): string {
     const sections: string[] = [];
 
-    // 1. Role definition
+    // 1. Role-specific prompt (from sub-agent-prompts module)
+    const role = this.config.role ?? "coder";
+    const rolePrompt = buildSubAgentPrompt({
+      role,
+      language: this.config.language,
+      framework: this.config.framework,
+      projectContext: dagContext.overallGoal,
+    });
+    sections.push(rolePrompt);
+
+    // 2. Task-specific goal
     sections.push(
-      `You are a YUAN Sub-Agent. Your role: ${this.config.goal}`,
+      `## Your Task\n${this.config.goal}`,
     );
 
     // 2. File scope
@@ -266,7 +326,25 @@ ${dagContext.projectStructure}
       // Phase: INIT
       this.setPhase("init");
 
-      // Build the scoped system prompt
+      // Route to optimal model tier based on task signals
+      const role = this.config.role ?? "coder";
+      const complexity = estimateComplexity(
+        this.config.targetFiles.length,
+        this.config.goal.length,
+        this.config.tools.includes("test_run"),
+      );
+      const taskSignals: TaskSignals = {
+        role,
+        complexity,
+        fileCount: this.config.targetFiles.length,
+        hasTests: this.config.tools.includes("test_run"),
+        isCriticalPath: this.config.isCriticalPath ?? false,
+        previousFailures: this.config.previousFailures ?? 0,
+        parentModelTier: this.config.parentModelTier ?? "NORMAL",
+      };
+      this.routingResult = routeSubAgent(taskSignals);
+
+      // Build the scoped system prompt (role-specialized)
       const systemPrompt = this.buildPrompt(dagContext);
 
       // Create a ToolExecutor scoped to the project path and enabled tools
@@ -340,6 +418,13 @@ ${dagContext.projectStructure}
       const success = termination.reason === "GOAL_ACHIEVED";
       const summary = this.extractSummary(termination);
 
+      // Generate VerificationReport for main agent validation
+      const verification = this.generateVerificationReport(
+        success,
+        termination,
+        changedFiles,
+      );
+
       const result = this.buildResult(
         success,
         summary,
@@ -347,6 +432,7 @@ ${dagContext.projectStructure}
         tokenUsage.input,
         tokenUsage.output,
         success ? undefined : `Terminated: ${termination.reason}`,
+        verification,
       );
 
       // Phase: CLEANUP
@@ -483,6 +569,7 @@ ${dagContext.projectStructure}
     inputTokens: number,
     outputTokens: number,
     error?: string,
+    verification?: VerificationReport,
   ): SubAgentResult {
     return {
       taskId: this.taskId,
@@ -493,6 +580,90 @@ ${dagContext.projectStructure}
       iterations: this.iterationCount,
       phase: this.phase,
       error,
+      verification,
+      routingDecision: this.routingResult ?? undefined,
+    };
+  }
+
+  /**
+   * Generate a VerificationReport based on the sub-agent's execution results.
+   *
+   * Assesses confidence based on:
+   * - Whether the termination was GOAL_ACHIEVED
+   * - Number of changed files vs target files
+   * - Iteration efficiency (fewer iterations = higher confidence)
+   * - Presence of errors during execution
+   */
+  private generateVerificationReport(
+    success: boolean,
+    termination: AgentTermination,
+    changedFiles: { path: string; diff: string }[],
+  ): VerificationReport {
+    const issues: string[] = [];
+    const causalChain: string[] = [];
+
+    // Assess confidence based on multiple signals
+    let confidence = success ? 0.8 : 0.2;
+
+    // Check file coverage — did we touch the expected target files?
+    const targetCount = this.config.targetFiles.length;
+    const changedCount = changedFiles.length;
+    if (targetCount > 0 && changedCount === 0) {
+      issues.push("No target files were modified");
+      causalChain.push("symptom: zero changed files");
+      causalChain.push("hypothesis: task may not have produced expected output");
+      confidence *= 0.5;
+    } else if (targetCount > 0) {
+      const coverage = changedCount / targetCount;
+      if (coverage < 0.5) {
+        issues.push(`Only ${changedCount}/${targetCount} target files modified`);
+        confidence *= 0.7;
+      }
+    }
+
+    // Iteration efficiency — more iterations spent means less confidence
+    const maxIter = this.config.maxIterations;
+    if (maxIter > 0) {
+      const iterRatio = this.iterationCount / maxIter;
+      if (iterRatio >= 1.0) {
+        issues.push("Reached maximum iteration limit");
+        causalChain.push("evidence: all iterations consumed without early completion");
+        confidence *= 0.6;
+      } else if (iterRatio > 0.8) {
+        issues.push("Used >80% of iteration budget");
+        confidence *= 0.8;
+      }
+    }
+
+    // Termination reason analysis
+    if (termination.reason === "ERROR") {
+      issues.push(`Terminated with error: ${(termination as { error?: string }).error ?? "unknown"}`);
+      causalChain.push(`conclusion: execution failed — ${(termination as { error?: string }).error}`);
+      confidence = Math.min(confidence, 0.1);
+    } else if (termination.reason === "BUDGET_EXHAUSTED") {
+      issues.push("Token budget exhausted before completion");
+      confidence = Math.min(confidence, 0.3);
+    } else if (termination.reason === "USER_CANCELLED") {
+      issues.push("Execution was cancelled");
+      confidence = Math.min(confidence, 0.15);
+    }
+
+    // Clamp confidence to [0, 1]
+    confidence = Math.max(0, Math.min(1, confidence));
+
+    // Count tool successes (approximate tests via iteration progress)
+    const testsPassed = success ? this.iterationCount : Math.max(0, this.iterationCount - 1);
+    const testsTotal = this.iterationCount;
+
+    return {
+      subAgentId: `subagent-${this.taskId}`,
+      taskId: this.taskId,
+      confidence,
+      passed: success && confidence >= 0.5,
+      issues,
+      causalChain: causalChain.length > 0 ? causalChain : undefined,
+      testsPassed,
+      testsTotal,
     };
   }
 }

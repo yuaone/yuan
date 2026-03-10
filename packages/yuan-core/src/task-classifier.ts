@@ -18,6 +18,12 @@ export enum TaskType {
   SEARCH = "search",
   CONFIG = "config",
   DEPLOY = "deploy",
+  DESIGN = "design",
+  SECURITY = "security",
+  INFRA = "infra",
+  PERFORMANCE = "performance",
+  MIGRATION = "migration",
+  DOCUMENTATION = "documentation",
 }
 
 // ─── Classification Result ───
@@ -36,6 +42,10 @@ export interface TaskClassification {
   estimatedComplexity: "trivial" | "simple" | "moderate" | "complex";
   /** grep/glob에 사용할 검색 패턴 */
   searchPatterns?: string[];
+  /** Recommended specialist agent domain */
+  specialistDomain?: string;
+  /** Recommended plugin skills to activate */
+  recommendedSkills?: string[];
 }
 
 // ─── Keyword Patterns ───
@@ -124,6 +134,69 @@ const KEYWORD_RULES: KeywordRule[] = [
     ],
     weight: 0.9,
   },
+  {
+    type: TaskType.DESIGN,
+    keywords: [
+      "디자인", "design", "UI", "UX", "레이아웃", "layout",
+      "스타일", "style", "CSS", "tailwind", "컴포넌트 설계",
+      "mockup", "와이어프레임", "wireframe", "figma", "프로토타입",
+      "responsive", "반응형", "theme", "테마", "색상", "color",
+    ],
+    weight: 0.9,
+  },
+  {
+    type: TaskType.SECURITY,
+    keywords: [
+      "보안", "security", "취약점", "vulnerability", "XSS", "CSRF",
+      "인증", "auth", "authentication", "authorization", "권한",
+      "injection", "인젝션", "OWASP", "시크릿", "secret", "토큰",
+      "token", "암호화", "encrypt", "SSL", "TLS", "CVE",
+      "dependency audit", "의존성 감사",
+    ],
+    weight: 1.0,
+  },
+  {
+    type: TaskType.INFRA,
+    keywords: [
+      "인프라", "infra", "infrastructure", "서버", "server",
+      "kubernetes", "k8s", "terraform", "AWS", "GCP", "Azure",
+      "nginx", "로드밸런서", "load balancer", "CDN", "DNS",
+      "모니터링", "monitoring", "alerting", "logging",
+      "스케일링", "scaling", "클라우드", "cloud",
+    ],
+    weight: 0.9,
+  },
+  {
+    type: TaskType.PERFORMANCE,
+    keywords: [
+      "성능", "performance", "최적화", "optimize", "느림", "slow",
+      "메모리", "memory", "leak", "누수", "프로파일", "profile",
+      "번들", "bundle", "lazy", "캐시", "cache", "caching",
+      "렌더링", "rendering", "FPS", "latency", "지연",
+      "throughput", "처리량", "bottleneck", "병목",
+    ],
+    weight: 1.0,
+  },
+  {
+    type: TaskType.MIGRATION,
+    keywords: [
+      "마이그레이션", "migration", "업그레이드", "upgrade",
+      "버전", "version", "이전", "migrate", "포팅", "port",
+      "전환", "transition", "호환", "compatibility", "breaking change",
+      "deprecated", "레거시", "legacy", "스키마 변경", "schema change",
+    ],
+    weight: 1.0,
+  },
+  {
+    type: TaskType.DOCUMENTATION,
+    keywords: [
+      "문서", "documentation", "docs", "README", "JSDoc", "TSDoc",
+      "주석", "comment", "가이드", "guide", "API 문서", "API docs",
+      "changelog", "변경 이력", "wiki", "튜토리얼", "tutorial",
+      "사용법", "usage", "예제", "example",
+    ],
+    weight: 0.8,
+  },
 ];
 
 // ─── Tool Sequence Mappings ───
@@ -137,6 +210,12 @@ const TOOL_SEQUENCES: Record<TaskType, string[]> = {
   [TaskType.SEARCH]: ["grep", "glob", "file_read", "code_search"],
   [TaskType.CONFIG]: ["file_read", "file_edit", "shell_exec"],
   [TaskType.DEPLOY]: ["git_ops", "shell_exec", "test_run"],
+  [TaskType.DESIGN]: ["glob", "file_read", "file_write", "file_edit", "shell_exec"],
+  [TaskType.SECURITY]: ["grep", "file_read", "shell_exec", "file_edit", "test_run"],
+  [TaskType.INFRA]: ["file_read", "file_edit", "shell_exec", "git_ops"],
+  [TaskType.PERFORMANCE]: ["grep", "file_read", "shell_exec", "file_edit", "test_run"],
+  [TaskType.MIGRATION]: ["grep", "file_read", "file_edit", "file_write", "shell_exec", "test_run"],
+  [TaskType.DOCUMENTATION]: ["grep", "file_read", "file_write", "file_edit"],
 };
 
 // ─── Complexity Patterns ───
@@ -273,6 +352,12 @@ Task types:
 - search: Find files, code patterns, or specific implementations
 - config: Modify configuration files, environment settings
 - deploy: Build, release, deploy, CI/CD operations
+- design: UI/UX design, styling, layout, responsive design, theming
+- security: Security audits, vulnerability fixes, auth, secrets management
+- infra: Infrastructure, DevOps, cloud, Docker, Kubernetes, CI/CD pipelines
+- performance: Performance optimization, profiling, caching, bundle optimization
+- migration: Version upgrades, schema changes, codebase migration, legacy porting
+- documentation: Documentation, README, API docs, changelogs, guides
 
 Respond with ONLY a JSON object (no markdown, no explanation):
 {
@@ -365,7 +450,7 @@ export class TaskClassifier {
     // Get tool sequence
     const toolSequence = this.getToolSequence(bestType);
 
-    return {
+    const classification: TaskClassification = {
       type: bestType,
       confidence,
       toolSequence,
@@ -373,6 +458,19 @@ export class TaskClassifier {
       estimatedComplexity,
       ...(searchPatterns.length > 0 ? { searchPatterns } : {}),
     };
+
+    // Populate specialist routing fields
+    const specialistDomain = this.routeToSpecialist(classification);
+    if (specialistDomain) {
+      classification.specialistDomain = specialistDomain;
+    }
+
+    const recommendedSkills = this.getRecommendedSkills(bestType);
+    if (recommendedSkills.length > 0) {
+      classification.recommendedSkills = recommendedSkills;
+    }
+
+    return classification;
   }
 
   /**
@@ -476,8 +574,69 @@ export class TaskClassifier {
       }
     }
 
+    if (classification.specialistDomain) {
+      lines.push(``, `Specialist Domain: ${classification.specialistDomain}`);
+    }
+
+    if (classification.recommendedSkills && classification.recommendedSkills.length > 0) {
+      lines.push(``, `Recommended Skills:`);
+      for (const skill of classification.recommendedSkills) {
+        lines.push(`  - ${skill}`);
+      }
+    }
+
     lines.push(`</task-classification>`);
     return lines.join("\n");
+  }
+
+  // ─── Specialist Routing ───
+
+  /**
+   * Route classification to specialist domain.
+   *
+   * @param classification - 태스크 분류 결과
+   * @returns 전문가 도메인 ID 또는 null (전문가 불필요 시)
+   */
+  routeToSpecialist(classification: TaskClassification): string | null {
+    const SPECIALIST_MAP: Record<TaskType, string | null> = {
+      [TaskType.DEBUG]: "typescript-specialist",
+      [TaskType.FEATURE]: "typescript-specialist",
+      [TaskType.REFACTOR]: "typescript-specialist",
+      [TaskType.TEST]: "testing-specialist",
+      [TaskType.SECURITY]: "security-specialist",
+      [TaskType.DESIGN]: null,  // no specialist — use generalist
+      [TaskType.INFRA]: "infra-specialist",
+      [TaskType.PERFORMANCE]: "performance-specialist",
+      [TaskType.MIGRATION]: "database-specialist",
+      [TaskType.EXPLAIN]: null,  // no specialist needed
+      [TaskType.SEARCH]: null,
+      [TaskType.CONFIG]: null,
+      [TaskType.DEPLOY]: "infra-specialist",
+      [TaskType.DOCUMENTATION]: null,
+    };
+
+    if (classification.confidence < 0.7) return null;
+    return SPECIALIST_MAP[classification.type] ?? null;
+  }
+
+  /**
+   * Get recommended plugin skills for a task type.
+   *
+   * @param type - 태스크 유형
+   * @returns 활성화 추천 스킬 목록
+   */
+  getRecommendedSkills(type: TaskType): string[] {
+    const SKILL_MAP: Partial<Record<TaskType, string[]>> = {
+      [TaskType.DEBUG]: ["error-analysis", "log-search", "stack-trace-parser"],
+      [TaskType.TEST]: ["test-generator", "coverage-analysis", "mock-generator"],
+      [TaskType.SECURITY]: ["vulnerability-scan", "secret-detection", "dependency-audit"],
+      [TaskType.PERFORMANCE]: ["profiler", "bundle-analyzer", "cache-advisor"],
+      [TaskType.MIGRATION]: ["version-check", "breaking-change-detector", "codemods"],
+      [TaskType.INFRA]: ["docker-lint", "terraform-validate", "cloud-cost-estimate"],
+      [TaskType.DESIGN]: ["style-lint", "accessibility-check", "responsive-audit"],
+    };
+
+    return SKILL_MAP[type] ?? [];
   }
 
   // ─── Private Helpers ───
@@ -625,6 +784,30 @@ export class TaskClassifier {
         if (hints.length === 0) {
           hints.push("Map the dependency graph of affected files before refactoring");
         }
+        break;
+      case TaskType.DESIGN:
+        hints.push("Scan existing styles, themes, and design tokens");
+        hints.push("Check for responsive breakpoints and accessibility patterns");
+        break;
+      case TaskType.SECURITY:
+        hints.push("Run dependency audit (npm audit / pnpm audit)");
+        hints.push("Check for hardcoded secrets and env variable handling");
+        break;
+      case TaskType.INFRA:
+        hints.push("Review existing Dockerfile, CI config, and deployment scripts");
+        hints.push("Check environment variable requirements");
+        break;
+      case TaskType.PERFORMANCE:
+        hints.push("Profile before optimizing — measure, don't guess");
+        hints.push("Check bundle size and lazy loading opportunities");
+        break;
+      case TaskType.MIGRATION:
+        hints.push("Identify all breaking changes before migrating");
+        hints.push("Check dependency compatibility matrix");
+        break;
+      case TaskType.DOCUMENTATION:
+        hints.push("Scan existing docs for structure and style conventions");
+        hints.push("Check for undocumented public APIs and exports");
         break;
     }
 
