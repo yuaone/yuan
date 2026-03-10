@@ -19,6 +19,11 @@ export interface MessageBubbleProps {
   isLatest?: boolean;
 }
 
+function truncateArgs(args: string | undefined, maxLen: number): string {
+  if (!args) return "";
+  return args.length > maxLen ? args.slice(0, maxLen) + "…" : args;
+}
+
 function ToolCallLine({ tc, isLast }: { tc: TUIToolCall; isLast: boolean }): React.JSX.Element {
   const connector = isLast ? TOKENS.tree.last : TOKENS.tree.branch;
   const icon =
@@ -30,17 +35,24 @@ function ToolCallLine({ tc, isLast }: { tc: TUIToolCall; isLast: boolean }): Rea
     tc.status === "error" ? "red" :
     undefined;
   const duration = tc.duration != null ? ` (${tc.duration.toFixed(1)}s)` : "";
+  const argsTruncated = truncateArgs(tc.argsSummary, 40);
 
   return (
     <Box paddingLeft={2}>
-      <Text dimColor>{connector} </Text>
       {tc.status === "running" ? (
-        <Spinner label={tc.toolName} />
+        <>
+          <Text dimColor>{TOKENS.brand.prefix} </Text>
+          <Text bold>{tc.toolName}</Text>
+          {argsTruncated ? <Text dimColor>({argsTruncated})</Text> : null}
+          <Text> </Text>
+          <Spinner />
+        </>
       ) : (
         <>
+          <Text dimColor>{connector} </Text>
           <Text color={iconColor}>{icon}</Text>
-          <Text dimColor> {tc.toolName}</Text>
-          <Text dimColor>  {tc.argsSummary}</Text>
+          <Text color="white"> {tc.toolName}</Text>
+          {argsTruncated ? <Text dimColor>  {argsTruncated}</Text> : null}
           <Text dimColor>{duration}</Text>
         </>
       )}
@@ -56,18 +68,33 @@ export function MessageBubble({
   const msg = message;
 
   switch (msg.role) {
-    case "user":
+    case "user": {
+      // Wrap long text into lines, pad each line to same width for uniform bg
+      const maxContentWidth = width - 4; // 2 padding each side
+      const lines: string[] = [];
+      const words = msg.content.split(" ");
+      let currentLine = "";
+      for (const word of words) {
+        if (currentLine.length + word.length + 1 > maxContentWidth) {
+          if (currentLine) lines.push(currentLine);
+          currentLine = word;
+        } else {
+          currentLine = currentLine ? currentLine + " " + word : word;
+        }
+      }
+      if (currentLine) lines.push(currentLine);
+      // Find the longest line for uniform padding
+      const longestLine = Math.max(...lines.map((l) => l.length), 1);
+      const paddedLines = lines.map((l) => ` ${l.padEnd(longestLine)} `);
+
       return (
-        <Box flexDirection="row" marginBottom={1}>
-          <Text color="white" bold>{TOKENS.box.vertical}</Text>
-          <Box flexDirection="column" paddingLeft={1}>
-            <Text bold color="white">
-              {TOKENS.brand.userPrefix} you
-            </Text>
-            <Text>{msg.content}</Text>
-          </Box>
+        <Box flexDirection="column" marginBottom={1}>
+          {paddedLines.map((line, i) => (
+            <Text key={i} backgroundColor="#2a2a2a" color="white">{line}</Text>
+          ))}
         </Box>
       );
+    }
 
     case "assistant":
       return (
@@ -76,23 +103,24 @@ export function MessageBubble({
             {msg.isStreaming ? (
               <Spinner label={TOKENS.brand.name} />
             ) : (
-              <Text bold color="white">
-                {TOKENS.brand.prefix} {TOKENS.brand.name}
-              </Text>
+              <>
+                <Text dimColor>{TOKENS.brand.prefix}</Text>
+                <Text bold color="white"> {TOKENS.brand.name}</Text>
+              </>
             )}
           </Box>
           {msg.content && (
-            <Box paddingLeft={2}>
-              <MarkdownRenderer content={msg.content} width={width - 4} />
+            <Box paddingLeft={3} marginTop={0}>
+              <MarkdownRenderer content={msg.content} width={width - 6} />
             </Box>
           )}
           {msg.isStreaming && isLatest && (
-            <Box paddingLeft={2}>
+            <Box paddingLeft={3}>
               <Text dimColor>█</Text>
             </Box>
           )}
           {msg.toolCalls && msg.toolCalls.length > 0 && (
-            <Box flexDirection="column">
+            <Box flexDirection="column" marginTop={0}>
               {msg.toolCalls.map((tc, i) => (
                 <ToolCallLine
                   key={tc.id}

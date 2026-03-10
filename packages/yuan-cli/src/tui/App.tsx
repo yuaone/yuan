@@ -10,20 +10,22 @@
  *   FooterBar  (1 row)
  */
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { render, Box, useApp, useInput } from "ink";
 import { enterTUI, exitTUI } from "./lib/ansi.js";
 import { useTerminalSize } from "./hooks/useTerminalSize.js";
 import { useAgentStream } from "./hooks/useAgentStream.js";
 import { useKeyHandler } from "./hooks/useKeyHandler.js";
 import { StatusBar } from "./components/StatusBar.js";
+import { WelcomeBanner } from "./components/WelcomeBanner.js";
 import { MessageList } from "./components/MessageList.js";
 import { InputBox } from "./components/InputBox.js";
 import { FooterBar } from "./components/FooterBar.js";
 import { SlashMenu } from "./components/SlashMenu.js";
+import { ApprovalPrompt, type ApprovalChoice } from "./components/ApprovalPrompt.js";
 import { useSlashCommands } from "./hooks/useSlashCommands.js";
 import { AgentBridge } from "./agent-bridge.js";
-import type { AgentEvent } from "@yuaone/core";
+import type { AgentEvent, ApprovalResponse } from "@yuaone/core";
 import { checkForUpdate, loadSettings, saveSettings } from "./lib/update-checker.js";
 import { executeCommand, type CommandContext } from "../commands/index.js";
 
@@ -54,6 +56,11 @@ function App({
 
   const [tokensPerSec, setTokensPerSec] = useState<number | undefined>();
 
+  // Approval state — bridges Promise-based callback to React state
+  const approvalResolverRef = useRef<((response: ApprovalResponse) => void) | null>(null);
+  const [approvalToolName, setApprovalToolName] = useState<string | null>(null);
+  const [approvalToolArgs, setApprovalToolArgs] = useState<string | null>(null);
+
   // Slash command state
   const [slashState, slashActions] = useSlashCommands();
 
@@ -71,6 +78,31 @@ function App({
 
     bridge.onTermination(() => {
       // useAgentStream handles this via agent:completed event
+    });
+
+    // Wire approval callback — when the agent needs approval, set React state
+    // and return a Promise that resolves when the user selects an option.
+    bridge.onApproval(async (request) => {
+      // Summarize args for display
+      const argsSummary = request.arguments
+        ? (request.arguments.path as string) ||
+          (request.arguments.file_path as string) ||
+          (request.arguments.command as string)?.slice(0, 60) ||
+          ""
+        : "";
+
+      setApprovalToolName(request.toolName);
+      setApprovalToolArgs(argsSummary || null);
+
+      // Emit approval_needed event to update useAgentStream status
+      handleEventRef.current({
+        kind: "agent:approval_needed",
+        action: { tool: request.toolName, input: request.arguments },
+      });
+
+      return new Promise<ApprovalResponse>((resolve) => {
+        approvalResolverRef.current = resolve;
+      });
     });
   }, [bridge]);
 
@@ -97,6 +129,34 @@ function App({
     bridgeRef.current.interrupt();
     agentStream.interrupt();
   }, [agentStream]);
+
+  // Approval handler — resolves the pending Promise from the bridge callback
+  const handleApproval = useCallback(
+    (choice: ApprovalChoice) => {
+      if (approvalResolverRef.current) {
+        let response: ApprovalResponse;
+        switch (choice) {
+          case "allow":
+            response = "approve";
+            break;
+          case "allow_always":
+            response = "always_approve";
+            break;
+          case "deny":
+            response = "reject";
+            break;
+        }
+        approvalResolverRef.current(response);
+        approvalResolverRef.current = null;
+      }
+      // Clear approval UI state
+      setApprovalToolName(null);
+      setApprovalToolArgs(null);
+      // Reset status back to thinking
+      agentStream.handleEvent({ kind: "agent:thinking", content: "" });
+    },
+    [agentStream],
+  );
 
   // Slash commands — unified dispatcher
   const handleSlashCommand = useCallback(
@@ -231,16 +291,27 @@ function App({
 
   const st = agentStream.state.status;
   const isRunning = st !== "idle" && st !== "completed" && st !== "error" && st !== "interrupted";
+  const isAwaitingApproval = st === "awaiting_approval";
 
   // Calculate how many rows the slash menu takes
-  const slashMenuRows = slashState.isOpen
-    ? Math.min(slashState.filtered.length, 8) + 2  // items + top/bottom border
-    : 0;
+  // items (max 8) + top/bottom border (2) + up/down "more" indicators (0-2)
+  const slashMenuRows = useMemo(() => {
+    if (!slashState.isOpen) return 0;
+    const itemCount = Math.min(slashState.filtered.length, 8);
+    const moreIndicators = slashState.filtered.length > 8 ? 2 : 0; // ↑ more + ↓ more
+    return itemCount + 2 + moreIndicators;
+  }, [slashState.isOpen, slashState.filtered.length]);
 
-  // Content area height = total rows - status(1) - slashMenu(N) - input(1) - footer(1) - padding(2)
-  const contentHeight = Math.max(3, rows - 5 - slashMenuRows);
+  // Content area height = total rows - status(1) - footer(1) - input(1) - slashMenu(N) - padding(1)
+  // Slash menu is BELOW input (Claude Code style), so it still eats from content area
+  const contentHeight = useMemo(() => Math.max(3, rows - 4 - slashMenuRows), [rows, slashMenuRows]);
 
   const messages = agentStream.state.messages;
+  const showBanner = messages.length === 0 && !isRunning;
+
+  // Banner takes ~6 rows (5 lines + 1 margin)
+  const bannerRows = showBanner ? 7 : 0;
+  const messageHeight = Math.max(3, contentHeight - bannerRows);
 
   return (
     <Box flexDirection="column" width={columns} height={rows}>
@@ -253,24 +324,26 @@ function App({
         isRunning={isRunning}
       />
 
-      {/* Message area — shrinks when slash menu opens */}
+      {/* Welcome banner — shown only when no messages, like Claude Code */}
+      {showBanner && <WelcomeBanner version={version} />}
+
+      {/* Message area — shrinks when slash menu opens below input */}
       <MessageList
         messages={messages}
         isThinking={isRunning}
-        maxHeight={contentHeight}
+        maxHeight={showBanner ? messageHeight : contentHeight}
       />
 
-      {/* Slash menu — appears between messages and input, pushes input down */}
-      {slashState.isOpen && (
-        <SlashMenu
-          commands={slashState.filtered}
-          selectedIndex={slashState.selectedIndex}
-          isOpen={slashState.isOpen}
-          width={columns}
+      {/* Approval prompt — shown when agent needs user approval for a tool call */}
+      {isAwaitingApproval && approvalToolName && (
+        <ApprovalPrompt
+          toolName={approvalToolName}
+          toolArgs={approvalToolArgs ?? undefined}
+          onSelect={handleApproval}
         />
       )}
 
-      {/* Status indicator — above input */}
+      {/* Status indicator */}
       <FooterBar agentState={agentStream.state} slashMenuOpen={slashState.isOpen} />
 
       {/* Input */}
@@ -285,6 +358,16 @@ function App({
         onSlashClose={slashActions.close}
         isRunning={isRunning}
       />
+
+      {/* Slash menu — appears BELOW input (Claude Code style) */}
+      {slashState.isOpen && (
+        <SlashMenu
+          commands={slashState.filtered}
+          selectedIndex={slashState.selectedIndex}
+          isOpen={slashState.isOpen}
+          width={columns}
+        />
+      )}
     </Box>
   );
 }

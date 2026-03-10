@@ -5,9 +5,9 @@
 
 export const TOKENS = {
   brand: {
-    prefix: "◆",
+    prefix: "●",
     name: "yuan",
-    prompt: "▸",
+    prompt: ">",
     userPrefix: "●",
   },
 

@@ -60,7 +60,7 @@ export function useAgentStream(): UseAgentStreamReturn {
       if (startTimeRef.current) {
         setElapsedMs(Date.now() - startTimeRef.current);
       }
-    }, 100); // 100ms tick for smooth timer
+    }, 1000); // 1s tick — prevents layout jitter from rapid re-renders
   }, []);
 
   // Stop the timer and freeze elapsed time

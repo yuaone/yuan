@@ -169,9 +169,7 @@ export function InputBox({
   return (
     <Box width={columns} height={1} flexDirection="column" flexShrink={0}>
       <Box>
-        <Text bold color="white">
-          {prompt}{" "}
-        </Text>
+        <Text dimColor>{prompt} </Text>
         {isSlash ? (
           <>
             <Text dimColor={cmdRecognized} color={cmdRecognized ? undefined : "red"}>

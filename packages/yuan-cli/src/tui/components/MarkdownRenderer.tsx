@@ -16,6 +16,14 @@ interface RenderedBlock {
   content: string;
   language?: string;
   level?: number;
+  /** List: whether ordered */
+  listOrdered?: boolean;
+  /** List: order number for ordered lists */
+  listNumber?: string;
+  /** List: text content after marker */
+  listText?: string;
+  /** List: nesting depth (0 = top level) */
+  listDepth?: number;
   /** Table data: rows of cells */
   tableRows?: string[][];
   /** Table column alignments */
@@ -84,9 +92,20 @@ function parseBlocks(content: string): RenderedBlock[] {
       continue;
     }
 
-    // List item
-    if (/^\s*[-*+]\s/.test(line) || /^\s*\d+\.\s/.test(line)) {
-      blocks.push({ type: "list", content: line });
+    // List item (unordered)
+    const ulMatch = line.match(/^(\s*)[-*+]\s(.*)$/);
+    if (ulMatch) {
+      const depth = Math.floor(ulMatch[1].length / 2);
+      blocks.push({ type: "list", content: line, listOrdered: false, listText: ulMatch[2], listDepth: depth });
+      i++;
+      continue;
+    }
+
+    // List item (ordered)
+    const olMatch = line.match(/^(\s*)(\d+)\.\s(.*)$/);
+    if (olMatch) {
+      const depth = Math.floor(olMatch[1].length / 2);
+      blocks.push({ type: "list", content: line, listOrdered: true, listNumber: olMatch[2], listText: olMatch[3], listDepth: depth });
       i++;
       continue;
     }
@@ -167,7 +186,7 @@ function InlineText({ text }: { text: string }): React.JSX.Element {
     } else if (match[3]) {
       parts.push(<Text key={key++} dimColor>{match[3]}</Text>);
     } else if (match[4]) {
-      parts.push(<Text key={key++} color="white"> {match[4]} </Text>);
+      parts.push(<Text key={key++} color="white" backgroundColor="#1a1a1a"> {match[4]} </Text>);
     }
 
     lastIndex = match.index + match[0].length;
@@ -250,14 +269,34 @@ function TableBlock({ rows, aligns, width }: { rows: string[][]; aligns: ("left"
 
 function renderBlock(block: RenderedBlock, idx: number, width: number): React.JSX.Element {
   switch (block.type) {
-    case "header":
-      return (
-        <Box key={idx} marginBottom={0}>
-          <Text bold color="white">
-            {block.content}
-          </Text>
-        </Box>
-      );
+    case "header": {
+      const level = block.level || 1;
+      if (level === 1) {
+        return (
+          <Box key={idx} flexDirection="column" marginBottom={1}>
+            <Text bold color="white">
+              {block.content}
+            </Text>
+          </Box>
+        );
+      } else if (level === 2) {
+        return (
+          <Box key={idx} marginBottom={0}>
+            <Text bold color="white">
+              {block.content}
+            </Text>
+          </Box>
+        );
+      } else {
+        return (
+          <Box key={idx} marginBottom={0}>
+            <Text bold dimColor>
+              {block.content}
+            </Text>
+          </Box>
+        );
+      }
+    }
 
     case "code": {
       const maxW = Math.max(10, width - 6);
@@ -267,8 +306,9 @@ function renderBlock(block: RenderedBlock, idx: number, width: number): React.JS
             <Text dimColor>{block.language}</Text>
           )}
           {block.content.split("\n").map((line, i) => (
-            <Text key={i} dimColor>
-              {"  "}{line.length > maxW ? line.slice(0, maxW - 1) + "…" : line}
+            <Text key={i}>
+              <Text dimColor>{"│ "}</Text>
+              <Text color="white">{line.length > maxW ? line.slice(0, maxW - 1) + "…" : line}</Text>
             </Text>
           ))}
         </Box>
@@ -286,12 +326,29 @@ function renderBlock(block: RenderedBlock, idx: number, width: number): React.JS
         </Box>
       );
 
-    case "list":
-      return (
-        <Box key={idx}>
-          <InlineText text={block.content} />
-        </Box>
-      );
+    case "list": {
+      const depth = block.listDepth || 0;
+      const indent = "  " + "  ".repeat(depth);
+      if (block.listOrdered) {
+        return (
+          <Box key={idx}>
+            <Text>
+              {indent}<Text dimColor>{block.listNumber}.</Text>{" "}
+            </Text>
+            <InlineText text={block.listText || ""} />
+          </Box>
+        );
+      } else {
+        return (
+          <Box key={idx}>
+            <Text>
+              {indent}<Text dimColor>{"─"}</Text>{" "}
+            </Text>
+            <InlineText text={block.listText || ""} />
+          </Box>
+        );
+      }
+    }
 
     case "blank":
       return <Box key={idx} height={1} />;
