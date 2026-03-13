@@ -48,6 +48,22 @@ export interface CommandContext {
   onModelChange?: (model: string) => void;
   /** Callback to change mode at runtime */
   onModeChange?: (mode: string) => void;
+  /** ConfigManager instance (optional — may be undefined in TUI mode) */
+  configManager?: { show(): string; get(): Record<string, unknown> };
+  /** Whether there's a pending approval waiting */
+  hasPendingApproval: boolean;
+  /** Approve the pending tool action */
+  onApprove?: () => void;
+  /** Reject the pending tool action */
+  onReject?: () => void;
+  /** Retry the last user message */
+  onRetry?: () => void;
+  /** Compact/compress context */
+  onCompact?: () => string;
+  /** Remove last changed file from tracking (for undo) */
+  onRemoveLastChangedFile?: () => string | null;
+  /** Set agent mode */
+  onSetMode?: (mode: string) => void;
 }
 
 /** Result of a command execution */
@@ -133,7 +149,18 @@ const status: CommandHandler = (ctx) => {
 };
 
 const config: CommandHandler = (ctx) => {
-  return { output: ctx.config.show() };
+  if (ctx.configManager) {
+    return { output: ctx.configManager.show() };
+  }
+  // Fallback: show what we know from ctx
+  return {
+    output: [
+      "Current configuration:",
+      `  provider: ${ctx.provider}`,
+      `  model:    ${ctx.model}`,
+      `  workDir:  ${ctx.workDir}`,
+    ].join("\n"),
+  };
 };
 
 const session: CommandHandler = (ctx) => {
@@ -198,13 +225,13 @@ const undo: CommandHandler = (ctx) => {
       cwd: ctx.workDir,
       stdio: "pipe",
     });
-    ctx.filesChanged.pop();
+    ctx.onRemoveLastChangedFile?.();
     return { output: `Reverted: ${lastFile}` };
   } catch {
     try {
       const backupPath = `${lastFile}.yuan-backup`;
       fs.renameSync(backupPath, lastFile);
-      ctx.filesChanged.pop();
+      ctx.onRemoveLastChangedFile?.();
       return { output: `Restored from backup: ${lastFile}` };
     } catch {
       return { output: `Cannot undo: ${lastFile} — not in git and no backup found.` };
@@ -212,29 +239,179 @@ const undo: CommandHandler = (ctx) => {
   }
 };
 
+// ─── 2026 Model Catalog ───────────────────────────────────────────────
+interface ModelEntry {
+  id: string;
+  label: string;
+  ctx: string;  // context window
+  note?: string;
+}
+
+const MODEL_CATALOG: Record<string, ModelEntry[]> = {
+  openai: [
+    // GPT-5 series (2026)
+    { id: "gpt-5.4",           label: "GPT-5.4",          ctx: "256K", note: "flagship, computer use" },
+    { id: "gpt-5.4-pro",       label: "GPT-5.4 Pro",      ctx: "256K", note: "most powerful" },
+    { id: "gpt-5.3-codex",     label: "GPT-5.3 Codex",    ctx: "256K", note: "coding specialist" },
+    // GPT-4.1 series
+    { id: "gpt-4.1",           label: "GPT-4.1",          ctx: "1M",   note: "coding+instruction" },
+    { id: "gpt-4.1-mini",      label: "GPT-4.1 Mini",     ctx: "1M",   note: "fast+cheap" },
+    { id: "gpt-4.1-nano",      label: "GPT-4.1 Nano",     ctx: "1M",   note: "fastest" },
+    // GPT-4o series
+    { id: "gpt-4o",            label: "GPT-4o",           ctx: "128K" },
+    { id: "gpt-4o-mini",       label: "GPT-4o Mini",      ctx: "128K", note: "default" },
+    // o-series reasoning
+    { id: "o3-pro",            label: "o3-pro",           ctx: "200K", note: "reasoning, most reliable" },
+    { id: "o3",                label: "o3",               ctx: "200K", note: "reasoning" },
+    { id: "o4-mini",           label: "o4-mini",          ctx: "200K", note: "reasoning fast" },
+  ],
+  anthropic: [
+    // Claude 4.x (2026 — current lineup)
+    { id: "claude-opus-4-6",           label: "Claude Opus 4.6",    ctx: "1M",   note: "flagship, 1M ctx" },
+    { id: "claude-sonnet-4-6",         label: "Claude Sonnet 4.6",  ctx: "1M",   note: "recommended, 1M ctx" },
+    { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5",   ctx: "200K", note: "fast, 3x cheaper" },
+    // Older but still available
+    { id: "claude-opus-4-5",           label: "Claude Opus 4.5",    ctx: "200K" },
+    { id: "claude-sonnet-4-20250514",  label: "Claude Sonnet 4",    ctx: "200K" },
+    { id: "claude-3-7-sonnet-20250219",label: "Claude 3.7 Sonnet",  ctx: "200K", note: "extended thinking" },
+  ],
+  google: [
+    // Gemini 3.1 series (2026 — latest)
+    { id: "gemini-3.1-pro",            label: "Gemini 3.1 Pro",        ctx: "2M",  note: "latest flagship" },
+    { id: "gemini-3.1-flash-lite",     label: "Gemini 3.1 Flash Lite", ctx: "1M",  note: "latest fast" },
+    // Gemini 2.5 series (GA, stable)
+    { id: "gemini-2.5-pro",            label: "Gemini 2.5 Pro",        ctx: "1M",  note: "GA, stable" },
+    { id: "gemini-2.5-flash",          label: "Gemini 2.5 Flash",      ctx: "1M",  note: "GA default" },
+    { id: "gemini-2.5-flash-lite",     label: "Gemini 2.5 Flash Lite", ctx: "1M",  note: "cheapest" },
+  ],
+  yua: [
+    { id: "yua-research",  label: "YUA Research",  ctx: "200K", note: "deep reasoning" },
+    { id: "yua-pro",       label: "YUA Pro",        ctx: "200K", note: "flagship" },
+    { id: "yua-normal",    label: "YUA Normal",     ctx: "128K", note: "default" },
+    { id: "yua-basic",     label: "YUA Basic",      ctx: "32K",  note: "fast+cheap" },
+  ],
+};
+
+/** Resolve env var key for a provider */
+function getEnvKey(provider: string): string {
+  const envMap: Record<string, string> = {
+    openai: process.env["OPENAI_API_KEY"] ?? "",
+    anthropic: process.env["ANTHROPIC_API_KEY"] ?? "",
+    google: process.env["GOOGLE_API_KEY"] ?? process.env["GEMINI_API_KEY"] ?? "",
+    yua: process.env["YUA_API_KEY"] ?? "",
+  };
+  return envMap[provider] ?? "";
+}
+
 const model: CommandHandler = (ctx, args) => {
+  const configManager = ctx.configManager as unknown as {
+    getKey?: (p: string) => string;
+    getAvailableProviders?: () => string[];
+    get?: () => { provider: string };
+  } | undefined;
+
+  // Build available provider info
+  const activeProvider = configManager?.get?.()?.provider ?? ctx.provider;
+  const getKey = (p: string): string => {
+    const fromManager = configManager?.getKey?.(p as never);
+    if (fromManager) return fromManager;
+    return getEnvKey(p);
+  };
+
   if (args.length === 0) {
-    const validModels = [
-      "YUA:     yua-basic, yua-normal, yua-pro, yua-research",
-      "OpenAI:  gpt-4o-mini, gpt-4o, gpt-4.1-mini",
-      "Claude:  claude-sonnet-4-20250514, claude-haiku-4-5-20251001",
+    // Show full model table
+    const lines: string[] = [
+      `Current: ${ctx.model} (provider: ${activeProvider})`,
+      "",
+      "Available models by provider:",
+      "",
     ];
-    return {
-      output: [
-        `Current model: ${ctx.model}`,
-        "",
-        "Available models:",
-        ...validModels.map(m => `  ${m}`),
-        "",
-        "Usage: /model <name>",
-      ].join("\n"),
-    };
+
+    const PROVIDERS = ["openai", "anthropic", "google", "yua"] as const;
+    for (const p of PROVIDERS) {
+      const key = getKey(p);
+      const hasKey = key.length > 0;
+      const isActive = p === activeProvider;
+      const keySource = configManager?.getKey?.(p) ? "config" : (getEnvKey(p) ? "env" : "");
+      const badge = hasKey
+        ? `✓ key:${keySource || "?"}`
+        : "✗ no key";
+      const activeMark = isActive ? " ◀ active" : "";
+
+      lines.push(`  ┌─ ${p.toUpperCase()} [${badge}]${activeMark}`);
+
+      const entries = MODEL_CATALOG[p] ?? [];
+      entries.forEach((m, i) => {
+        const isLast = i === entries.length - 1;
+        const prefix = isLast ? "  └──" : "  ├──";
+        const isCurrent = m.id === ctx.model;
+        const noteStr = m.note ? ` (${m.note})` : "";
+        const currentMark = isCurrent ? " ●" : "";
+        const dimMark = !hasKey ? " [need key]" : "";
+        lines.push(`${prefix} ${m.id.padEnd(40)} ${m.ctx}${noteStr}${currentMark}${dimMark}`);
+      });
+      lines.push("");
+    }
+
+    lines.push("Usage:");
+    lines.push("  /model <model-id>                   — switch model (same provider)");
+    lines.push("  /model <provider>/<model-id>        — switch provider + model");
+    lines.push("  /model setkey <provider> <key>      — store API key for provider");
+    lines.push("");
+    lines.push("Env vars: OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, YUA_API_KEY");
+
+    return { output: lines.join("\n") };
   }
 
-  const newModel = args[0];
+  // /model setkey <provider> <key>
+  if (args[0] === "setkey" && args.length >= 3) {
+    const p = args[1] as string;
+    const k = args[2] as string;
+    const validProviders = ["openai", "anthropic", "google", "yua"];
+    if (!validProviders.includes(p)) {
+      return { output: `Unknown provider: ${p}. Valid: ${validProviders.join(", ")}` };
+    }
+    if ((configManager as unknown as { setProviderKey?: (p: string, k: string) => void })?.setProviderKey) {
+      (configManager as unknown as { setProviderKey: (p: string, k: string) => void }).setProviderKey(p, k);
+      const masked = k.slice(0, 6) + "..." + k.slice(-4);
+      return { output: `Saved ${p} key: ${masked}` };
+    }
+    return { output: "Key storage not available in this mode. Set env var instead." };
+  }
+
+  // /model <provider>/<model-id> or /model <model-id>
+  const modelArg = args[0] ?? "";
+  let newProvider: string | undefined;
+  let newModel: string;
+
+  if (modelArg.includes("/")) {
+    const [pPart, ...mParts] = modelArg.split("/");
+    newProvider = pPart;
+    newModel = mParts.join("/");
+  } else {
+    newModel = modelArg;
+  }
+
+  // Validate model exists in catalog
+  const targetProvider = newProvider ?? activeProvider;
+  const catalogEntries = MODEL_CATALOG[targetProvider] ?? [];
+  const found = catalogEntries.find((m) => m.id === newModel);
+
+  if (!found && catalogEntries.length > 0) {
+    // Warn but allow (user may use a new model we don't know about yet)
+    if (ctx.onModelChange) {
+      if (newProvider && newProvider !== activeProvider) {
+        ctx.onModeChange?.(newProvider); // reuse onModeChange to signal provider change
+      }
+      ctx.onModelChange(newModel);
+      return { output: `⚠ Model "${newModel}" not in 2026 catalog — using anyway.\nModel set to: ${newModel}` };
+    }
+  }
+
   if (ctx.onModelChange) {
     ctx.onModelChange(newModel);
-    return { output: `Model changed to: ${newModel}` };
+    const noteStr = found?.note ? ` (${found.note})` : "";
+    return { output: `Model → ${newModel}${noteStr}` };
   }
   return { output: "Model change not supported in this mode." };
 };
@@ -271,6 +448,7 @@ const mode: CommandHandler = (ctx, args) => {
   }
   if (ctx.onModeChange) {
     ctx.onModeChange(newMode);
+    ctx.onSetMode?.(newMode);
     return { output: `Mode changed to: ${newMode}` };
   }
   return { output: "Mode change not supported in this mode." };
@@ -323,16 +501,28 @@ const cost: CommandHandler = (ctx) => {
   };
 };
 
-const compact: CommandHandler = () => {
-  return { output: "Context compression triggered. (Handled by ContextManager at next iteration)" };
+const compact: CommandHandler = (ctx) => {
+  if (ctx.onCompact) {
+    const result = ctx.onCompact();
+    return { output: result };
+  }
+  return { output: "Context compression will trigger automatically when context usage reaches 60%." };
 };
 
-const approve: CommandHandler = () => {
-  return { output: "No pending approval requests." };
+const approve: CommandHandler = (ctx) => {
+  if (!ctx.hasPendingApproval) {
+    return { output: "No pending approval requests." };
+  }
+  ctx.onApprove?.();
+  return { output: "Approved." };
 };
 
-const reject: CommandHandler = () => {
-  return { output: "No pending approval requests." };
+const reject: CommandHandler = (ctx) => {
+  if (!ctx.hasPendingApproval) {
+    return { output: "No pending approval requests." };
+  }
+  ctx.onReject?.();
+  return { output: "Rejected." };
 };
 
 /* ──────────────────────────────────────────
@@ -378,8 +568,12 @@ const memory: CommandHandler = (ctx) => {
   return { output: "No YUAN.md found in project. Agent learnings will be stored here." };
 };
 
-const retry: CommandHandler = () => {
-  return { output: "No failed actions to retry." };
+const retry: CommandHandler = (ctx) => {
+  if (ctx.onRetry) {
+    ctx.onRetry();
+    return { output: "Retrying last message..." };
+  }
+  return { output: "No message to retry." };
 };
 
 /* ──────────────────────────────────────────

@@ -27,6 +27,7 @@ import { AgentBridge } from "./agent-bridge.js";
 import type { AgentEvent, ApprovalResponse } from "@yuaone/core";
 import { checkForUpdate, loadSettings, saveSettings } from "./lib/update-checker.js";
 import { executeCommand, type CommandContext } from "../commands/index.js";
+import type { ConfigManager } from "../config.js";
 
 export interface AppProps {
   version: string;
@@ -34,6 +35,7 @@ export interface AppProps {
   provider: string;
   bridge: AgentBridge;
   onExit?: () => void;
+  configManager?: ConfigManager;
 }
 
 function App({
@@ -42,6 +44,7 @@ function App({
   provider,
   bridge,
   onExit,
+  configManager,
 }: AppProps): React.JSX.Element {
   const [currentModel, setCurrentModel] = useState(model);
   const { exit } = useApp();
@@ -55,6 +58,8 @@ function App({
   handleEventRef.current = agentStream.handleEvent;
 
   const [tokensPerSec, setTokensPerSec] = useState<number | undefined>();
+
+  const lastMessageRef = useRef<string>("");
 
   // Approval state — bridges Promise-based callback to React state
   const approvalResolverRef = useRef<((response: ApprovalResponse) => void) | null>(null);
@@ -116,6 +121,7 @@ function App({
       agentStream.startAgent();
       setTokensPerSec(undefined);
 
+      lastMessageRef.current = value;
       bridgeRef.current.sendMessage(value).catch((err: Error) => {
         agentStream.handleEvent({
           kind: "agent:error",
@@ -168,12 +174,14 @@ function App({
 
       const ctx: CommandContext = {
         output: (msg) => agentStream.addSystemMessage(msg),
-        config: undefined as any, // ConfigManager not available in TUI — commands that need it will use fallback
+        config: undefined as any,
+        configManager: configManager as any,
         version,
         provider,
         model,
         workDir: process.cwd(),
         filesChanged: bridgeRef.current.filesChanged,
+        hasPendingApproval: !!approvalResolverRef.current,
         agentInfo: {
           status: agentStream.state.status,
           messageCount: agentStream.state.messages.length,
@@ -186,11 +194,38 @@ function App({
         },
         onModelChange: (newModel) => {
           setCurrentModel(newModel);
-          agentStream.addSystemMessage(`Model changed to: ${newModel} (takes effect on next message)`);
+          // Wire into bridge so next message uses the new model
+          bridgeRef.current.updateModel(bridgeRef.current.activeProvider, newModel);
+          agentStream.addSystemMessage(`Model → ${newModel}`);
         },
         onModeChange: (newMode) => {
           agentStream.addSystemMessage(`Mode changed to: ${newMode} (takes effect on next message)`);
         },
+        onApprove: () => {
+          if (approvalResolverRef.current) {
+            approvalResolverRef.current("approve");
+            approvalResolverRef.current = null;
+            setApprovalToolName(null);
+            setApprovalToolArgs(null);
+          }
+        },
+        onReject: () => {
+          if (approvalResolverRef.current) {
+            approvalResolverRef.current("reject");
+            approvalResolverRef.current = null;
+            setApprovalToolName(null);
+            setApprovalToolArgs(null);
+          }
+        },
+        onRetry: () => {
+          const last = lastMessageRef.current;
+          if (last) {
+            bridgeRef.current.sendMessage(last).catch(() => {});
+          }
+        },
+        onCompact: () => bridgeRef.current.compact(),
+        onRemoveLastChangedFile: () => bridgeRef.current.removeLastChangedFile(),
+        onSetMode: (mode) => bridgeRef.current.setMode(mode),
       };
 
       const result = executeCommand(ctx, cmd);
@@ -205,6 +240,7 @@ function App({
       }
       if (result.clear) {
         agentStream.clearMessages();
+        bridge.resetSession(); // Reset conversation history too
         return;
       }
       if (result.output) {

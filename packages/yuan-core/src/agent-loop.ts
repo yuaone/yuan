@@ -164,6 +164,9 @@ export interface AgentLoopOptions {
  * const result = await loop.run("모든 console.log를 제거해줘");
  * ```
  */
+/** Minimum confidence for classification-based hints/routing to activate */
+const CLASSIFICATION_CONFIDENCE_THRESHOLD = 0.6;
+
 export class AgentLoop extends EventEmitter {
   private readonly abortSignal?: AbortSignal;
   private readonly llmClient: BYOKClient;
@@ -605,7 +608,7 @@ async restoreSession(data: SessionData): Promise<void> {
       const learnedSkills = this.skillLearner.getAllSkills();
       if (learnedSkills.length > 0) {
         const skillNames = learnedSkills
-          .filter((s) => s.confidence >= 0.3)
+          .filter((s) => s.confidence >= CLASSIFICATION_CONFIDENCE_THRESHOLD)
           .map((s) => s.id);
         if (skillNames.length > 0) {
           this.contextManager.addMessage({
@@ -749,7 +752,7 @@ async restoreSession(data: SessionData): Promise<void> {
     const parts: string[] = [];
 
     // 높은 confidence 학습만 포함
-    const highConfLearnings = memory.learnings.filter((l) => l.confidence >= 0.3);
+    const highConfLearnings = memory.learnings.filter((l) => l.confidence >= CLASSIFICATION_CONFIDENCE_THRESHOLD);
     if (highConfLearnings.length > 0) {
       parts.push("## Things I've Learned About This Project");
       for (const l of highConfLearnings.slice(0, 20)) {
@@ -786,6 +789,8 @@ async restoreSession(data: SessionData): Promise<void> {
     this.aborted = false;
     this.reasoningAggregator.reset();
     this.reasoningTree.reset();
+    // Capture before reset so session snapshot gets accurate file list
+    const prevChangedFiles = [...this.changedFiles];
     if (!this.resumedFromSession) {
       this.changedFiles = [];
       this.allToolResults = [];
@@ -840,7 +845,7 @@ this.checkpointSaved = false;
       snapshot,
       messages: this.contextManager.getMessages(),
       plan: this.activePlan,
-      changedFiles: this.changedFiles,
+      changedFiles: prevChangedFiles,
     });
   }
     // 사용자 입력 검증 (prompt injection 방어)
@@ -885,7 +890,7 @@ this.checkpointSaved = false;
 
       // Task 분류 → 시스템 프롬프트에 tool sequence hint 주입
       const classification = this.taskClassifier.classify(userMessage);
-      if (classification.confidence >= 0.3) {
+      if (classification.confidence >= CLASSIFICATION_CONFIDENCE_THRESHOLD) {
         const classificationHint = this.taskClassifier.formatForSystemPrompt(classification);
         this.contextManager.addMessage({
           role: "system",
@@ -898,7 +903,7 @@ this.checkpointSaved = false;
         const specialistMatch = this.specialistRegistry.findSpecialist(
           classification.specialistDomain,
         );
-        if (specialistMatch && specialistMatch.confidence >= 0.5) {
+        if (specialistMatch && specialistMatch.confidence >= CLASSIFICATION_CONFIDENCE_THRESHOLD) {
           this.contextManager.addMessage({
             role: "system",
             content: `[Specialist: ${specialistMatch.specialist.name}] ${specialistMatch.specialist.systemPrompt.slice(0, 500)}`,
@@ -907,7 +912,7 @@ this.checkpointSaved = false;
       }
 
       // Tool Planning: 태스크 타입에 맞는 도구 실행 계획 힌트 주입
-      if (this.enableToolPlanning && classification.confidence >= 0.3) {
+      if (this.enableToolPlanning && classification.confidence >= CLASSIFICATION_CONFIDENCE_THRESHOLD) {
         const planContext: PlanContext = {
           userMessage,
         };
@@ -916,7 +921,7 @@ this.checkpointSaved = false;
           planContext,
         );
         this.executedToolNames = [];
-        if (this.currentToolPlan.confidence >= 0.5) {
+        if (this.currentToolPlan.confidence >= CLASSIFICATION_CONFIDENCE_THRESHOLD) {
           const planHint = this.toolPlanner.formatPlanHint(this.currentToolPlan);
           this.contextManager.addMessage({
             role: "system",
@@ -1075,6 +1080,17 @@ this.checkpointSaved = false;
       return result;
       
     } catch (err) {
+      // Attempt recovery from last checkpoint via ContinuationEngine
+      if (this.continuationEngine) {
+        try {
+          const recovered = await this.continuationEngine.findLatestCheckpoint();
+          if (recovered) {
+            this.emitReasoning(`recovered from checkpoint at iteration ${recovered.iterationsCompleted ?? "unknown"}`);
+          }
+        } catch {
+          // Recovery failure is non-fatal
+        }
+      }
       return this.handleFatalError(err);
     }
   }
@@ -1650,7 +1666,22 @@ let iteration = this.iterationCount;
       this.iterationCount = iteration;
       const iterationStart = Date.now();
       this.emitReasoning(`iteration ${iteration}: preparing context`);
-      this.iterationSystemMsgCount = 0; // Reset per-iteration system message counter
+      this.iterationSystemMsgCount = 0; // Reset per-iteration (prevents accumulation across iterations)
+
+      // Policy validation — check cost limits from ExecutionPolicyEngine
+      if (this.policyEngine) {
+        try {
+          const costPolicy = this.policyEngine.get("cost");
+          const iterationTokensUsed = this.tokenUsage.input + this.tokenUsage.output;
+          if (costPolicy.maxTokensPerIteration > 0 && iterationTokensUsed > costPolicy.maxTokensPerIteration) {
+            this.emitReasoning(`policy blocked iteration ${iteration}: token usage ${iterationTokensUsed} exceeds maxTokensPerIteration ${costPolicy.maxTokensPerIteration}`);
+            return { reason: "BUDGET_EXHAUSTED", tokensUsed: iterationTokensUsed };
+          }
+        } catch {
+          // Policy engine failure is non-fatal
+        }
+      }
+
       // Soft context rollover:
       // checkpoint first, then let ContextManager compact instead of aborting/throwing.
       const contextUsageRatio = this.contextManager.getUsageRatio();
@@ -1850,15 +1881,7 @@ let iteration = this.iterationCount;
         // Level 2: Deep verification before declaring completion
         if (this.selfReflection && this.changedFiles.length > 0) {
           try {
-            const changedFilesMap = new Map<string, string>();
-            for (const filePath of this.changedFiles) {
-              const lastWrite = this.allToolResults
-                .filter((r) => r.name === "file_write" || r.name === "file_edit")
-                .find((r) => r.output.includes(filePath));
-              if (lastWrite) {
-                changedFilesMap.set(filePath, lastWrite.output);
-              }
-            }
+            const changedFilesMap = this.buildChangedFilesMap();
 
             const verifyFn = async (prompt: string): Promise<string> => {
               const verifyResponse = await this.llmClient.chat([
@@ -2002,9 +2025,15 @@ let iteration = this.iterationCount;
             const thoroughFailures = thoroughResult.stages
               .flatMap((s) => s.checks)
               .filter((c) => c.status === "fail");
+            const thoroughIssues = thoroughFailures
+              .slice(0, 10)
+              .map((c) => `[${c.severity}] ${c.name}: ${c.message}`);
+            // Emit structured qa_result event for TUI display
             this.emitEvent({
-              kind: "agent:thinking",
-              content: `QA thorough check at completion: ${thoroughResult.overall} (${thoroughFailures.length} failure(s) across ${this.changedFiles.length} file(s)).`,
+              kind: "agent:qa_result",
+              stage: "thorough",
+              passed: thoroughFailures.length === 0,
+              issues: thoroughIssues,
             });
             this.lastQAResult = thoroughResult;
           } catch {
@@ -2113,6 +2142,18 @@ this.emitEvent({
             .flatMap((s) => s.checks)
             .filter((c) => c.status === "fail" || c.status === "warn");
 
+          const qaIssues = failedChecks
+            .slice(0, 10)
+            .map((c) => `[${c.severity}] ${c.name}: ${c.message}`);
+
+          // Emit structured qa_result event for TUI display
+          this.emitEvent({
+            kind: "agent:qa_result",
+            stage: "quick",
+            passed: failedChecks.length === 0,
+            issues: qaIssues,
+          });
+
           if (failedChecks.length > 0 && this.iterationSystemMsgCount < 5) {
             const checkSummary = failedChecks
               .slice(0, 5)
@@ -2123,15 +2164,6 @@ this.emitEvent({
               content: `[QA Quick Check] ${failedChecks.length} issue(s) detected in modified files:\n${checkSummary}`,
             });
             this.iterationSystemMsgCount++;
-            this.emitEvent({
-              kind: "agent:thinking",
-              content: `QA quick check: ${failedChecks.length} issue(s) in ${this.iterationWriteToolPaths.length} file(s).`,
-            });
-          } else if (failedChecks.length === 0) {
-            this.emitEvent({
-              kind: "agent:thinking",
-              content: `QA quick check passed for ${this.iterationWriteToolPaths.length} file(s).`,
-            });
           }
         } catch {
           // QAPipeline failure is non-fatal
@@ -2213,20 +2245,42 @@ if (this.sessionPersistence && this.sessionId) {
 
   await this.sessionPersistence.checkpoint(this.sessionId, checkpoint);
 }
+      // ReflexionEngine: reflect on this iteration's tool results
+      if (this.reflexionEngine && toolResults.length > 0) {
+        try {
+          const iterReflection = this.reflexionEngine.reflect({
+            goal: "",
+            runId: `iter-${iteration}-${randomUUID()}`,
+            termination: { reason: "USER_CANCELLED" },
+            toolResults,
+            messages: this.contextManager.getMessages(),
+            tokensUsed: this.tokenUsage.total,
+            durationMs: Date.now() - iterationStart,
+            changedFiles: this.changedFiles,
+          });
+          // Build insight from available reflection fields
+          const insight =
+            iterReflection.reflection.alternativeApproach ??
+            (iterReflection.reflection.whatFailed.length > 0
+              ? iterReflection.reflection.whatFailed.slice(0, 2).join("; ")
+              : null);
+          if (insight && insight.length > 10 && this.iterationSystemMsgCount < 5) {
+            this.contextManager.addMessage({
+              role: "system",
+              content: `[Reflection] ${insight}`,
+            });
+            this.iterationSystemMsgCount++;
+          }
+        } catch {
+          // Reflection failure is non-fatal
+        }
+      }
+
       // Level 1: Quick verification after every 3rd iteration
       if (this.selfReflection && iteration % 3 === 0) {
         try {
           this.emitSubagent("verifier", "start", "running quick verification");
-          const changedFilesMap = new Map<string, string>();
-          for (const filePath of this.changedFiles) {
-            // Collect changed file contents from tool results
-            const lastWrite = this.allToolResults
-              .filter((r) => r.name === "file_write" || r.name === "file_edit")
-              .find((r) => r.output.includes(filePath));
-            if (lastWrite) {
-              changedFilesMap.set(filePath, lastWrite.output);
-            }
-          }
+          const changedFilesMap = this.buildChangedFilesMap();
 
           const quickResult = await this.selfReflection.quickVerify(
             changedFilesMap,
@@ -2468,6 +2522,28 @@ if (this.sessionPersistence && this.sessionId) {
       ) {
         await this.saveAutoCheckpoint(iteration);
         this.checkpointSaved = true;
+      }
+
+      // ContinuationEngine: checkpoint current state after each iteration (every 3 iterations, non-fatal)
+      if (this.continuationEngine && iteration > 0 && iteration % 3 === 0 && !this.checkpointSaved) {
+        try {
+          const progress = this.extractProgress();
+          await this.continuationEngine.saveCheckpoint({
+            sessionId: this.sessionId ?? `session-${Date.now()}`,
+            goal: this.contextManager.getMessages().find((m) => m.role === "user")?.content as string ?? "",
+            progress,
+            changedFiles: [...this.changedFiles].map((p) => ({ path: p, diff: "" })),
+            workingMemory: this.buildWorkingMemorySummary(),
+            yuanMdUpdates: [],
+            errors: [],
+            contextUsageAtSave: this.config.loop.totalTokenBudget > 0 ? this.tokenUsage.total / this.config.loop.totalTokenBudget : 0,
+            totalTokensUsed: this.tokenUsage.total,
+            iterationsCompleted: iteration,
+            createdAt: new Date(),
+          });
+        } catch {
+          // Checkpoint failure is non-fatal
+        }
       }
 
       // ContinuousReflection: 매 5 iteration마다 비상 체크포인트 트리거
@@ -2832,8 +2908,22 @@ if (this.sessionPersistence && this.sessionId) {
           this.iterationTsFilesModified.push(filePathStr);
         }
         this.emitEvent({ kind: "agent:file_change", path: filePathStr, diff: result.output });
+        // Update world state after file modification
+        if (this.config.loop.projectPath) {
+          const wsProjectPath = this.config.loop.projectPath;
+          new WorldStateCollector({ projectPath: wsProjectPath, skipTest: true })
+            .collect()
+            .then((snapshot) => { this.worldState = snapshot; })
+            .catch(() => {
+              // Non-fatal: world state update failure should not interrupt tool execution
+            });
+        }
         if (this.impactAnalyzer) {
-          this.analyzeFileImpact(filePathStr).catch(() => {});
+          this.analyzeFileImpact(filePathStr).catch((err: unknown) => {
+            // Non-fatal: impact analysis failure should not interrupt tool execution
+            const msg = err instanceof Error ? err.message : String(err);
+            console.warn(`[AgentLoop] impact analysis skipped for ${filePathStr}: ${msg}`);
+          });
         }
       }
 
@@ -3513,6 +3603,23 @@ if (this.sessionPersistence && this.sessionId) {
   }
 
   // ─── Helpers ───
+
+  /**
+   * Builds a Map<filePath, toolOutput> for all changed files from write/edit tool results.
+   * Used by selfReflection deepVerify and quickVerify.
+   */
+  private buildChangedFilesMap(): Map<string, string> {
+    const map = new Map<string, string>();
+    for (const filePath of this.changedFiles) {
+      const lastWrite = this.allToolResults
+        .filter((r) => r.name === "file_write" || r.name === "file_edit")
+        .find((r) => r.output.includes(filePath));
+      if (lastWrite) {
+        map.set(filePath, lastWrite.output);
+      }
+    }
+    return map;
+  }
 
   private emitEvent(event: AgentEvent): void {
     this.emit("event", event);

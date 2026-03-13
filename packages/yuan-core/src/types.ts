@@ -236,7 +236,8 @@ export type AgentEvent =
   | { kind: "agent:approval_needed"; action: PendingAction }
   | { kind: "agent:completed"; summary: string; filesChanged: string[] }
   | { kind: "agent:text_delta"; text: string }
-  | { kind: "agent:token_usage"; input: number; output: number };
+  | { kind: "agent:token_usage"; input: number; output: number }
+  | { kind: "agent:qa_result"; stage: "quick" | "thorough"; passed: boolean; issues: string[] };
 
 // ─── Session ───
 

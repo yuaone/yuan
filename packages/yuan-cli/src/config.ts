@@ -17,6 +17,8 @@ export type Provider = "openai" | "anthropic" | "yua" | "google";
 export interface YuanConfig {
   provider: Provider;
   apiKey: string;
+  /** Multi-provider key storage — keys per provider */
+  apiKeys?: Partial<Record<Provider, string>>;
   model?: string;
   baseUrl?: string;
   theme: "dark" | "light";
@@ -29,7 +31,7 @@ const CONFIG_PATH = path.join(YUAN_DIR, "config.json");
 
 const DEFAULT_MODELS: Record<Provider, string> = {
   openai: "gpt-4o-mini",
-  anthropic: "claude-sonnet-4-20250514",
+  anthropic: "claude-sonnet-4-6",
   yua: "yua-normal",
   google: "gemini-2.5-flash",
 };
@@ -97,11 +99,53 @@ export class ConfigManager {
     return this.config.model ?? DEFAULT_MODELS[this.config.provider];
   }
 
-  /** Set API key for a provider */
+  /** Set API key for a provider (also stores in multi-key map) */
   setKey(provider: Provider, apiKey: string): void {
     this.config.provider = provider;
     this.config.apiKey = apiKey;
+    if (!this.config.apiKeys) this.config.apiKeys = {};
+    this.config.apiKeys[provider] = apiKey;
     this.save();
+  }
+
+  /** Set API key for a specific provider without changing active provider */
+  setProviderKey(provider: Provider, apiKey: string): void {
+    if (!this.config.apiKeys) this.config.apiKeys = {};
+    this.config.apiKeys[provider] = apiKey;
+    this.save();
+  }
+
+  /**
+   * Get the effective API key for a given provider.
+   * Priority: config apiKeys map → environment variables → legacy apiKey (if provider matches)
+   */
+  getKey(provider: Provider): string {
+    // 1. Multi-key config map
+    const fromMap = this.config.apiKeys?.[provider];
+    if (fromMap) return fromMap;
+
+    // 2. Environment variables
+    const envMap: Record<Provider, string> = {
+      openai: process.env["OPENAI_API_KEY"] ?? "",
+      anthropic: process.env["ANTHROPIC_API_KEY"] ?? "",
+      google: process.env["GOOGLE_API_KEY"] ?? process.env["GEMINI_API_KEY"] ?? "",
+      yua: process.env["YUA_API_KEY"] ?? "",
+    };
+    if (envMap[provider]) return envMap[provider];
+
+    // 3. Legacy single-key fallback (if provider matches)
+    if (this.config.provider === provider && this.config.apiKey) return this.config.apiKey;
+
+    return "";
+  }
+
+  /**
+   * Returns all providers that have a configured API key
+   * (config map + environment variables).
+   */
+  getAvailableProviders(): Provider[] {
+    const all: Provider[] = ["openai", "anthropic", "google", "yua"];
+    return all.filter((p) => this.getKey(p).length > 0);
   }
 
   /** Set model override */
@@ -147,19 +191,27 @@ export class ConfigManager {
   /** Display current config (masking API key) */
   show(): string {
     const c = this.config;
-    const maskedKey = c.apiKey
-      ? c.apiKey.slice(0, 6) + "..." + c.apiKey.slice(-4)
-      : "(not set)";
+    const maskKey = (k: string) =>
+      k ? k.slice(0, 6) + "..." + k.slice(-4) : "(not set)";
+
+    const allProviders: Provider[] = ["openai", "anthropic", "google", "yua"];
+    const keyLines = allProviders.map((p) => {
+      const key = this.getKey(p);
+      const active = p === c.provider ? " ← active" : "";
+      const source = c.apiKeys?.[p] ? "config" : (key ? "env" : "");
+      return `  ${p.padEnd(10)}: ${maskKey(key)}${source ? ` (${source})` : ""}${active}`;
+    });
 
     const lines = [
       `Mode     : ${c.mode}`,
-      `Provider : ${c.provider}`,
-      `API Key  : ${maskedKey}`,
       `Model    : ${this.getModel()}`,
       `Base URL : ${c.baseUrl ?? "(default)"}`,
-      `Server   : ${c.mode === "cloud" ? c.serverUrl : "(n/a — local mode)"}`,
+      `Server   : ${c.mode === "cloud" ? c.serverUrl : "(n/a)"}`,
       `Theme    : ${c.theme}`,
       `Config   : ${CONFIG_PATH}`,
+      ``,
+      `API Keys:`,
+      ...keyLines,
     ];
     return lines.join("\n");
   }
