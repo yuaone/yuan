@@ -114,6 +114,8 @@ export interface AgentStreamState {
   /** Files changed count in this turn */
   filesChangedCount: number;
   reasoningTree?: ReasoningNode;
+  /** ms since last event while agent is running (0 = not stalled) */
+  stalledMs: number;
 }
 /** Hierarchical reasoning tree node */
 export interface ReasoningNode {
