@@ -13,5 +13,11 @@
     "dev": "pnpm --filter yuan-cli dev",
     "lint": "pnpm -r lint",
     "clean": "pnpm -r clean"
+  },
+  "pnpm": {
+    "overrides": {
+      "hono": ">=4.12.7",
+      "@tootallnate/once": ">=3.0.1"
+    }
   }
 }
