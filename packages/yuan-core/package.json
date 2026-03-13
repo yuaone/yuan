@@ -1,12 +1,17 @@
 {
   "name": "@yuaone/core",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "YUAN Agent Core Runtime",
   "license": "AGPL-3.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist/", "plugins/", "README.md", "LICENSE"],
+  "files": [
+    "dist/",
+    "plugins/",
+    "README.md",
+    "LICENSE"
+  ],
   "publishConfig": {
     "access": "public"
   },
@@ -19,7 +24,13 @@
   "bugs": {
     "url": "https://github.com/yuaone/yuan/issues"
   },
-  "keywords": ["coding-agent", "ai", "autonomous", "agent-loop", "llm"],
+  "keywords": [
+    "coding-agent",
+    "ai",
+    "autonomous",
+    "agent-loop",
+    "llm"
+  ],
   "engines": {
     "node": ">=18"
   },
@@ -36,6 +47,7 @@
     "ts-morph": "^27.0.2"
   },
   "devDependencies": {
+    "ioredis": "^5.10.0",
     "typescript": "^5.7.0"
   }
 }
