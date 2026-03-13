@@ -392,9 +392,9 @@ export class InteractiveSession {
 
     // Build BYOK config
     const byokConfig: BYOKConfig = {
-      provider: config.provider as "openai" | "anthropic" | "yua",
+      provider: config.provider as "openai" | "anthropic" | "yua" | "google",
       apiKey: config.apiKey,
-      model: config.model,
+      model: this.configManager.getModel(),
       baseUrl: config.baseUrl,
     };
 
