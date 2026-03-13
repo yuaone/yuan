@@ -138,8 +138,6 @@ export const MessageList = memo(function MessageList({
   }
 
   const visibleMessages = messages.slice(startIdx, endIdx);
-  const hasAbove = startIdx > 0;
-  const hasBelow = scrollBack > 0;
 
   // Claude Code–style layout: start from top when messages are few,
   // pin to bottom once they fill the viewport (feels natural, not floating in center)
@@ -148,13 +146,6 @@ export const MessageList = memo(function MessageList({
 
   return (
     <Box flexDirection="column" height={height} overflow="hidden" justifyContent={justifyContent}>
-      {/* Scroll-up indicator */}
-      {hasAbove && (
-        <Box justifyContent="center" flexShrink={0}>
-          <Text dimColor>--- {startIdx} more (PgUp) ---</Text>
-        </Box>
-      )}
-
       {/* Empty state */}
       {visibleMessages.length === 0 && !isThinking && (
         <Box justifyContent="center" flexGrow={1}>
@@ -186,13 +177,6 @@ export const MessageList = memo(function MessageList({
         <Box marginTop={0} flexShrink={0}>
           <Text>  </Text>
           <Spinner label={`${TOKENS.brand.name} ·····`} />
-        </Box>
-      )}
-
-      {/* Scroll-down indicator */}
-      {hasBelow && (
-        <Box justifyContent="center" flexShrink={0}>
-          <Text dimColor>--- {scrollBack} more (PgDn) ---</Text>
         </Box>
       )}
     </Box>

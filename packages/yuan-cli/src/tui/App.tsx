@@ -24,6 +24,8 @@ import { FooterBar } from "./components/FooterBar.js";
 import { SlashMenu } from "./components/SlashMenu.js";
 import { ApprovalPrompt, type ApprovalChoice } from "./components/ApprovalPrompt.js";
 import { useSlashCommands } from "./hooks/useSlashCommands.js";
+import { useTaskPanel } from "./hooks/useTaskPanel.js";
+import { TaskPanel } from "./components/TaskPanel.js";
 import { AgentBridge } from "./agent-bridge.js";
 import type { AgentEvent, ApprovalResponse } from "@yuaone/core";
 import { checkForUpdate, loadSettings, saveSettings } from "./lib/update-checker.js";
@@ -72,6 +74,7 @@ function App({
 
   // Slash command state
   const [slashState, slashActions] = useSlashCommands();
+  const taskPanel = useTaskPanel();
   const [updateInfo, setUpdateInfo] = useState<{
     current: string;
     latest: string;
@@ -427,9 +430,22 @@ function App({
     return itemCount + 2 + moreIndicators;
   }, [slashState.isOpen, slashState.filtered.length]);
 
-  // Content area height = total rows - status(1) - footer(1) - input(1) - slashMenu(N) - padding(1)
-  // Slash menu is BELOW input (Claude Code style), so it still eats from content area
-  const contentHeight = useMemo(() => Math.max(3, rows - 4 - slashMenuRows), [rows, slashMenuRows]);
+  // Task panel height when open
+  const bgTasks = agentStream.state.backgroundTasks;
+  const taskPanelRows = useMemo(() => {
+    if (!taskPanel.isOpen || bgTasks.length === 0) return 0;
+    if (taskPanel.mode === "detail") {
+      const task = bgTasks.find((t) => t.id === taskPanel.detailTaskId);
+      return Math.min(10, (task?.steps.length ?? 0) + 4);
+    }
+    return Math.min(bgTasks.length + 3, 8); // header + rows + footer padding
+  }, [taskPanel.isOpen, taskPanel.mode, taskPanel.detailTaskId, bgTasks]);
+
+  // Content area height = total rows - status(1) - footer(1) - input(1) - slashMenu(N) - taskPanel(N)
+  const contentHeight = useMemo(
+    () => Math.max(3, rows - 4 - slashMenuRows - taskPanelRows),
+    [rows, slashMenuRows, taskPanelRows],
+  );
 
 const messages = agentStream.state.messages;
 
@@ -478,7 +494,27 @@ const messages = agentStream.state.messages;
         isRunning={isRunning}
         onQueueMessage={handleQueueMessage}
         pendingMessage={pendingMessage ?? undefined}
+        taskPanelOpen={taskPanel.isOpen}
+        onTaskNavigate={(dir) => {
+          if (dir === "up") taskPanel.navigateUp();
+          else taskPanel.navigateDown(bgTasks.length);
+        }}
+        onTaskExpand={() => taskPanel.expandSelected(bgTasks)}
+        onTaskPanelClose={taskPanel.mode === "detail" ? taskPanel.closeDetail : taskPanel.close}
+        onTaskPanelOpen={taskPanel.open}
+        hasBackgroundTasks={bgTasks.length > 0}
       />
+
+      {/* Task panel — background agent list / detail view */}
+      {taskPanel.isOpen && bgTasks.length > 0 && (
+        <TaskPanel
+          tasks={bgTasks}
+          mode={taskPanel.mode}
+          selectedIndex={taskPanel.selectedIndex}
+          detailTaskId={taskPanel.detailTaskId}
+          width={columns}
+        />
+      )}
 
       {/* Slash menu — appears BELOW input (Claude Code style) */}
       {slashState.isOpen && (

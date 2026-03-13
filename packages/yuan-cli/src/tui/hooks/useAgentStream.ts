@@ -5,12 +5,14 @@
  */
 
 import { useState, useCallback, useRef, useEffect } from "react";
-import type { 
-  TUIMessage, 
-  TUIToolCall, 
-  AgentStreamState, 
+import type {
+  TUIMessage,
+  TUIToolCall,
+  AgentStreamState,
   AgentStatus,
-  ReasoningNode
+  ReasoningNode,
+  TUIBackgroundTask,
+  TUIBGStep,
 } from "../types.js";
 
 export interface UseAgentStreamReturn {
@@ -43,6 +45,7 @@ export function useAgentStream(): UseAgentStreamReturn {
   const [lastError, setLastError] = useState<string | null>(null);
   const [filesChangedCount, setFilesChangedCount] = useState(0);
   const [reasoningTree, setReasoningTree] = useState<ReasoningNode | undefined>(undefined);
+  const [backgroundTasks, setBackgroundTasks] = useState<TUIBackgroundTask[]>([]);
 
   const currentMsgIdRef = useRef<string | null>(null);
   const tokenWindowRef = useRef<{ time: number; tokens: number }[]>([]);
@@ -471,6 +474,44 @@ export function useAgentStream(): UseAgentStreamReturn {
           break;
         }
 
+        case "agent:bg_update": {
+          const { agentId, agentLabel, eventType, message, timestamp } = event as unknown as {
+            agentId: string; agentLabel: string; eventType: TUIBGStep["type"]; message: string; timestamp: number;
+          };
+          const step: TUIBGStep = {
+            id: `step-${timestamp}-${Math.random().toString(36).slice(2, 6)}`,
+            label: message.length > 60 ? message.slice(0, 57) + "…" : message,
+            type: eventType,
+            timestamp,
+          };
+          setBackgroundTasks((prev) => {
+            const existing = prev.find((t) => t.id === agentId);
+            const MAX_STEPS = 20;
+            if (existing) {
+              const newSteps = [...existing.steps, step].slice(-MAX_STEPS);
+              return prev.map((t) =>
+                t.id === agentId
+                  ? {
+                      ...t,
+                      status: eventType === "error" ? "error" : "running",
+                      steps: newSteps,
+                      lastUpdatedAt: timestamp,
+                    }
+                  : t,
+              );
+            }
+            const newTask: TUIBackgroundTask = {
+              id: agentId,
+              label: agentLabel,
+              status: eventType === "error" ? "error" : "running",
+              steps: [step],
+              lastUpdatedAt: timestamp,
+            };
+            return [...prev, newTask];
+          });
+          break;
+        }
+
         default:
           break;
       }
@@ -550,6 +591,7 @@ export function useAgentStream(): UseAgentStreamReturn {
     filesChangedCount,
     reasoningTree,
     stalledMs,
+    backgroundTasks,
   };
 
   return {

@@ -755,12 +755,15 @@ async restoreSession(data: SessionData): Promise<void> {
           const bgAgent = this.backgroundAgentManager.get(agent.id);
           if (bgAgent) {
             bgAgent.on("event", (event: BackgroundEvent) => {
-              if (event.type === "error" || event.type === "warning") {
-                this.emitEvent({
-                  kind: "agent:thinking",
-                  content: `[Background: ${event.agentId}] ${event.message}`,
-                });
-              }
+              // Emit structured bg_update for TUI task panel
+              this.emitEvent({
+                kind: "agent:bg_update",
+                agentId: event.agentId,
+                agentLabel: event.agentId.replace(/-/g, " "),
+                eventType: event.type,
+                message: event.message,
+                timestamp: event.timestamp,
+              });
             });
           }
         }
