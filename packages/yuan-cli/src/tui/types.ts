@@ -95,6 +95,25 @@ export type AgentStatus =
   | "completed"
   | "interrupted";
 
+/** A single step/event from a background agent */
+export interface TUIBGStep {
+  id: string;
+  label: string;
+  type: "info" | "success" | "warning" | "error";
+  timestamp: number;
+}
+
+/** A background agent task tracked in the TUI */
+export interface TUIBackgroundTask {
+  id: string;
+  label: string;
+  /** "running" = has received at least one event in last 5 min, "idle" = quiet */
+  status: "running" | "idle" | "error";
+  /** Last 20 steps/events */
+  steps: TUIBGStep[];
+  lastUpdatedAt: number;
+}
+
 /** Agent stream state */
 export interface AgentStreamState {
   status: AgentStatus;
@@ -116,6 +135,8 @@ export interface AgentStreamState {
   reasoningTree?: ReasoningNode;
   /** ms since last event while agent is running (0 = not stalled) */
   stalledMs: number;
+  /** Background agent tasks (type-checker, security-scan, etc.) */
+  backgroundTasks: TUIBackgroundTask[];
 }
 /** Hierarchical reasoning tree node */
 export interface ReasoningNode {

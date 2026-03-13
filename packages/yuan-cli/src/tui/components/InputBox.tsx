@@ -30,6 +30,14 @@ export interface InputBoxProps {
   onQueueMessage?: (value: string) => void;
   /** Queued pending message to display while agent is running */
   pendingMessage?: string;
+  /** Task panel is open — ↑↓ navigate tasks, enter expand, esc close */
+  taskPanelOpen?: boolean;
+  onTaskNavigate?: (direction: "up" | "down") => void;
+  onTaskExpand?: () => void;
+  onTaskPanelClose?: () => void;
+  onTaskPanelOpen?: () => void;
+  /** Whether there are background tasks (shows hint) */
+  hasBackgroundTasks?: boolean;
 }
 
 export function InputBox({
@@ -45,6 +53,12 @@ export function InputBox({
   disabled,
   onQueueMessage,
   pendingMessage,
+  taskPanelOpen,
+  onTaskNavigate,
+  onTaskExpand,
+  onTaskPanelClose,
+  onTaskPanelOpen,
+  hasBackgroundTasks,
 }: InputBoxProps): React.JSX.Element {
   const { columns } = useTerminalSize();
   const history = useInputHistory();
@@ -137,8 +151,12 @@ export function InputBox({
         return;
       }
 
-      // Esc → close slash menu first, then interrupt
+      // Esc → close task panel → close slash menu → interrupt
       if (key.escape) {
+        if (taskPanelOpen) {
+          onTaskPanelClose?.();
+          return;
+        }
         if (slashMenuOpen) {
           onSlashClose?.();
           return;
@@ -149,8 +167,14 @@ export function InputBox({
         return;
       }
 
-      // Enter → submit or execute slash command
+      // Enter → task panel expand or submit
       if (key.return) {
+        // If task panel is open in list mode → expand selected task
+        if (taskPanelOpen && onTaskExpand) {
+          onTaskExpand();
+          return;
+        }
+
         // If slash menu open and a command is selected, use it
         if (slashMenuOpen && onSlashSelect) {
           const selected = onSlashSelect();
@@ -214,30 +238,32 @@ export function InputBox({
         return;
       }
 
-      // Arrow up/down → slash menu navigation or history
+      // Arrow up/down — task panel > slash menu > history/pending
       if (key.upArrow) {
-        if (slashMenuOpen && onSlashNavigate) {
+        if (taskPanelOpen && onTaskNavigate) {
+          onTaskNavigate("up");
+        } else if (slashMenuOpen && onSlashNavigate) {
           onSlashNavigate("up");
         } else if (isRunning && pendingMessage && !value) {
-          // While agent is running: ↑ with empty input loads pending message for editing
           updateValue(pendingMessage);
         } else {
           const prev = history.up(value);
-          if (prev !== null) {
-            updateValue(prev);
-          }
+          if (prev !== null) updateValue(prev);
         }
         return;
       }
 
       if (key.downArrow) {
-        if (slashMenuOpen && onSlashNavigate) {
+        if (taskPanelOpen && onTaskNavigate) {
+          onTaskNavigate("down");
+        } else if (slashMenuOpen && onSlashNavigate) {
           onSlashNavigate("down");
+        } else if (!value && !slashMenuOpen && hasBackgroundTasks && onTaskPanelOpen) {
+          // ↓ on empty input → open task panel
+          onTaskPanelOpen();
         } else {
           const next = history.down();
-          if (next !== null) {
-            updateValue(next);
-          }
+          if (next !== null) updateValue(next);
         }
         return;
       }

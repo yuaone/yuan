@@ -237,7 +237,20 @@ export type AgentEvent =
   | { kind: "agent:completed"; summary: string; filesChanged: string[] }
   | { kind: "agent:text_delta"; text: string }
   | { kind: "agent:token_usage"; input: number; output: number }
-  | { kind: "agent:qa_result"; stage: "quick" | "thorough"; passed: boolean; issues: string[] };
+  | { kind: "agent:qa_result"; stage: "quick" | "thorough"; passed: boolean; issues: string[] }
+  | {
+      kind: "agent:bg_update";
+      /** Background agent ID */
+      agentId: string;
+      /** Human-readable label (e.g. "type-checker") */
+      agentLabel: string;
+      /** Event severity */
+      eventType: "info" | "warning" | "error" | "success";
+      /** Message content */
+      message: string;
+      /** Unix timestamp */
+      timestamp: number;
+    };
 
 // ─── Session ───
 
