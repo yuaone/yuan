@@ -87,6 +87,7 @@ import { RepoKnowledgeGraph, type ImpactReport as GraphImpactReport } from "./re
 import { BackgroundAgentManager, type BackgroundEvent } from "./background-agent.js";
 import { ReasoningAggregator } from "./reasoning-aggregator.js";
 import { ReasoningTree } from "./reasoning-tree.js";
+import { ContextCompressor } from "./context-compressor.js";
 /** AgentLoop 설정 */
 export interface AgentLoopOptions {
   abortSignal?: AbortSignal
@@ -1040,12 +1041,34 @@ this.checkpointSaved = false;
         this.memoryManager.addLearning(learning.category, learning.content);
       }
 
+      // 감지된 컨벤션 저장 (기존에 추출만 되고 저장 안 되던 버그 수정)
+      for (const convention of analysis.conventions) {
+        this.memoryManager.addConvention(convention);
+      }
+
+      // 감지된 패턴 저장
+      for (const pattern of analysis.toolPatterns) {
+        if (pattern.successRate > 0.7 && pattern.count >= 3) {
+          this.memoryManager.addPattern({
+            name: `tool:${pattern.tool}`,
+            description: `success ${Math.round(pattern.successRate * 100)}%, avg ${pattern.avgDurationMs}ms`,
+            files: this.changedFiles.slice(0, 5),
+            frequency: pattern.count,
+          });
+        }
+      }
+
       // 에러로 종료된 경우 실패 기록도 추가
       if (result.reason === "ERROR") {
         this.memoryManager.addFailedApproach(
           `Task: ${userGoal.slice(0, 80)}`,
           (result as { error?: string }).error ?? "Unknown error",
         );
+      }
+
+      // 오래된 항목 정리 (매 5회 실행마다)
+      if (this.iterationCount % 5 === 0) {
+        this.memoryManager.prune();
       }
 
       // 메모리 저장
@@ -1244,11 +1267,16 @@ this.checkpointSaved = false;
     this.currentComplexity = complexity;
 
     // 임계값 미만이면 플래닝 스킵
-    const thresholdOrder = { simple: 1, moderate: 2, complex: 3 };
+    // Bug 4 fix: extend thresholdOrder to include "massive" (4), so that when planningThreshold
+    // is "complex", both "complex" (3) and "massive" (4) trigger planning.
+    // Previously "massive" had no entry and fell through to undefined → NaN comparisons.
+    const thresholdOrder: Record<string, number> = { simple: 1, moderate: 2, complex: 3, massive: 4 };
     const complexityOrder: Record<string, number> = {
       trivial: 0, simple: 1, moderate: 2, complex: 3, massive: 4,
     };
-    if ((complexityOrder[complexity] ?? 0) < thresholdOrder[this.planningThreshold]) {
+    // Use the threshold for the configured level; "complex" threshold activates for complexity >= "complex"
+    const effectiveThreshold = thresholdOrder[this.planningThreshold] ?? 2;
+    if ((complexityOrder[complexity] ?? 0) < effectiveThreshold) {
       return;
     }
 
@@ -1290,6 +1318,41 @@ try {
    * 사용자 메시지에서 태스크 복잡도를 휴리스틱으로 추정.
    * LLM 호출 없이 빠르게 결정 (토큰 절약).
    */
+  /**
+   * Detect the best test/verify command for the current project.
+   * Bug 3 fix: replaces the hardcoded "pnpm build" default.
+   */
+  private detectTestCommand(): string {
+    const projectPath = this.config.loop.projectPath;
+    try {
+      const { existsSync } = require("node:fs") as typeof import("node:fs");
+      // Check for package.json with a "test" script
+      const pkgPath = `${projectPath}/package.json`;
+      if (existsSync(pkgPath)) {
+        try {
+          const pkg = JSON.parse(
+            require("node:fs").readFileSync(pkgPath, "utf-8") as string,
+          ) as Record<string, unknown>;
+          const scripts = pkg.scripts as Record<string, string> | undefined;
+          if (scripts?.test && scripts.test !== "echo \"Error: no test specified\" && exit 1") {
+            // Prefer pnpm if pnpm-lock.yaml exists
+            const usesPnpm = existsSync(`${projectPath}/pnpm-lock.yaml`);
+            return usesPnpm ? "pnpm test" : "npm test";
+          }
+        } catch {
+          // package.json parse failure — fall through
+        }
+      }
+      // Check for tsconfig.json → TypeScript type check
+      if (existsSync(`${projectPath}/tsconfig.json`)) {
+        return "npx tsc --noEmit";
+      }
+    } catch {
+      // Require/existsSync failure in unusual environments — use default
+    }
+    return "pnpm build";
+  }
+
   private detectComplexity(
     message: string,
   ): "trivial" | "simple" | "moderate" | "complex" | "massive" {
@@ -1510,6 +1573,40 @@ let iteration = this.iterationCount;
       // Soft context rollover:
       // checkpoint first, then let ContextManager compact instead of aborting/throwing.
       const contextUsageRatio = this.contextManager.getUsageRatio();
+
+      // Bug 5 fix: use ContextCompressor as an alternative when context pressure is high (>70%)
+      // At 70-84% we apply intelligent priority-based compression before falling back to truncation.
+      if (contextUsageRatio >= 0.70 && contextUsageRatio < 0.85) {
+        try {
+          // Estimate maxTokens from the usage ratio and current message count
+          // contextUsageRatio = estimatedTokens / (maxTokens - outputReserve)
+          // We use a conservative 128_000 as a safe upper bound
+          const estimatedMaxTokens = 128_000;
+          const contextCompressor = new ContextCompressor({
+            maxTokens: estimatedMaxTokens,
+            reserveTokens: Math.ceil(estimatedMaxTokens * 0.15),
+          });
+          const currentMessages = this.contextManager.getMessages();
+          const currentTokenEstimate = Math.ceil(estimatedMaxTokens * contextUsageRatio);
+          const compressed = contextCompressor.compress(currentMessages, currentTokenEstimate);
+          if (compressed.evicted > 0 || compressed.summarized > 0) {
+            // Replace messages in contextManager with compressed version
+            // by clearing and re-adding (contextManager.addMessages is the public API)
+            const internalMessages = (this.contextManager as unknown as { messages: import("./types.js").Message[] }).messages;
+            if (internalMessages) {
+              internalMessages.length = 0;
+              internalMessages.push(...compressed.messages);
+            }
+            this.emitEvent({
+              kind: "agent:thinking",
+              content: `Context pressure ${Math.round(contextUsageRatio * 100)}%: ContextCompressor applied (evicted ${compressed.evicted}, summarized ${compressed.summarized} messages).`,
+            });
+          }
+        } catch {
+          // ContextCompressor failure is non-fatal; ContextManager will handle via compactHistory
+        }
+      }
+
       if (contextUsageRatio >= 0.85) {
         if (!this.checkpointSaved) {
           await this.saveAutoCheckpoint(iteration);
@@ -1981,8 +2078,11 @@ if (this.sessionPersistence && this.sessionId) {
                 iteration - 2,
                 [],
               );
+              // Bug 3 fix: use dynamic test command detection instead of hardcoded "pnpm build"
+              const testCmd = (this.config.loop as unknown as Record<string, unknown>).testCommand as string | undefined
+                ?? this.detectTestCommand();
               const debugPrompt = this.selfDebugLoop.buildFixPrompt(debugStrategy, {
-                testCommand: "pnpm build",
+                testCommand: testCmd,
                 errorOutput: errorSummary,
                 changedFiles: this.changedFiles,
                 originalSnapshots: this.originalSnapshots,
@@ -1990,6 +2090,33 @@ if (this.sessionPersistence && this.sessionId) {
                 currentStrategy: debugStrategy,
               });
               debugSuffix = `\n\n[SelfDebug L${Math.min(iteration - 2, 5)}] Strategy: ${debugStrategy}\n${debugPrompt}`;
+
+              // Bug 2 fix: wire a real llmFixer so selfDebugLoop.debug() can call LLM
+              if (debugStrategy !== "escalate") {
+                this.selfDebugLoop.debug({
+                  testCommand: testCmd,
+                  errorOutput: errorSummary,
+                  changedFiles: this.changedFiles,
+                  originalSnapshots: this.originalSnapshots,
+                  toolExecutor: this.toolExecutor,
+                  llmFixer: async (prompt: string): Promise<string> => {
+                    try {
+                      const response = await this.llmClient.chat(
+                        [
+                          { role: "system", content: "You are an expert debugging assistant. Analyze the error and provide tool calls to fix it." },
+                          { role: "user", content: prompt },
+                        ],
+                        [],
+                      );
+                      return response.content ?? "";
+                    } catch {
+                      return "";
+                    }
+                  },
+                }).catch(() => {
+                  // selfDebugLoop.debug() failures are non-fatal — recovery continues
+                });
+              }
             }
           }
 
@@ -2275,31 +2402,27 @@ if (this.sessionPersistence && this.sessionId) {
    * 3. 도구 실행
    * 4. AutoFixLoop 결과 검증 → 실패 시 에러 피드백 메시지 추가
    */
-  private async executeTools(
+  /**
+   * Execute a single tool call (extracted helper for parallel execution support).
+   */
+  private async executeSingleTool(
+    toolCall: ToolCall,
     toolCalls: ToolCall[],
-  ): Promise<{ results: ToolResult[]; deferredFixPrompts: string[] }> {
-     if (toolCalls.length > 1) this.emitReasoning(`parallel tool batch started (${toolCalls.length} tools)`);
-     const results: ToolResult[] = [];
-    const deferredFixPrompts: string[] = [];
-
-    for (const toolCall of toolCalls) {
-      const args = this.parseToolArgs(toolCall.arguments);
-      const allDefinitions = [...this.config.loop.tools, ...this.mcpToolDefinitions];
-      const matchedDefinition = allDefinitions.find((t) => t.name === toolCall.name);
-      // Governor: 안전성 검증
-      try {
-        this.governor.validateToolCall(toolCall);
-      } catch (err) {
-        if (err instanceof ApprovalRequiredError) {
-          // Governor가 위험 감지 → ApprovalManager로 승인 프로세스 위임
-      
-          const approvalResult = await this.handleApproval(toolCall, args, err);
-          if (approvalResult) {
-            results.push(approvalResult);
-            continue;
-          }
-          // 승인됨 → 계속 실행
-        } 
+  ): Promise<{ result: ToolResult | null; deferredFixPrompt: string | null }> {
+    const args = this.parseToolArgs(toolCall.arguments);
+    const allDefinitions = [...this.config.loop.tools, ...this.mcpToolDefinitions];
+    const matchedDefinition = allDefinitions.find((t) => t.name === toolCall.name);
+    // Governor: 안전성 검증
+    try {
+      this.governor.validateToolCall(toolCall);
+    } catch (err) {
+      if (err instanceof ApprovalRequiredError) {
+        const approvalResult = await this.handleApproval(toolCall, args, err);
+        if (approvalResult) {
+          return { result: approvalResult, deferredFixPrompt: null };
+        }
+        // 승인됨 → 계속 실행
+      }
       // Generic tool-definition approval gate
       if (matchedDefinition?.requiresApproval) {
         const definitionApprovalReq: ApprovalRequest = {
@@ -2323,253 +2446,262 @@ if (this.sessionPersistence && this.sessionId) {
           definitionApprovalReq,
         );
         if (definitionApprovalResult) {
-          results.push(definitionApprovalResult);
-          continue;
+          return { result: definitionApprovalResult, deferredFixPrompt: null };
         }
+      } else if (err instanceof ApprovalRequiredError) {
+        // already handled above
+      } else {
+        throw err;
       }
-        else {
-          throw err;
-        }
+    }
+
+    // ApprovalManager: 추가 승인 체크
+    const approvalRequest = this.approvalManager.checkApproval(toolCall.name, args);
+    if (approvalRequest) {
+      const approvalResult = await this.handleApprovalRequest(toolCall, approvalRequest);
+      if (approvalResult) {
+        return { result: approvalResult, deferredFixPrompt: null };
       }
+    }
 
-      // ApprovalManager: 추가 승인 체크 (Governor가 못 잡은 규칙)
-      const approvalRequest = this.approvalManager.checkApproval(
-        toolCall.name,
-        args,
-      );
-      if (approvalRequest) {
-        const approvalResult = await this.handleApprovalRequest(
-          toolCall,
-          approvalRequest,
-        );
-        if (approvalResult) {
-          results.push(approvalResult);
-          continue;
-        }
-        // 승인됨 → 계속 실행
+    // Plugin Tool Approval Gate
+    const pluginTools = this.pluginRegistry.getAllTools();
+    const matchedPluginTool = pluginTools.find((pt) => pt.tool.name === toolCall.name);
+    if (
+      matchedPluginTool &&
+      (matchedPluginTool.tool.requiresApproval === true ||
+        matchedPluginTool.tool.sideEffectLevel === "destructive")
+    ) {
+      const pluginApprovalReq: ApprovalRequest = {
+        id: `plugin-approval-${toolCall.id}`,
+        toolName: toolCall.name,
+        arguments: args as Record<string, unknown>,
+        reason: `Plugin tool "${toolCall.name}" (from ${matchedPluginTool.pluginId}) requires approval (${
+          matchedPluginTool.tool.sideEffectLevel === "destructive"
+            ? "destructive side effect"
+            : "requiresApproval=true"
+        })`,
+        riskLevel: matchedPluginTool.tool.riskLevel === "high" ? "high" : "medium",
+        timeout: 120_000,
+      };
+      const pluginApprovalResult = await this.handleApprovalRequest(toolCall, pluginApprovalReq);
+      if (pluginApprovalResult) {
+        return { result: pluginApprovalResult, deferredFixPrompt: null };
       }
+    }
 
-      // Plugin Tool Approval Gate: check plugin tools requiring approval
-      const pluginTools = this.pluginRegistry.getAllTools();
-      const matchedPluginTool = pluginTools.find((pt) => pt.tool.name === toolCall.name);
-      if (
-        matchedPluginTool &&
-        (matchedPluginTool.tool.requiresApproval === true ||
-          matchedPluginTool.tool.sideEffectLevel === "destructive")
-      ) {
-        const pluginApprovalReq: ApprovalRequest = {
-          id: `plugin-approval-${toolCall.id}`,
-          toolName: toolCall.name,
-          arguments: args as Record<string, unknown>,
-          reason: `Plugin tool "${toolCall.name}" (from ${matchedPluginTool.pluginId}) requires approval (${
-            matchedPluginTool.tool.sideEffectLevel === "destructive"
-              ? "destructive side effect"
-              : "requiresApproval=true"
-          })`,
-          riskLevel: matchedPluginTool.tool.riskLevel === "high" ? "high" : "medium",
-          timeout: 120_000,
-        };
-        const pluginApprovalResult = await this.handleApprovalRequest(
-          toolCall,
-          pluginApprovalReq,
-        );
-        if (pluginApprovalResult) {
-          results.push(pluginApprovalResult);
-          continue;
-        }
-        // Approved → proceed with execution
-      }
+    // MCP 도구 호출 확인
+    if (this.mcpClient && this.isMCPTool(toolCall.name)) {
+      const mcpResult = await this.executeMCPTool(toolCall);
+      this.emitEvent({
+        kind: "agent:tool_result",
+        tool: toolCall.name,
+        output:
+          mcpResult.output.length > 200
+            ? mcpResult.output.slice(0, 200) + "..."
+            : mcpResult.output,
+        durationMs: mcpResult.durationMs,
+      });
+      this.emitEvent({ kind: "agent:reasoning_delta", text: `tool finished: ${toolCall.name}` });
+      return { result: mcpResult, deferredFixPrompt: null };
+    }
 
-      // MCP 도구 호출 확인
-      if (this.mcpClient && this.isMCPTool(toolCall.name)) {
-        const mcpResult = await this.executeMCPTool(toolCall);
-        results.push(mcpResult);
-        this.emitEvent({
-          kind: "agent:tool_result",
-          tool: toolCall.name,
-          output:
-            mcpResult.output.length > 200
-              ? mcpResult.output.slice(0, 200) + "..."
-              : mcpResult.output,
-          durationMs: mcpResult.durationMs,
-        });
-this.emitEvent({
-  kind: "agent:reasoning_delta",
-  text: `tool finished: ${toolCall.name}`,
-});
-        continue;
-      }
-
-      // 도구 실행 — AbortController를 InterruptManager에 등록
-      const startTime = Date.now();
-      const toolAbort = new AbortController();
-      this.interruptManager.registerToolAbort(toolAbort);
-      // rollback용 원본 스냅샷은 실행 전에 저장
-      if (["file_write", "file_edit"].includes(toolCall.name)) {
-        const candidatePath =
-          (args as Record<string, unknown>).path ??
-          (args as Record<string, unknown>).file;
-
-        if (candidatePath) {
-          const filePathStr = String(candidatePath);
-          if (!this.originalSnapshots.has(filePathStr)) {
-            try {
-              const { readFile } = await import("node:fs/promises");
-              const original = await readFile(filePathStr, "utf-8");
-              this.originalSnapshots.set(filePathStr, original);
-} catch (err) {
- if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-   throw err;
- }
-}
-          }
-        }
-      }
-      try {
-       const result = await this.toolExecutor.execute(toolCall, toolAbort?.signal);
-        this.interruptManager.clearToolAbort();
-
-        // Learned skill confidence feedback
-        // 성공한 실행 결과/도구명/출력에 매칭되는 learned skill이 있으면 confidence 갱신
-        if (this.skillLearner) {
+    // 도구 실행
+    const startTime = Date.now();
+    const toolAbort = new AbortController();
+    this.interruptManager.registerToolAbort(toolAbort);
+    if (["file_write", "file_edit"].includes(toolCall.name)) {
+      const candidatePath =
+        (args as Record<string, unknown>).path ??
+        (args as Record<string, unknown>).file;
+      if (candidatePath) {
+        const filePathStr = String(candidatePath);
+        if (!this.originalSnapshots.has(filePathStr)) {
           try {
-            const relevantSkills = this.skillLearner.getRelevantSkills({
-              errorMessage: `${toolCall.name}\n${result.output}`,
-              filePath:
-                typeof args.path === "string"
-                  ? args.path
-                  : typeof args.file === "string"
-                  ? args.file
-                  : undefined,
-            });
-
-            for (const skill of relevantSkills.slice(0, 1)) {
-              this.skillLearner.updateConfidence(skill.id, result.success);
-            }
-          } catch {}
+            const { readFile } = await import("node:fs/promises");
+            const original = await readFile(filePathStr, "utf-8");
+            this.originalSnapshots.set(filePathStr, original);
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+          }
         }
-        results.push(result);
+      }
+    }
+    try {
+      const result = await this.toolExecutor.execute(toolCall, toolAbort?.signal);
+      this.interruptManager.clearToolAbort();
 
+      if (this.skillLearner) {
+        try {
+          const relevantSkills = this.skillLearner.getRelevantSkills({
+            errorMessage: `${toolCall.name}\n${result.output}`,
+            filePath:
+              typeof args.path === "string"
+                ? args.path
+                : typeof args.file === "string"
+                ? args.file
+                : undefined,
+          });
+          for (const skill of relevantSkills.slice(0, 1)) {
+            this.skillLearner.updateConfidence(skill.id, result.success);
+          }
+        } catch {}
+      }
+
+      this.emitEvent({
+        kind: "agent:tool_result",
+        tool: toolCall.name,
+        output:
+          result.output.length > 200
+            ? result.output.slice(0, 200) + "..."
+            : result.output,
+        durationMs: result.durationMs,
+      });
+      this.emitReasoning(`success: ${toolCall.name}`);
+      this.reasoningTree.add("tool", `success: ${toolCall.name}`);
+
+      if (["file_write", "file_edit"].includes(toolCall.name) && result.success) {
+        const filePath =
+          (args as Record<string, unknown>).path ??
+          (args as Record<string, unknown>).file ??
+          "unknown";
+        const filePathStr = String(filePath);
+        if (!this.changedFiles.includes(filePathStr)) {
+          this.changedFiles.push(filePathStr);
+        }
+        this.emitEvent({ kind: "agent:file_change", path: filePathStr, diff: result.output });
+        if (this.impactAnalyzer) {
+          this.analyzeFileImpact(filePathStr).catch(() => {});
+        }
+      }
+
+      const fixPrompt = await this.validateAndFeedback(toolCall.name, result);
+      return { result, deferredFixPrompt: fixPrompt ?? null };
+    } catch (err) {
+      this.interruptManager.clearToolAbort();
+      const durationMs = Date.now() - startTime;
+
+      if (toolAbort.signal.aborted) {
+        const abortResult: ToolResult = {
+          tool_call_id: toolCall.id,
+          name: toolCall.name,
+          output: `[INTERRUPTED] Tool execution was cancelled by user interrupt.`,
+          success: false,
+          durationMs,
+        };
         this.emitEvent({
-          kind: "agent:tool_result",
-          tool: toolCall.name,
-          output:
-            result.output.length > 200
-              ? result.output.slice(0, 200) + "..."
-              : result.output,
-          durationMs: result.durationMs,
+          kind: "agent:error",
+          message: `Tool ${toolCall.name} cancelled by interrupt`,
+          retryable: false,
         });
-        this.emitReasoning(`success: ${toolCall.name}`);
-        this.reasoningTree.add("tool", `success: ${toolCall.name}`);
+        return { result: abortResult, deferredFixPrompt: null };
+      }
 
-        // 파일 변경 이벤트 + 추적
-        if (
-          ["file_write", "file_edit"].includes(toolCall.name) &&
-          result.success
-        ) {
-          const filePath =
-            (args as Record<string, unknown>).path ??
-            (args as Record<string, unknown>).file ??
-            "unknown";
-          const filePathStr = String(filePath);
-
-          // 변경 파일 추적 (메모리 업데이트용)
-          if (!this.changedFiles.includes(filePathStr)) {
-            this.changedFiles.push(filePathStr);
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      if (this.skillLearner) {
+        try {
+          const relevantSkills = this.skillLearner.getRelevantSkills({
+            errorMessage: `${toolCall.name}\n${errorMessage}`,
+            filePath:
+              typeof args.path === "string"
+                ? args.path
+                : typeof args.file === "string"
+                ? args.file
+                : undefined,
+          });
+          for (const skill of relevantSkills.slice(0, 1)) {
+            this.skillLearner.updateConfidence(skill.id, false);
           }
+        } catch {}
+      }
+      const errorResult: ToolResult = {
+        tool_call_id: toolCall.id,
+        name: toolCall.name,
+        output: `Error: ${errorMessage}`,
+        success: false,
+        durationMs,
+      };
+      this.emitEvent({
+        kind: "agent:error",
+        message: `Tool ${toolCall.name} failed: ${errorMessage}`,
+        retryable: true,
+      });
+      this.emitEvent({ kind: "agent:reasoning_delta", text: `failed: ${toolCall.name}` });
+      this.reasoningTree.add("tool", `failed: ${toolCall.name}`);
+      return { result: errorResult, deferredFixPrompt: null };
+    }
+  }
 
-          this.emitEvent({
-            kind: "agent:file_change",
-            path: filePathStr,
-            diff: result.output,
-          });
+  private async executeTools(
+    toolCalls: ToolCall[],
+  ): Promise<{ results: ToolResult[]; deferredFixPrompts: string[] }> {
+    // Group tool calls: read-only can run in parallel, write tools run sequentially
+    const readOnlyTools = new Set(['file_read', 'grep', 'glob', 'code_search']);
+    const batches: ToolCall[][] = [];
+    let currentBatch: ToolCall[] = [];
 
-          // ImpactAnalyzer: 변경 영향 분석 (비동기, 실패 무시)
-          if (this.impactAnalyzer) {
-            this.analyzeFileImpact(filePathStr).catch(() => {});
+    for (const toolCall of toolCalls) {
+      if (readOnlyTools.has(toolCall.name)) {
+        currentBatch.push(toolCall);
+      } else {
+        if (currentBatch.length > 0) { batches.push(currentBatch); currentBatch = []; }
+        batches.push([toolCall]); // write tools run solo
+      }
+    }
+    if (currentBatch.length > 0) batches.push(currentBatch);
+
+    if (toolCalls.length > 1) this.emitReasoning(`parallel tool batch started (${toolCalls.length} tools)`);
+    const results: ToolResult[] = [];
+    const deferredFixPrompts: string[] = [];
+
+    for (const batch of batches) {
+      if (batch.length === 1) {
+        // Sequential single tool execution
+        const { result, deferredFixPrompt } = await this.executeSingleTool(batch[0], toolCalls);
+        if (result) results.push(result);
+        if (deferredFixPrompt) deferredFixPrompts.push(deferredFixPrompt);
+
+        // Check for interrupt result — stop processing remaining batches
+        if (result && result.output.startsWith('[INTERRUPTED]')) {
+          // Add placeholder results for remaining unexecuted tool calls
+          const executedIds = new Set(results.map(r => r.tool_call_id));
+          for (const tc of toolCalls) {
+            if (!executedIds.has(tc.id)) {
+              results.push({
+                tool_call_id: tc.id,
+                name: tc.name,
+                output: `[SKIPPED] Previous tool was interrupted.`,
+                success: false,
+                durationMs: 0,
+              });
+            }
           }
+          break;
         }
-
-        // AutoFixLoop: 결과 검증 (fix prompt는 tool results 추가 후 context에 넣음)
-        const fixPrompt = await this.validateAndFeedback(toolCall.name, result);
-        if (fixPrompt) {
-          deferredFixPrompts.push(fixPrompt);
-        }
-      } catch (err) {
-        this.interruptManager.clearToolAbort();
-        const durationMs = Date.now() - startTime;
-
-        // AbortError인 경우 (인터럽트로 취소됨)
-        if (toolAbort.signal.aborted) {
-          results.push({
-            tool_call_id: toolCall.id,
-            name: toolCall.name,
-            output: `[INTERRUPTED] Tool execution was cancelled by user interrupt.`,
-            success: false,
-            durationMs,
-          });
-
-          this.emitEvent({
-            kind: "agent:error",
-            message: `Tool ${toolCall.name} cancelled by interrupt`,
-            retryable: false,
-          });
-
-          // 남은 tool calls에 대해 placeholder result 추가 (OpenAI 400 방지)
-          const currentIdx = toolCalls.indexOf(toolCall);
-          for (let i = currentIdx + 1; i < toolCalls.length; i++) {
+      } else {
+        // Parallel execution for read-only tools in this batch
+        this.emitReasoning(`running ${batch.length} read-only tools in parallel`);
+        const batchResults = await Promise.allSettled(
+          batch.map(tc => this.executeSingleTool(tc, toolCalls))
+        );
+        for (const settled of batchResults) {
+          if (settled.status === 'fulfilled') {
+            if (settled.value.result) results.push(settled.value.result);
+            if (settled.value.deferredFixPrompt) deferredFixPrompts.push(settled.value.deferredFixPrompt);
+          } else {
+            // Parallel tool failure — record as error result
+            const tc = batch[batchResults.indexOf(settled)];
             results.push({
-              tool_call_id: toolCalls[i].id,
-              name: toolCalls[i].name,
-              output: `[SKIPPED] Previous tool was interrupted.`,
+              tool_call_id: tc?.id ?? 'unknown',
+              name: tc?.name ?? 'unknown',
+              output: `Error: ${settled.reason instanceof Error ? settled.reason.message : String(settled.reason)}`,
               success: false,
               durationMs: 0,
             });
           }
-          // soft interrupt: 루프 계속 / hard interrupt: aborted=true로 종료
-          break;
-        }
-
-        const errorMessage =
-          err instanceof Error ? err.message : String(err);
-        // Learned skill confidence feedback (failure path)
-        if (this.skillLearner) {
-          try {
-            const relevantSkills = this.skillLearner.getRelevantSkills({
-              errorMessage: `${toolCall.name}\n${errorMessage}`,
-              filePath:
-                typeof args.path === "string"
-                  ? args.path
-                  : typeof args.file === "string"
-                  ? args.file
-                  : undefined,
-            });
-
-            for (const skill of relevantSkills.slice(0, 1)) {
-              this.skillLearner.updateConfidence(skill.id, false);
-            }
-          } catch {}
-        }
-        results.push({
-          tool_call_id: toolCall.id,
-          name: toolCall.name,
-          output: `Error: ${errorMessage}`,
-          success: false,
-          durationMs,
-        });
-
-        this.emitEvent({
-          kind: "agent:error",
-          message: `Tool ${toolCall.name} failed: ${errorMessage}`,
-          retryable: true,
-        });
-this.emitEvent({
-  kind: "agent:reasoning_delta",
- text: `failed: ${toolCall.name}`,
-});
-this.reasoningTree.add("tool", `failed: ${toolCall.name}`);
-      }
-    }
+        } // end for (const settled of batchResults)
+      } // end else (parallel batch)
+    } // end for (const batch of batches)
 
     return { results, deferredFixPrompts };
   }
