@@ -157,6 +157,12 @@ export class BYOKClient {
         return;
       }
 
+      // Native Gemini API — exposes thinking/reasoning parts not available via OpenAI gateway
+      if (this.config.provider === "google") {
+        yield* this.chatStreamGeminiNative(messages, tools, abortSignal);
+        return;
+      }
+
       if (!this.openaiClient) {
         throw new LLMError(this.config.provider, "OpenAI client not initialized for this provider");
       }
@@ -756,6 +762,213 @@ export class BYOKClient {
       finishReason:
         (data.stop_reason as string) ?? "end_turn",
     };
+  }
+
+  /**
+   * Native Gemini REST API streaming — uses the `generateContent` endpoint directly
+   * instead of the OpenAI-compatible gateway. This unlocks native thinking/reasoning
+   * parts (parts with `thought: true`) that the OpenAI gateway does not expose.
+   *
+   * Endpoint: https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent
+   * Auth: API key via `?key=` query param
+   */
+  private async *chatStreamGeminiNative(
+    messages: Message[],
+    tools?: ToolDefinition[],
+    abortSignal?: AbortSignal,
+  ): AsyncGenerator<LLMStreamChunk> {
+    const apiKey = this.config.apiKey;
+    const baseUrl =
+      this.config.baseUrl?.replace(/\/openai\/?$/, "") ??
+      "https://generativelanguage.googleapis.com/v1beta";
+    const endpoint = `${baseUrl}/models/${this.model}:streamGenerateContent?alt=sse&key=${apiKey}`;
+
+    // Convert messages to Gemini format
+    const systemParts: string[] = [];
+    const geminiContents: Array<{ role: string; parts: Array<Record<string, unknown>> }> = [];
+
+    for (const msg of messages) {
+      const textContent =
+        typeof msg.content === "string"
+          ? msg.content
+          : Array.isArray(msg.content)
+            ? msg.content
+                .filter((b): b is { type: "text"; text: string } => b.type === "text")
+                .map((b) => b.text)
+                .join("\n")
+            : "";
+
+      if (msg.role === "system") {
+        if (textContent) systemParts.push(textContent);
+        continue;
+      }
+
+      if (msg.role === "tool") {
+        // Tool results → functionResponse parts
+        const toolCalls = Array.isArray(msg.content)
+          ? (msg.content as Array<{ type: string; tool_use_id?: string; content?: unknown }>)
+          : [];
+        const parts = toolCalls
+          .filter((b) => b.type === "tool_result")
+          .map((b) => ({
+            functionResponse: {
+              name: (b as Record<string, unknown>).name ?? "tool",
+              response: { content: b.content ?? "" },
+            },
+          }));
+        if (parts.length > 0) {
+          geminiContents.push({ role: "user", parts });
+        }
+        continue;
+      }
+
+      const role = msg.role === "assistant" ? "model" : "user";
+
+      // Check for tool calls in assistant messages
+      if (msg.role === "assistant" && Array.isArray(msg.content)) {
+        const parts: Array<Record<string, unknown>> = [];
+        for (const block of msg.content as Array<{ type: string; [k: string]: unknown }>) {
+          if (block.type === "text" && typeof block.text === "string" && block.text) {
+            parts.push({ text: block.text });
+          } else if (block.type === "tool_use") {
+            parts.push({
+              functionCall: {
+                name: block.name,
+                args: block.input ?? {},
+              },
+            });
+          }
+        }
+        if (parts.length > 0) geminiContents.push({ role, parts });
+        continue;
+      }
+
+      if (textContent) {
+        geminiContents.push({ role, parts: [{ text: textContent }] });
+      }
+    }
+
+    // Build Gemini tool declarations
+    const functionDeclarations = tools?.map((t) => ({
+      name: t.name,
+      description: t.description,
+      parameters: t.parameters as Record<string, unknown>,
+    }));
+
+    const body: Record<string, unknown> = {
+      contents: geminiContents,
+      ...(systemParts.length > 0
+        ? { systemInstruction: { parts: systemParts.map((t) => ({ text: t })) } }
+        : {}),
+      ...(functionDeclarations && functionDeclarations.length > 0
+        ? { tools: [{ functionDeclarations }] }
+        : {}),
+      generationConfig: {
+        maxOutputTokens: 8192,
+        thinkingConfig: {
+          thinkingBudget: 8192,
+        },
+      },
+    };
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: abortSignal,
+    });
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => "");
+      throw new LLMError("google", `Gemini API error ${response.status}: ${errText}`);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) throw new LLMError("google", "No response body");
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const pendingToolCalls = new Map<string, { name: string; args: Record<string, unknown> }>();
+    let inputTokens = 0;
+    let outputTokens = 0;
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const jsonStr = line.slice(6).trim();
+          if (jsonStr === "[DONE]" || !jsonStr) continue;
+
+          let chunk: Record<string, unknown>;
+          try {
+            chunk = JSON.parse(jsonStr) as Record<string, unknown>;
+          } catch {
+            continue;
+          }
+
+          // Extract usage from usageMetadata
+          const usage = chunk.usageMetadata as Record<string, unknown> | undefined;
+          if (usage) {
+            inputTokens = (usage.promptTokenCount as number) ?? inputTokens;
+            outputTokens = (usage.candidatesTokenCount as number) ?? outputTokens;
+          }
+
+          const candidates = (chunk.candidates as Array<Record<string, unknown>>) ?? [];
+          for (const candidate of candidates) {
+            const content = candidate.content as Record<string, unknown> | undefined;
+            const parts = (content?.parts as Array<Record<string, unknown>>) ?? [];
+
+            for (const part of parts) {
+              // Thinking part (native reasoning)
+              if (part.thought === true && typeof part.text === "string" && part.text) {
+                const rc = this.buildReasoningChunk(part.text);
+                if (rc) yield rc;
+                continue;
+              }
+
+              // Text part
+              if (typeof part.text === "string" && part.text) {
+                yield { type: "text", text: part.text };
+                continue;
+              }
+
+              // Function call part
+              const fc = part.functionCall as Record<string, unknown> | undefined;
+              if (fc && typeof fc.name === "string") {
+                const callId = `call_gemini_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+                pendingToolCalls.set(callId, {
+                  name: fc.name,
+                  args: (fc.args as Record<string, unknown>) ?? {},
+                });
+              }
+            }
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    // Emit accumulated tool calls
+    for (const [callId, tc] of pendingToolCalls) {
+      yield {
+        type: "tool_call",
+        toolCall: {
+          id: callId,
+          name: tc.name,
+          arguments: tc.args,
+        },
+      };
+    }
+
+    yield { type: "done", usage: { input: inputTokens, output: outputTokens } };
   }
 
   /**
