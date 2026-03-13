@@ -43,9 +43,12 @@ export function InputBox({
   const { columns } = useTerminalSize();
   const history = useInputHistory();
   const [value, setValue] = useState("");
+  const [cursorPos, setCursorPos] = useState(0);
 
   const [pasteBadge, setPasteBadge] = useState<string | null>(null);
   const pasteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Debounce onInputChange to reduce parent re-renders while typing
+  const inputChangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearPasteBadge = useCallback(() => {
     if (pasteTimerRef.current) {
@@ -80,9 +83,17 @@ export function InputBox({
     };
   }, []);
   const updateValue = useCallback(
-    (newValue: string) => {
+    (newValue: string, newCursor?: number) => {
       setValue(newValue);
-      onInputChange?.(newValue);
+      setCursorPos(newCursor ?? newValue.length);
+      // Debounce onInputChange to avoid parent re-render on every keystroke
+      if (onInputChange) {
+        if (inputChangeTimerRef.current) clearTimeout(inputChangeTimerRef.current);
+        inputChangeTimerRef.current = setTimeout(() => {
+          onInputChange(newValue);
+          inputChangeTimerRef.current = null;
+        }, 80);
+      }
     },
     [onInputChange],
   );
@@ -142,6 +153,26 @@ export function InputBox({
         return;
       }
 
+      // Left/Right arrow → move cursor inline
+      if (key.leftArrow && !slashMenuOpen) {
+        setCursorPos(p => Math.max(0, p - 1));
+        return;
+      }
+      if (key.rightArrow && !slashMenuOpen) {
+        setCursorPos(p => Math.min(value.length, p + 1));
+        return;
+      }
+
+      // Ctrl+A → beginning, Ctrl+E → end
+      if (key.ctrl && input === "a") {
+        setCursorPos(0);
+        return;
+      }
+      if (key.ctrl && input === "e") {
+        setCursorPos(value.length);
+        return;
+      }
+
       // Arrow up/down → slash menu navigation or history
       if (key.upArrow) {
         if (slashMenuOpen && onSlashNavigate) {
@@ -167,11 +198,11 @@ export function InputBox({
         return;
       }
 
-      // Backspace
+      // Backspace — delete char before cursor
       if (key.backspace || key.delete) {
-        if (value.length > 0) {
-          const newVal = value.slice(0, -1);
-          updateValue(newVal);
+        if (cursorPos > 0) {
+          const newVal = value.slice(0, cursorPos - 1) + value.slice(cursorPos);
+          updateValue(newVal, cursorPos - 1);
           // Close slash menu if we deleted the "/"
           if (!newVal.startsWith("/") && slashMenuOpen) {
             onSlashClose?.();
@@ -196,7 +227,9 @@ export function InputBox({
             showPasteBadge(cleaned.length);
           }
 
-          updateValue(value + normalized);
+          // Insert at cursor position
+          const newVal = value.slice(0, cursorPos) + normalized + value.slice(cursorPos);
+          updateValue(newVal, cursorPos + normalized.length);
         }
       }
     },
@@ -204,33 +237,55 @@ export function InputBox({
 
   const prompt = isRunning ? " " : TOKENS.brand.prompt;
   const displayValue = isRunning ? "" : value;
+  const clampedCursor = Math.min(cursorPos, displayValue.length);
 
-  // Detect if input is a recognized slash command → show token in dim
+  // Detect if input is a recognized slash command → show token in cyan/red
   const isSlash = displayValue.startsWith("/");
   const cmdToken = isSlash ? displayValue.split(" ")[0] : "";
   const cmdRest = isSlash ? displayValue.slice(cmdToken.length) : "";
   const cmdRecognized = isSlash && isKnownCommand(cmdToken);
 
+  // Cursor rendering: chars before cursor | cursor block (inverted) | chars after
+  const showCursor = !isRunning && !slashMenuOpen;
+  const beforeCursor = displayValue.slice(0, clampedCursor);
+  const cursorChar = displayValue[clampedCursor] ?? " ";
+  const afterCursor = displayValue.slice(clampedCursor + 1);
+
   return (
     <Box width={columns} flexDirection="column" flexShrink={0}>
       <Text dimColor>{TOKENS.box.horizontal.repeat(Math.max(0, columns - 1))}</Text>
       <Box justifyContent="space-between">
-        <Box>
+        <Box flexShrink={1} overflow="hidden">
           <Text dimColor>{prompt} </Text>
-          {isSlash ? (
-            <>
-              <Text color={cmdRecognized ? "cyan" : "red"}>
-                {cmdToken}
-              </Text>
-              <Text>{cmdRest}</Text>
-            </>
+          {showCursor ? (
+            // Cursor-aware rendering
+            isSlash ? (
+              <>
+                <Text color={cmdRecognized ? "cyan" : "red"}>{cmdToken}</Text>
+                <Text>{beforeCursor.slice(cmdToken.length)}</Text>
+                <Text inverse>{cursorChar}</Text>
+                <Text>{afterCursor}</Text>
+              </>
+            ) : (
+              <>
+                <Text>{beforeCursor}</Text>
+                <Text inverse>{cursorChar}</Text>
+                <Text>{afterCursor}</Text>
+              </>
+            )
           ) : (
-            <Text>{displayValue}</Text>
+            isSlash ? (
+              <>
+                <Text color={cmdRecognized ? "cyan" : "red"}>{cmdToken}</Text>
+                <Text>{cmdRest}</Text>
+              </>
+            ) : (
+              <Text>{displayValue}</Text>
+            )
           )}
-          {!isRunning && !slashMenuOpen && <Text dimColor>█</Text>}
         </Box>
 
-        <Box>
+        <Box flexShrink={0}>
           {pasteBadge ? <Text dimColor>{pasteBadge}</Text> : null}
         </Box>
       </Box>
