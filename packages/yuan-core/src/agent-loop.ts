@@ -257,6 +257,8 @@ export class AgentLoop extends EventEmitter {
   private iterationSystemMsgCount = 0;
   /** Task 1: ContextBudgetManager for LLM-based summarization at 60-70% context usage */
   private contextBudgetManager: ContextBudgetManager | null = null;
+  /** Task 1: Flag to ensure LLM summarization only runs once per agent run (non-blocking guard) */
+  private _contextSummarizationDone = false;
   /** Task 2: Track whether write tools ran this iteration for QA triggering */
   private iterationWriteToolPaths: string[] = [];
   /** Task 2: Last QA result (surfaced to LLM on issues) */
@@ -920,6 +922,8 @@ async restoreSession(data: SessionData): Promise<void> {
       // Task 3: reset tsc tracking per run
       this.iterationTsFilesModified = [];
       this.tscRanLastIteration = false;
+      // Task 1: reset context summarization guard per run
+      this._contextSummarizationDone = false;
     }
 
 this.checkpointSaved = false;
@@ -1927,13 +1931,13 @@ let iteration = this.iterationCount;
       this.emitReasoning(`iteration ${iteration}: preparing context`);
       this.iterationSystemMsgCount = 0; // Reset per-iteration (prevents accumulation across iterations)
 
-      // Proactive replanning check (every 5 iterations when plan is active)
+      // Proactive replanning check (every 10 iterations when plan is active)
       if (
         this.replanningEngine &&
         this.activePlan &&
         this.activeMilestones.length > 0 &&
         iteration > 0 &&
-        iteration % 5 === 0
+        iteration % 10 === 0
       ) {
         try {
           const tokenBudget = this.config?.loop?.totalTokenBudget ?? 200_000;
@@ -2006,29 +2010,29 @@ let iteration = this.iterationCount;
       // Task 1: ContextBudgetManager LLM summarization at 60-70% — runs BEFORE ContextCompressor
       // Summarizes old "medium" priority conversation turns into a compact summary message,
       // freeing tokens before the heavier ContextCompressor kicks in at 70%.
-      if (contextUsageRatio >= 0.60 && contextUsageRatio < 0.70 && this.contextBudgetManager) {
-        try {
-          // Sync current messages into the budget manager so it knows what to summarize
-          this.contextBudgetManager.importMessages(this.contextManager.getMessages());
-          if (this.contextBudgetManager.needsSummarization()) {
-            const summary = await this.contextBudgetManager.summarize(
-              async (prompt: string): Promise<string> => {
-                const resp = await this.llmClient.chat(
-                  [{ role: "user", content: prompt }],
-                  [],
-                );
-                return typeof resp.content === "string" ? resp.content : "";
-              },
+      if (contextUsageRatio >= 0.60 && contextUsageRatio < 0.70 && this.contextBudgetManager && !this._contextSummarizationDone) {
+        this._contextSummarizationDone = true; // run at most once per agent turn
+        // Non-blocking: fire-and-forget so the main iteration is not stalled
+        this.contextBudgetManager.importMessages(this.contextManager.getMessages());
+        if (this.contextBudgetManager.needsSummarization()) {
+          const budgetMgr = this.contextBudgetManager;
+          const ratio = contextUsageRatio;
+          budgetMgr.summarize(async (prompt: string): Promise<string> => {
+            const resp = await this.llmClient.chat(
+              [{ role: "user", content: prompt }],
+              [],
             );
+            return typeof resp.content === "string" ? resp.content : "";
+          }).then(summary => {
             if (summary) {
               this.emitEvent({
                 kind: "agent:thinking",
-                content: `Context at ${Math.round(contextUsageRatio * 100)}%: summarized ${summary.originalIds.length} old messages (${summary.originalTokens} → ${summary.summarizedTokens} tokens, ${Math.round(summary.compressionRatio * 100)}% ratio).`,
+                content: `Context at ${Math.round(ratio * 100)}%: summarized ${summary.originalIds.length} old messages (${summary.originalTokens} → ${summary.summarizedTokens} tokens, ${Math.round(summary.compressionRatio * 100)}% ratio).`,
               });
             }
-          }
-        } catch {
-          // ContextBudgetManager summarization failure is non-fatal
+          }).catch(() => {
+            // summarization failure is non-fatal
+          });
         }
       }
 
