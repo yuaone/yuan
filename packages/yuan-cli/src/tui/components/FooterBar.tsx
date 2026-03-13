@@ -80,12 +80,30 @@ function Indicator({ agentState }: { agentState: AgentStreamState }): React.JSX.
       return <Text dimColor>▸ ready</Text>;
     }
 
-    case "thinking":
+    case "thinking": {
+      if (agentState.stalledMs > 60_000) {
+        return (
+          <Text>
+            <Text color="red">⚠</Text>
+            <Text color="red"> no response  {elapsed}  — esc to interrupt</Text>
+          </Text>
+        );
+      }
+      if (agentState.stalledMs > 20_000) {
+        return (
+          <Text>
+            <Text color="yellow">⚠</Text>
+            <Text color="yellow"> slow  {elapsed}</Text>
+            <Text dimColor>  — esc interrupt</Text>
+          </Text>
+        );
+      }
       return (
         <Text dimColor>
           <Text color="yellow">{spinner}</Text> thinking  {elapsed}
         </Text>
       );
+    }
 
     case "streaming":
       return (

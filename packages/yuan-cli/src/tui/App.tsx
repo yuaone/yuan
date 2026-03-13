@@ -66,6 +66,9 @@ function App({
   const [approvalToolName, setApprovalToolName] = useState<string | null>(null);
   const [approvalToolArgs, setApprovalToolArgs] = useState<string | null>(null);
 
+  // Pending message queue — typed while agent is running
+  const [pendingMessage, setPendingMessage] = useState<string | null>(null);
+
   // Slash command state
   const [slashState, slashActions] = useSlashCommands();
   const [updateInfo, setUpdateInfo] = useState<{
@@ -132,6 +135,37 @@ function App({
     },
     [agentStream],
   );
+
+  // Pending message handler — called when user submits while agent is running
+  const pendingMessageRef = useRef<string | null>(null);
+  const handleQueueMessage = useCallback(
+    (value: string) => {
+      pendingMessageRef.current = value;
+      setPendingMessage(value);
+    },
+    [],
+  );
+
+  // Auto-send pending message when agent becomes idle/completed/interrupted
+  const prevStatusRef = useRef(agentStream.state.status);
+  useEffect(() => {
+    const prev = prevStatusRef.current;
+    const curr = agentStream.state.status;
+    prevStatusRef.current = curr;
+
+    const wasRunning = prev === "thinking" || prev === "streaming" || prev === "tool_running" || prev === "completed" || prev === "interrupted";
+    const isNowIdle = curr === "idle";
+
+    if (wasRunning && isNowIdle && pendingMessageRef.current) {
+      const msg = pendingMessageRef.current;
+      pendingMessageRef.current = null;
+      setPendingMessage(null);
+      // Small delay so the "idle" state is fully settled
+      setTimeout(() => {
+        handleSubmit(msg);
+      }, 100);
+    }
+  }, [agentStream.state.status, handleSubmit]);
 
   // Interruption
   const handleInterrupt = useCallback(() => {
@@ -446,6 +480,8 @@ const messages = agentStream.state.messages;
         onSlashSelect={handleSlashSelect}
         onSlashClose={slashActions.close}
         isRunning={isRunning}
+        onQueueMessage={handleQueueMessage}
+        pendingMessage={pendingMessage ?? undefined}
       />
 
       {/* Slash menu — appears BELOW input (Claude Code style) */}

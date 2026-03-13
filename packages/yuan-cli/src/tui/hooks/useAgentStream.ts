@@ -53,6 +53,26 @@ export function useAgentStream(): UseAgentStreamReturn {
   const startTimeRef = useRef<number | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Stall detection
+  const lastEventAtRef = useRef<number>(Date.now());
+  const [stalledMs, setStalledMs] = useState<number>(0);
+  const statusRef = useRef<AgentStatus>("idle");
+
+  // Stall check: every 5s, if active and no events for >20s → show warning
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const st = statusRef.current;
+      const isActive = st === "thinking" || st === "streaming" || st === "tool_running";
+      if (isActive) {
+        const ms = Date.now() - lastEventAtRef.current;
+        setStalledMs(ms > 20_000 ? ms : 0);
+      } else {
+        setStalledMs(0);
+      }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
   const startTimer = useCallback(() => {
     startTimeRef.current = Date.now();
     setElapsedMs(0);
@@ -178,7 +198,10 @@ export function useAgentStream(): UseAgentStreamReturn {
   }, []);
 
   const startAgent = useCallback(() => {
+    statusRef.current = "thinking";
     setStatus("thinking");
+    lastEventAtRef.current = Date.now();
+    setStalledMs(0);
     isStreamingRef.current = false;
     setCurrentToolName(null);
     setCurrentToolArgs(null);
@@ -206,12 +229,17 @@ export function useAgentStream(): UseAgentStreamReturn {
 
   const handleEvent = useCallback(
     (event: AgentEventLike) => {
+      // Reset stall timer on every event
+      lastEventAtRef.current = Date.now();
+      setStalledMs(0);
+
       switch (event.kind) {
   case "agent:reasoning_delta": {
     appendThinkingLines(String(event.text ?? ""));
     break;
   }
         case "agent:thinking": {
+          statusRef.current = "thinking";
           setStatus("thinking");
           setCurrentToolName(null);
           setCurrentToolArgs(null);
@@ -227,6 +255,7 @@ export function useAgentStream(): UseAgentStreamReturn {
             // Reset thinking message ID so post-stream thinking events create a NEW message
             // rather than appending to the old thinking block (prevents reasoning overlap)
             currentThinkingMsgIdRef.current = null;
+            statusRef.current = "streaming";
             setStatus("streaming");
             setCurrentToolName(null);
             setCurrentToolArgs(null);
@@ -242,6 +271,7 @@ export function useAgentStream(): UseAgentStreamReturn {
  }
         case "agent:tool_call": {
           isStreamingRef.current = false;
+          statusRef.current = "tool_running";
           setStatus("tool_running");
           const toolName = event.tool as string;
           const args = summarizeArgs(event.input as Record<string, unknown>);
@@ -343,7 +373,9 @@ export function useAgentStream(): UseAgentStreamReturn {
           const errMsg = event.message as string;
           setLastError(errMsg);
           stopTimer();
+          statusRef.current = "error";
           setStatus("error");
+          setStalledMs(0);
           setCurrentToolName(null);
           setCurrentToolArgs(null);
 
@@ -366,7 +398,9 @@ export function useAgentStream(): UseAgentStreamReturn {
         case "agent:completed": {
           flushPendingText();
           stopTimer();
+          statusRef.current = "completed";
           setStatus("completed");
+          setStalledMs(0);
           setCurrentToolName(null);
           setCurrentToolArgs(null);
 
@@ -407,7 +441,9 @@ export function useAgentStream(): UseAgentStreamReturn {
         }
 
         case "agent:approval_needed": {
+  statusRef.current = "awaiting_approval";
   setStatus("awaiting_approval");
+  setStalledMs(0);
 
   const action = event.action as any;
 
@@ -445,7 +481,9 @@ export function useAgentStream(): UseAgentStreamReturn {
   const interrupt = useCallback(() => {
     flushPendingText();
     stopTimer();
+    statusRef.current = "interrupted";
     setStatus("interrupted");
+    setStalledMs(0);
     setCurrentToolName(null);
     setCurrentToolArgs(null);
 
@@ -510,7 +548,8 @@ export function useAgentStream(): UseAgentStreamReturn {
     currentToolArgs,
     lastError,
     filesChangedCount,
-     reasoningTree,
+    reasoningTree,
+    stalledMs,
   };
 
   return {

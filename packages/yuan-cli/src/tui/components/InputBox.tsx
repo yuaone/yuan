@@ -26,6 +26,10 @@ export interface InputBoxProps {
   onSlashClose?: () => void;
   isRunning?: boolean;
   disabled?: boolean;
+  /** Called when user submits a message while agent is running (queue it) */
+  onQueueMessage?: (value: string) => void;
+  /** Queued pending message to display while agent is running */
+  pendingMessage?: string;
 }
 
 export function InputBox({
@@ -39,6 +43,8 @@ export function InputBox({
   onSlashClose,
   isRunning,
   disabled,
+  onQueueMessage,
+  pendingMessage,
 }: InputBoxProps): React.JSX.Element {
   const { columns } = useTerminalSize();
   const history = useInputHistory();
@@ -164,12 +170,18 @@ export function InputBox({
         if (trimmed.startsWith("/") && onSlashCommand) {
           onSlashCommand(trimmed);
           onSlashClose?.();
+          history.push(trimmed);
+          updateValue("");
+        } else if (isRunning && onQueueMessage) {
+          // Agent running → queue the message instead of sending
+          onQueueMessage(trimmed);
+          history.push(trimmed);
+          updateValue("");
         } else {
           onSubmit(trimmed);
+          history.push(trimmed);
+          updateValue("");
         }
-
-        history.push(trimmed);
-        updateValue("");
         return;
       }
 
@@ -265,8 +277,9 @@ export function InputBox({
     },
   );
 
-  const prompt = isRunning ? " " : TOKENS.brand.prompt;
-  const displayValue = isRunning ? "" : value;
+  const prompt = TOKENS.brand.prompt;
+  // While running, show current typing (for pending queue). Cursor hidden while running.
+  const displayValue = value;
   const clampedCursor = Math.min(cursorPos, displayValue.length);
 
   // Detect if input is a recognized slash command → show token in cyan/red
@@ -275,6 +288,7 @@ export function InputBox({
   const cmdRest = isSlash ? displayValue.slice(cmdToken.length) : "";
   const cmdRecognized = isSlash && isKnownCommand(cmdToken);
 
+  // Show cursor only when not running and not in slash menu
   const showCursor = !isRunning && !slashMenuOpen;
 
   /**
@@ -327,10 +341,25 @@ export function InputBox({
   return (
     <Box width={columns} flexDirection="column" flexShrink={0}>
       <Text dimColor>{TOKENS.box.horizontal.repeat(Math.max(0, columns - 1))}</Text>
+      {/* Pending queued message — shown above input when agent is running */}
+      {isRunning && pendingMessage ? (
+        <Box>
+          <Text dimColor>⏸ </Text>
+          <Text dimColor color="yellow">{pendingMessage.length > columns - 6 ? pendingMessage.slice(0, columns - 9) + "…" : pendingMessage}</Text>
+          <Text dimColor> (queued)</Text>
+        </Box>
+      ) : null}
       <Box justifyContent="space-between">
         <Box flexShrink={1} overflow="hidden">
-          <Text dimColor>{prompt} </Text>
-          <Text>{inputLine}</Text>
+          {isRunning && !value ? (
+            // Running with no typed input — show dim hint
+            <Text dimColor>{prompt} type to queue next message…</Text>
+          ) : (
+            <>
+              <Text dimColor>{prompt} </Text>
+              <Text>{inputLine}</Text>
+            </>
+          )}
         </Box>
 
         <Box flexShrink={0}>
