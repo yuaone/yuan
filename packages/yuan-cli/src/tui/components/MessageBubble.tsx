@@ -92,8 +92,8 @@ function ToolCallLine({ tc, isLast }: { tc: TUIToolCall; isLast: boolean }): Rea
     <Box paddingLeft={2}>
       {tc.status === "running" ? (
         <>
-          <Text dimColor>{TOKENS.brand.prefix} </Text>
-          <Text bold>{tc.toolName}</Text>
+          <Text color="#f59e0b">{TOKENS.brand.prefix} </Text>
+          <Text bold color="white">{tc.toolName}</Text>
           {argsTruncated ? <Text dimColor>({argsTruncated})</Text> : null}
           <Text> </Text>
           <Spinner />
@@ -124,31 +124,35 @@ export function MessageBubble({
 
   switch (msg.role) {
     case "user": {
-      // Wrap long text into lines, pad each line to same width for uniform bg
-      const maxContentWidth = width - 4; // 2 padding each side
+      // Claude Code style: left-aligned, solid dark bg bar, ▶ prefix
+      const maxContentWidth = width - 5; // "▶ " (2) + right pad (3)
       const lines: string[] = [];
-      const words = msg.content.split(" ");
-      let currentLine = "";
-      for (const word of words) {
-        if (currentLine.length + word.length + 1 > maxContentWidth) {
-          if (currentLine) lines.push(currentLine);
-          currentLine = word;
-        } else {
-          currentLine = currentLine ? currentLine + " " + word : word;
+      const rawLines = msg.content.split("\n");
+      for (const rawLine of rawLines) {
+        if (!rawLine) { lines.push(""); continue; }
+        const words = rawLine.split(" ");
+        let currentLine = "";
+        for (const word of words) {
+          if (currentLine.length + word.length + 1 > maxContentWidth) {
+            if (currentLine) lines.push(currentLine);
+            currentLine = word;
+          } else {
+            currentLine = currentLine ? `${currentLine} ${word}` : word;
+          }
         }
+        if (currentLine) lines.push(currentLine);
       }
-      if (currentLine) lines.push(currentLine);
-      // Find the longest line for uniform padding
-      const longestLine = Math.max(...lines.map((l) => l.length), 1);
-      const paddedLines = lines.map((l) => ` ${l.padEnd(longestLine)} `);
-     const horizontal = "─".repeat(longestLine + 2);
+      if (lines.length === 0) lines.push("");
+      const fillWidth = width - 1;
       return (
-        <Box flexDirection="column" marginBottom={1} alignItems="flex-end">
-          <Text dimColor>{`┌${horizontal}┐`}</Text>
-          {paddedLines.map((line, i) => (
-            <Text key={i} backgroundColor="#1e1e1e" color="white">{`│${line}│`}</Text>
-          ))}
-          <Text dimColor>{`└${horizontal}┘`}</Text>
+        <Box flexDirection="column" marginBottom={1}>
+          {lines.map((line, i) => {
+            const prefix = i === 0 ? "▶ " : "  ";
+            const full = `${prefix}${line}`.padEnd(fillWidth);
+            return (
+              <Text key={i} backgroundColor="#2a2a2a" color="white">{full}</Text>
+            );
+          })}
         </Box>
       );
     }
