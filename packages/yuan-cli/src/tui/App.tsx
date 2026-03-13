@@ -455,6 +455,7 @@ const messages = agentStream.state.messages;
         messages={messages}
         isThinking={isRunning}
         maxHeight={contentHeight}
+        pendingMessage={pendingMessage ?? undefined}
       />
 
       {/* Approval prompt — shown when agent needs user approval for a tool call */}

@@ -25,6 +25,8 @@ export interface MessageListProps {
   messages: TUIMessage[];
   isThinking?: boolean;
   maxHeight?: number;
+  /** Pending queued message — shown as dim user bubble after latest message */
+  pendingMessage?: string;
 }
 
 const DIFF_TOOL_NAMES = new Set(["file_write", "file_edit", "edit_file", "write_file"]);
@@ -72,6 +74,7 @@ export const MessageList = memo(function MessageList({
   messages,
   isThinking,
   maxHeight,
+  pendingMessage,
 }: MessageListProps): React.JSX.Element {
   const { columns, rows } = useTerminalSize();
   const height = maxHeight ?? rows - 4;
@@ -163,6 +166,15 @@ export const MessageList = memo(function MessageList({
           isLatest={startIdx + i === messages.length - 1}
         />
       ))}
+
+      {/* Pending queued message bubble — shown as dim user message while agent is running */}
+      {pendingMessage && (
+        <Box flexShrink={0} marginBottom={1}>
+          <Text color="#4b5563">▶ </Text>
+          <Text color="#4b5563">{pendingMessage.length > columns - 14 ? pendingMessage.slice(0, columns - 17) + "…" : pendingMessage}</Text>
+          <Text color="#374151"> ⏸queued</Text>
+        </Box>
+      )}
 
       {/* Thinking indicator */}
       {isThinking && !messages.some((m) => m.isStreaming) && (
