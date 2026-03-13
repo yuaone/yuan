@@ -458,9 +458,10 @@ export class MemoryUpdater {
   /** 에러 메시지 첫 줄 추출 */
   private extractErrorMessage(output: string): string {
     const lines = output.split("\n").filter((l) => l.trim().length > 0);
-    // "error" 키워드가 포함된 첫 줄 우선
-    const errorLine = lines.find((l) => /error/i.test(l));
-    return truncate(errorLine ?? lines[0] ?? "Unknown error", 120);
+ if (lines.length === 0) return "Unknown error";
+
+ const errorLine = lines.find((l) => /error/i.test(l));
+ return truncate(errorLine ?? lines[0], 120);
   }
 
   /**
@@ -488,8 +489,8 @@ export class MemoryUpdater {
 
     // 어시스턴트 메시지에서 "fix", "resolved", "수정" 키워드 탐색
     for (const msg of messages) {
-      if (msg.role !== "assistant" || !msg.content) continue;
-      const content = msg.content;
+ if (msg.role !== "assistant") continue;
+ const content = msg.content ?? "";
       if (/(?:fix(?:ed)?|resolv(?:ed|ing)|수정|해결)/i.test(content)) {
         // 해결 관련 메시지의 첫 문장 추출
         const sentence = content.split(/[.!\n]/)[0];

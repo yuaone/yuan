@@ -4,9 +4,10 @@
  */
 
 // ─── BYOK (Bring Your Own Key) ───
-
+import type { SubAgentRole } from "./sub-agent-prompts.js"
+import type { ParsedSkill, SkillContext } from "./plugin-types.js"
 /** LLM provider 식별자 */
-export type LLMProvider = "openai" | "anthropic" | "yua";
+export type LLMProvider = "openai" | "anthropic" | "yua" | "google";
 
 /** BYOK 설정 — 사용자가 직접 제공하는 API 키 */
 export interface BYOKConfig {
@@ -75,6 +76,16 @@ export interface ToolDefinition {
   description: string;
   /** JSON Schema 기반 파라미터 정의 */
   parameters: ToolParameterSchema;
+ /** 도구 출처 */
+  source?: "builtin" | "plugin" | "mcp";
+  /** MCP server name (source === "mcp"일 때) */
+  serverName?: string;
+  /** 읽기 전용 도구 여부 */
+  readOnly?: boolean;
+  /** 승인 필요 여부 */
+  requiresApproval?: boolean;
+  /** 위험도 */
+  riskLevel?: "low" | "medium" | "high" | "critical";
 }
 
 /** LLM이 요청한 도구 호출 */
@@ -146,6 +157,11 @@ export interface PlanStep {
   targetFiles: string[];
   /** 참조용 파일 (읽기 전용) */
   readFiles: string[];
+  role?: SubAgentRole
+ /** 이 step에 추천된 skill IDs */
+  skillIds?: string[];
+  /** 실행 직전 해석된 skill들 */
+  resolvedSkills?: ParsedSkill[];
   /** 필요한 도구 */
   tools: string[];
   /** 예상 반복 횟수 */
@@ -164,6 +180,13 @@ export interface ExecutionPlan {
   estimatedTokens: number;
 }
 
+export interface ReasoningNode {
+  id: string;
+  label: string;
+  text?: string;
+  children: ReasoningNode[];
+}
+
 // ─── Agent Events (SSE) ───
 
 /** SSE 이벤트 타입 */
@@ -172,6 +195,41 @@ export type AgentEvent =
   | { kind: "agent:thinking"; content: string }
   | { kind: "agent:tool_call"; tool: string; input: unknown }
   | { kind: "agent:tool_result"; tool: string; output: string; durationMs: number }
+  | {
+      kind: "agent:reasoning_tree";
+      tree: ReasoningNode;
+    }
+  | {
+      kind: "agent:reasoning_timeline";
+      source: "subagent" | "speculative" | "dag";
+      taskId?: string;
+      agentId?: string;
+      role?: SubAgentRole | "orchestrator";
+      text: string;
+    }
+  | {
+      kind: "agent:subagent_phase"
+      taskId: string
+      phase: string
+    }
+  | {
+      kind: "agent:subagent_done"
+      taskId: string
+      success: boolean
+    }
+| {
+    kind: "agent:reasoning_delta"
+    id?: string
+    text: string
+    provider?: string
+    model?: string
+    source?: "llm" | "agent"
+  }
+| {
+    kind: "agent:tool_batch"
+    batchId: string
+    size: number
+  }
   | { kind: "agent:file_change"; path: string; diff: string }
   | { kind: "agent:iteration"; index: number; tokensUsed: number; durationMs?: number }
   | { kind: "agent:error"; message: string; retryable: boolean }
@@ -292,6 +350,10 @@ export interface ToolExecutor {
    * @param abortSignal - 인터럽트 시 실행을 취소하기 위한 AbortSignal (선택)
    */
   execute(call: ToolCall, abortSignal?: AbortSignal): Promise<ToolResult>;
+  executeSQL?(
+    sql: string,
+    params?: unknown[],
+  ): Promise<{ rows: Record<string, unknown>[] }>;
 }
 
 // ─── Phase 2: Parallel Agent Orchestration ───
@@ -336,6 +398,11 @@ export interface PlannedTask {
   estimatedIterations: number;
   /** 우선순위 (0–10, 높을수록 우선) */
   priority: number;
+  role?: SubAgentRole
+ /** 이 step에 추천된 skill IDs */
+  skillIds?: string[];
+  /** 실행 직전 해석된 skill들 */
+  resolvedSkills?: ParsedSkill[];
   /** 태스크별 BYOK 설정 오버라이드 (미지정 시 배치/실행자 기본값 사용) */
   byokOverride?: BYOKConfig;
 }
@@ -361,6 +428,7 @@ export interface TaskResult {
   tokensUsed: number;
   /** 반복 횟수 */
   iterations: number;
+  usedSkillIds?: string[];
 }
 
 /** DAG 실행 상태 (실시간 추적용) */
@@ -411,12 +479,18 @@ export interface SubAgentContext {
   overallGoal: string;
   /** 이 태스크의 세부 목표 */
   taskGoal: string;
+ /** skill trigger matching용 문맥 */
+ 
+  skillContext?: SkillContext;
+  /** 현재 태스크에 해석된 skill들 */
+  resolvedSkills?: ParsedSkill[];
   /** 작업 대상 파일 */
   targetFiles: string[];
   /** 참조용 파일 */
   readFiles: string[];
   /** 프로젝트 구조 요약 */
   projectStructure: string;
+  remainingBudget?: number
   /** 선행 태스크 결과 (의존성에 의해 전달) */
   dependencyResults?: {
     taskId: string;

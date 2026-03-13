@@ -18,7 +18,7 @@ import type {
   DAGResult,
   SubAgentContext,
 } from "./types.js";
-
+import type { SkillContext } from "./plugin-types.js";
 // ─── Config & Options ───
 
 /** DAG 오케스트레이터 설정 */
@@ -35,6 +35,7 @@ export interface DAGOrchestratorConfig {
   spawnAgent: (
     task: PlannedTask,
     context: SubAgentContext,
+    signal: AbortSignal
   ) => Promise<TaskResult>;
 }
 
@@ -54,6 +55,7 @@ export interface DAGOrchestratorEvents {
   "dag:task_start": { taskId: string; agentId: string };
   "dag:task_complete": { taskId: string; result: TaskResult };
   "dag:task_failed": { taskId: string; error: string; retryCount: number };
+  "dag:agent_reasoning": { taskId: string; agentId: string; text: string };
   "dag:progress": {
     completed: number;
     running: number;
@@ -100,8 +102,10 @@ export class DAGOrchestrator extends EventEmitter {
   private readonly config: DAGOrchestratorConfig;
   /** 태스크 ID → 의존하는 선행 태스크 ID 집합 */
   private dependencyMap: Map<string, Set<string>> = new Map();
+  private reverseDependencyMap: Map<string, Set<string>> = new Map();
   /** 태스크 ID → PlannedTask */
   private taskMap: Map<string, PlannedTask> = new Map();
+  private depthMap: Map<string, number> = new Map();
   /** 태스크별 재시도 횟수 추적 */
   private retryCounts: Map<string, number> = new Map();
 
@@ -126,13 +130,17 @@ export class DAGOrchestrator extends EventEmitter {
     plan: AgentPlan,
     options: DAGExecuteOptions,
   ): Promise<DAGResult> {
+this.dependencyMap.clear();
+ this.taskMap.clear();
+ this.retryCounts.clear();
     // Build lookup structures
     this.buildLookups(plan);
-
+   this.validateDAG(plan);
+   this.computeTaskDepths(plan);
     const state = this.initState(plan);
     const startTime = Date.now();
     const completionQueue = new AsyncCompletionQueue<CompletionEvent>();
-
+   const abortController = new AbortController();
     // Main DAG loop
     while (this.hasPendingWork(state)) {
       // Check budget / wall time
@@ -154,8 +162,20 @@ export class DAGOrchestrator extends EventEmitter {
         state.runningTasks.length;
       const toSpawn = runnable.slice(0, Math.max(0, slotsAvailable));
 
+       const remainingBudget = Math.max(
+        0,
+        state.totalTokenBudget - state.totalTokensUsed,
+      );
+      const perTaskBudget =
+        toSpawn.length > 0
+          ? Math.max(4000, Math.floor(remainingBudget / toSpawn.length))
+          : 0;
+
       // Spawn agents for runnable tasks
       for (const task of toSpawn) {
+   if (state.totalTokensUsed >= state.totalTokenBudget) {
+   break;
+ }
         const agentId = randomUUID();
 
         // Update state to running
@@ -168,13 +188,28 @@ export class DAGOrchestrator extends EventEmitter {
         state.runningTasks.push(task.id);
 
         this.emit("dag:task_start", { taskId: task.id, agentId });
-
+        this.emit("dag:agent_reasoning", {
+          taskId: task.id,
+          agentId,
+          text: `Spawned task "${task.goal}"`,
+        });
         // Build context for sub-agent
         const context = this.buildSubAgentContext(task, state, options);
 
+const agentContext: SubAgentContext = {
+   ...context,
+   remainingBudget
+ }
         // Spawn agent (fire-and-forget, result via queue)
         this.config
-          .spawnAgent(task, context)
+          .spawnAgent(
+            task,
+            {
+              ...context,
+              remainingBudget: perTaskBudget,
+            },
+            abortController.signal,
+          )
           .then((result) => {
             completionQueue.push({
               taskId: task.id,
@@ -203,7 +238,15 @@ export class DAGOrchestrator extends EventEmitter {
       }
 
       // Wait for at least one completion
-      const event = await completionQueue.shift();
+const event = await Promise.race([
+  completionQueue.shift(),
+  new Promise<CompletionEvent>((_, reject) =>
+    setTimeout(() => {
+      abortController.abort();
+      reject(new Error("Agent timeout"));
+    }, 300000),
+  ),
+]);
       this.processCompletionEvent(state, event);
 
       // Drain any additional completions that arrived
@@ -228,12 +271,12 @@ export class DAGOrchestrator extends EventEmitter {
    */
   private findRunnableTasks(state: DAGExecutionState): PlannedTask[] {
     const runnable: PlannedTask[] = [];
-
+    const completedSet = new Set(state.completedTasks);
     for (const taskId of state.pendingTasks) {
       const deps = this.dependencyMap.get(taskId) ?? new Set();
-      const allDepsCompleted = [...deps].every((depId) =>
-        state.completedTasks.includes(depId),
-      );
+const allDepsCompleted = [...deps].every((depId) =>
+  completedSet.has(depId),
+);
 
       if (allDepsCompleted) {
         const task = this.taskMap.get(taskId);
@@ -262,18 +305,19 @@ export class DAGOrchestrator extends EventEmitter {
     const tasks = new Map<string, TaskStatus>();
     const pendingTasks: string[] = [];
 
-    for (const task of plan.tasks) {
-      const deps = this.dependencyMap.get(task.id) ?? new Set();
-      if (deps.size === 0) {
-        tasks.set(task.id, { status: "pending" });
-      } else {
-        tasks.set(task.id, {
-          status: "blocked",
-          waitingFor: [...deps],
-        });
-      }
-      pendingTasks.push(task.id);
-    }
+for (const task of plan.tasks) {
+  const deps = this.dependencyMap.get(task.id) ?? new Set();
+
+  if (deps.size === 0) {
+    tasks.set(task.id, { status: "pending" });
+  } else {
+    tasks.set(task.id, {
+      status: "blocked",
+      waitingFor: [...deps],
+    });
+  }
+  pendingTasks.push(task.id)
+}
 
     return {
       dagId: randomUUID(),
@@ -306,8 +350,10 @@ export class DAGOrchestrator extends EventEmitter {
     state.totalTokensUsed += result.tokensUsed;
 
     // Unblock dependent tasks
-    for (const [taskId, deps] of this.dependencyMap) {
-      if (!deps.has(result.taskId)) continue;
+ const dependents =
+   this.reverseDependencyMap.get(result.taskId) ?? new Set();
+
+ for (const taskId of dependents) {
 
       const taskStatus = state.tasks.get(taskId);
       if (taskStatus && taskStatus.status === "blocked") {
@@ -316,6 +362,7 @@ export class DAGOrchestrator extends EventEmitter {
         );
         if (remaining.length === 0) {
           state.tasks.set(taskId, { status: "pending" });
+          state.pendingTasks.push(taskId)
         } else {
           state.tasks.set(taskId, {
             status: "blocked",
@@ -400,12 +447,14 @@ export class DAGOrchestrator extends EventEmitter {
   /** plan으로부터 의존성 맵과 태스크 맵을 빌드한다. */
   private buildLookups(plan: AgentPlan): void {
     this.dependencyMap.clear();
+    this.reverseDependencyMap.clear();
     this.taskMap.clear();
     this.retryCounts.clear();
 
     for (const task of plan.tasks) {
       this.taskMap.set(task.id, task);
       this.dependencyMap.set(task.id, new Set());
+      this.reverseDependencyMap.set(task.id, new Set());
     }
 
     for (const [from, to] of plan.dependencies) {
@@ -414,6 +463,10 @@ export class DAGOrchestrator extends EventEmitter {
       if (deps) {
         deps.add(from);
       }
+    const rev = this.reverseDependencyMap.get(from);
+    if (rev) {
+      rev.add(to);
+    }
     }
   }
 
@@ -469,7 +522,45 @@ export class DAGOrchestrator extends EventEmitter {
       state.tasks.set(taskId, { status: "skipped", reason });
     }
     state.pendingTasks = [];
+
   }
+
+  private validateDAG(plan: AgentPlan): void {
+  const inDegree = new Map<string, number>();
+
+  for (const task of plan.tasks) {
+    inDegree.set(task.id, 0);
+  }
+
+  for (const [from, to] of plan.dependencies) {
+    inDegree.set(to, (inDegree.get(to) ?? 0) + 1);
+  }
+
+  const queue: string[] = [];
+  for (const [id, deg] of inDegree) {
+    if (deg === 0) queue.push(id);
+  }
+
+  let visited = 0;
+
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    visited++;
+
+    for (const [from, to] of plan.dependencies) {
+      if (from !== id) continue;
+
+      const deg = (inDegree.get(to) ?? 0) - 1;
+      inDegree.set(to, deg);
+
+      if (deg === 0) queue.push(to);
+    }
+  }
+
+  if (visited !== plan.tasks.length) {
+    throw new Error("Invalid DAG: circular dependency detected");
+  }
+}
 
   /** 서브 에이전트 컨텍스트를 빌드한다. */
   private buildSubAgentContext(
@@ -480,7 +571,10 @@ export class DAGOrchestrator extends EventEmitter {
     // Collect results from dependency tasks
     const deps = this.dependencyMap.get(task.id) ?? new Set();
     const dependencyResults: SubAgentContext["dependencyResults"] = [];
-
+    const skillContext: SkillContext = {
+      taskDescription: task.goal,
+      filePath: task.targetFiles[0],
+    };
     for (const depId of deps) {
       const depStatus = state.tasks.get(depId);
       if (depStatus && depStatus.status === "completed") {
@@ -498,11 +592,37 @@ export class DAGOrchestrator extends EventEmitter {
       targetFiles: task.targetFiles,
       readFiles: task.readFiles,
       projectStructure: options.projectStructure ?? "",
+      skillContext,
+      resolvedSkills: task.resolvedSkills,
       dependencyResults:
         dependencyResults.length > 0 ? dependencyResults : undefined,
     };
   }
+private computeTaskDepths(plan: AgentPlan): void {
+  const memo = new Map<string, number>();
 
+  const dfs = (id: string): number => {
+    if (memo.has(id)) return memo.get(id)!;
+
+    const deps = this.dependencyMap.get(id) ?? new Set();
+
+    if (deps.size === 0) {
+      memo.set(id, 0);
+      return 0;
+    }
+
+    const depth =
+      1 + Math.max(...[...deps].map((d) => dfs(d)));
+
+    memo.set(id, depth);
+    return depth;
+  };
+
+  for (const task of plan.tasks) {
+    const depth = dfs(task.id);
+    this.depthMap.set(task.id, depth);
+  }
+}
   /** 진행 상황 이벤트를 emit한다. */
   private emitProgress(state: DAGExecutionState, total: number): void {
     this.emit("dag:progress", {

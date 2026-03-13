@@ -94,21 +94,20 @@ async function createRedisAdapter(
         channel: string,
         listener: (message: string) => void,
       ): Unsubscribe {
-        const handler = (ch: string, msg: string) => {
-          if (ch === channel) listener(msg);
-        };
-        subscriptions.set(channel, handler);
+const handler = (ch: string, msg: string) => {
+  if (ch === channel) listener(msg);
+};
 
-        // eslint-disable-next-line @typescript-eslint/no-floating-promises
-        sub.subscribe(channel);
-        sub.on("message", handler);
+subscriptions.set(channel, handler);
 
-        return () => {
-          sub.off("message", handler);
-          subscriptions.delete(channel);
-          // eslint-disable-next-line @typescript-eslint/no-floating-promises
-          sub.unsubscribe(channel);
-        };
+sub.subscribe(channel);
+sub.on("message", handler);
+
+return () => {
+  sub.off("message", handler);
+  subscriptions.delete(channel);
+  sub.unsubscribe(channel);
+};
       },
 
       async disconnect(): Promise<void> {
@@ -238,6 +237,9 @@ export class HybridEventBus {
    * @returns 부여된 시퀀스 번호
    */
   emit(sessionId: string, event: BusEvent): number {
+  if (!this.initialized) {
+    throw new Error("HybridEventBus not initialized. Call init() first.");
+  }
     const seq = this.nextSeq(sessionId);
     const stamped: StampedEvent = {
       ...event,
@@ -293,7 +295,7 @@ export class HybridEventBus {
   replay(sessionId: string, fromSeq: number): StampedEvent[] {
     const buffer = this.buffers.get(sessionId);
     if (!buffer) return [];
-    return buffer.filter((e) => e.seq > fromSeq);
+    return [...buffer].filter((e) => e.seq > fromSeq);
   }
 
   // ─── Team Broadcast (Layer 3) ───

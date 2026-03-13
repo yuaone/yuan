@@ -33,13 +33,20 @@ export interface TUIMessage {
 /** A tool call within an assistant message */
 export interface TUIToolCall {
   id: string;
+  callId?: string
   toolName: string;
   argsSummary: string;
   status: "running" | "success" | "error";
   duration?: number;
   result?: TUIToolResult;
   isExpanded: boolean;
-}
+  /** timestamp when tool started */
+  startedAt?: number;
+  /** timestamp when tool completed */
+  completedAt?: number;
+  /** parallel batch id (tools started in same tick share batch) */
+  batchId?: string;
+ }
 
 /** The result of a tool call */
 export interface TUIToolResult {
@@ -107,4 +114,12 @@ export interface AgentStreamState {
   lastError: string | null;
   /** Files changed count in this turn */
   filesChangedCount: number;
+  reasoningTree?: ReasoningNode;
+}
+/** Hierarchical reasoning tree node */
+export interface ReasoningNode {
+  id: string;
+  label: string;
+  text?: string;
+  children: ReasoningNode[];
 }

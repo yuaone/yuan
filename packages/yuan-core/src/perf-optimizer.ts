@@ -192,6 +192,7 @@ export class PerfOptimizer {
    * @param phase - Phase name (e.g. "analyze", "plan", "implement", "verify", "fix")
    */
   startPhase(phase: string): void {
+    if (this.activePhases.has(phase)) return;
     this.activePhases.set(phase, {
       phase,
       startTime: Date.now(),
@@ -359,7 +360,12 @@ export class PerfOptimizer {
     if (!this.config.enableCaching) return;
 
     const key = this.hashInput(tool, input);
-    const serialized = JSON.stringify(result);
+ let serialized: string;
+ try {
+   serialized = JSON.stringify(result);
+ } catch {
+   return; // skip caching circular objects
+ }
     const sizeBytes = Buffer.byteLength(serialized, "utf8");
 
     // Don't cache if single entry exceeds half the memory limit
@@ -649,7 +655,7 @@ export class PerfOptimizer {
   generateReport(sessionId: string): PerfReport {
     const totalDurationMs = this.getTotalDuration();
     const bottlenecks = this.getBottlenecks();
-    const parallelHints = this.getParallelHints(new Map());
+    const parallelHints: ParallelHint[] = [];
 
     // Token summary
     const byPhase: Record<string, number> = {};
@@ -835,7 +841,13 @@ export class PerfOptimizer {
 
   /** Generate a content-addressable hash for tool+input */
   private hashInput(tool: string, input: unknown): string {
-    const content = `${tool}:${JSON.stringify(input)}`;
+ let json: string;
+ try {
+   json = JSON.stringify(input);
+ } catch {
+   json = "[unserializable]";
+ }
+ const content = `${tool}:${json}`;
     return createHash("sha256").update(content).digest("hex").slice(0, 32);
   }
 

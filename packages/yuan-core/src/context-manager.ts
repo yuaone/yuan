@@ -84,6 +84,14 @@ export class ContextManager {
   }
 
   /**
+   * 현재 컨텍스트 사용 비율(0~1 근사치)을 반환.
+   * output reserve를 제외한 usable budget 기준이다.
+   */
+  getUsageRatio(): number {
+    const availableTokens = Math.max(1, this.maxTokens - this.outputReserve);
+    return this.estimateTokens(this.messages) / availableTokens;
+  } 
+  /**
    * LLM에 보낼 메시지를 준비.
    * 필요 시 압축하여 컨텍스트 윈도우 내에 맞춤.
    */
@@ -100,7 +108,7 @@ export class ContextManager {
     currentTokens = this.estimateTokens(compacted);
 
     if (currentTokens > availableTokens) {
-      throw new ContextOverflowError(currentTokens, availableTokens);
+     return this.emergencyTrim(compacted, availableTokens);
     }
 
     return compacted;
@@ -116,7 +124,7 @@ export class ContextManager {
     for (const msg of messages) {
       // 메시지 오버헤드 (~4 토큰)
       total += 4;
-      if (msg.content) {
+      if (msg.content !== undefined) {
         if (typeof msg.content === "string") {
           total += this.estimateStringTokens(msg.content);
         } else if (Array.isArray(msg.content)) {
@@ -299,6 +307,118 @@ export class ContextManager {
   }
 
   /**
+   * compactHistory 이후에도 예산을 초과하면 실행하는 최후 압축 단계.
+   *
+   * 절대 throw하지 않고:
+   * - system 메시지(rolling window 적용 후) 유지
+   * - 오래된 대화는 1개의 초압축 summary로 치환
+   * - 최근 대화만 남김
+   * - 그래도 크면 최근 메시지부터 내용 자체를 잘라서 맞춘다
+   */
+  private emergencyTrim(messages: Message[], targetTokens: number): Message[] {
+    const systemMessages = this.pruneSystemMessages(
+      messages.filter((m) => m.role === "system"),
+      8,
+    );
+    const nonSystemMessages = messages.filter((m) => m.role !== "system");
+
+    const recentMessages = this.takeRecentConversationWindow(nonSystemMessages, 6);
+    const olderMessages = nonSystemMessages.slice(
+      0,
+      Math.max(0, nonSystemMessages.length - recentMessages.length),
+    );
+
+    const result: Message[] = [...systemMessages];
+
+    if (olderMessages.length > 0) {
+      result.push({
+        role: "system",
+        content:
+          "[Compressed conversation state]\n" +
+          this.summarizeMessages(olderMessages).slice(0, 1200),
+      });
+    }
+
+    for (const msg of recentMessages) {
+      if (msg.role === "tool" && msg.content) {
+        result.push({
+          ...msg,
+          content: this.truncateToolResult(contentToString(msg.content)),
+        });
+      } else {
+        result.push(msg);
+      }
+    }
+
+    let currentTokens = this.estimateTokens(result);
+    if (currentTokens <= targetTokens) {
+      return result;
+    }
+
+    // 여전히 크면, 오래된 non-system부터 제거
+    while (result.length > systemMessages.length + 2 && currentTokens > targetTokens) {
+      const removeIndex = systemMessages.length;
+      if (removeIndex >= result.length) break;
+
+      const candidate = result[removeIndex];
+      if (candidate.role === "tool") break;
+      if (candidate.role === "assistant" && candidate.tool_calls?.length) break;
+
+      result.splice(removeIndex, 1);
+      currentTokens = this.estimateTokens(result);
+    }
+
+    if (currentTokens <= targetTokens) {
+      return result;
+    }
+
+    // 그래도 크면 최근 메시지 본문 자체를 잘라서 맞춘다.
+    for (let i = result.length - 1; i >= systemMessages.length && currentTokens > targetTokens; i--) {
+      const msg = result[i];
+      result[i] = this.truncateMessageForBudget(msg, 400);
+      currentTokens = this.estimateTokens(result);
+    }
+
+    // 마지막 fallback: system + 마지막 user/assistant/tool 흐름만 남긴다.
+    if (currentTokens > targetTokens) {
+      const minimalRecent = this.takeRecentConversationWindow(nonSystemMessages, 3).map((msg) =>
+        this.truncateMessageForBudget(msg, 250),
+      );
+      return [...systemMessages, ...minimalRecent];
+    }
+
+    return result;
+  }
+
+  /**
+   * 최근 대화 윈도우를 가져오되, assistant(tool_calls) ↔ tool pair가
+   * 깨지지 않도록 뒤에서부터 묶어서 보존한다.
+   */
+  private takeRecentConversationWindow(messages: Message[], count: number): Message[] {
+    const start = Math.max(0, messages.length - count);
+    const recent = messages.slice(start);
+
+    if (recent.length === 0) return recent;
+
+    const repaired: Message[] = [];
+    for (let i = 0; i < recent.length; i++) {
+      repaired.push(recent[i]);
+      const msg = recent[i];
+      if (msg.role === "assistant" && msg.tool_calls?.length) {
+        const expectedIds = new Set(msg.tool_calls.map((tc) => tc.id));
+        let j = i + 1;
+        while (j < recent.length && recent[j].role === "tool") {
+          if (expectedIds.has(recent[j].tool_call_id ?? "")) {
+            repaired.push(recent[j]);
+          }
+          j++;
+        }
+      }
+    }
+
+    return repaired;
+  }
+  /**
    * 런타임 시스템 메시지를 rolling window으로 제한.
    * 첫 번째 시스템 메시지(기본 프롬프트)는 항상 유지하고,
    * 나머지 런타임 시스템 메시지는 최근 maxRuntime개만 유지.
@@ -325,8 +445,9 @@ export class ContextManager {
       if (msg.role === "user") {
         userMsgCount++;
         if (msg.content) {
-          const preview = msg.content.slice(0, 100);
-          actions.push(`User: ${preview}${msg.content.length > 100 ? "..." : ""}`);
+          const text = contentToString(msg.content);
+          const preview = text.slice(0, 100);
+          actions.push(`User: ${preview}${text.length > 100 ? "..." : ""}`);
         }
       } else if (msg.role === "assistant" && msg.tool_calls) {
         toolCallCount += msg.tool_calls.length;
@@ -351,6 +472,36 @@ export class ContextManager {
     const MAX = 500;
     if (content.length <= MAX) return content;
     return content.slice(0, 200) + "\n...(truncated)...\n" + content.slice(-200);
+  }
+
+  /**
+   * 메시지 하나를 예산 친화적으로 축약한다.
+   * tool_call / tool_call_id 구조는 유지하고 content만 줄인다.
+   */
+  private truncateMessageForBudget(message: Message, maxChars: number): Message {
+    if (!message.content) return message;
+
+    if (typeof message.content === "string") {
+      if (message.content.length <= maxChars) return message;
+      return {
+        ...message,
+        content:
+          message.content.slice(0, Math.floor(maxChars / 2)) +
+          "\n...[compressed]...\n" +
+          message.content.slice(-Math.floor(maxChars / 2)),
+      };
+    }
+
+    const content = contentToString(message.content);
+    if (content.length <= maxChars) return message;
+
+    return {
+      ...message,
+      content:
+        content.slice(0, Math.floor(maxChars / 2)) +
+        "\n...[compressed]...\n" +
+        content.slice(-Math.floor(maxChars / 2)),
+    };
   }
 
   /**

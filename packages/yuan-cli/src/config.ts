@@ -11,7 +11,7 @@ import * as os from "node:os";
 import * as readline from "node:readline";
 
 /** Supported LLM providers */
-export type Provider = "openai" | "anthropic" | "yua";
+export type Provider = "openai" | "anthropic" | "yua" | "google";
 
 /** YUAN CLI configuration (stored in ~/.yuan/config.json) */
 export interface YuanConfig {
@@ -31,6 +31,7 @@ const DEFAULT_MODELS: Record<Provider, string> = {
   openai: "gpt-4o-mini",
   anthropic: "claude-sonnet-4-20250514",
   yua: "yua-normal",
+  google: "gemini-2.5-flash",
 };
 
 /** Default configuration */
@@ -185,11 +186,13 @@ export class ConfigManager {
     console.log("    1) YUA (recommended, self-hosted)");
     console.log("    2) OpenAI");
     console.log("    3) Anthropic");
+    console.log("    4) Google Gemini");
     const providerChoice = await ask("\n  Provider [1-3] (default: 1): ");
     const providerMap: Record<string, Provider> = {
       "1": "yua",
       "2": "openai",
       "3": "anthropic",
+       "4": "google",
     };
     const provider = providerMap[providerChoice] ?? "yua";
     this.config.provider = provider;

@@ -24,6 +24,17 @@ interface IdentityBlock {
 
 export class SkillLoader {
   /**
+   * Match + parse in one pass.
+   */
+  resolveMatchedSkills(
+    skills: SkillDefinition[],
+    context: SkillContext,
+  ): ParsedSkill[] {
+    return this.matchTriggers(skills, context).map((skill) =>
+      this.loadTemplate(skill),
+    );
+  }
+  /**
    * Load and parse a skill's markdown template into a ParsedSkill.
    * The template can be inline content or a file path — this method
    * accepts the raw template string (caller is responsible for reading files).

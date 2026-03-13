@@ -40,6 +40,16 @@ export function ApprovalPrompt({
   const [selectedIndex, setSelectedIndex] = useState(0);
 
   useInput((input, key) => {
+ // quick yes/no keys
+  if (input === "y") {
+    onSelect("allow");
+    return;
+  }
+
+  if (input === "n") {
+    onSelect("deny");
+    return;
+  }
     // Arrow navigation
     if (key.upArrow) {
       setSelectedIndex((prev) => (prev <= 0 ? OPTIONS.length - 1 : prev - 1));

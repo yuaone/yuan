@@ -967,6 +967,15 @@ export class GitIntelligence {
   ): Promise<DiffStatEntry[]> {
     const base = baseBranch ?? (await this.detectDefaultBranch());
     const output = await this.git(["diff", "--numstat", `${base}..HEAD`]);
+  const nameStatusOutput = await this.git(["diff", "--name-status", `${base}..HEAD`]);
+    const nameStatusMap = new Map<string, string>();
+
+    for (const line of nameStatusOutput.trim().split("\n").filter(Boolean)) {
+      const [status, file] = line.split("\t");
+      if (status && file) {
+        nameStatusMap.set(file, status);
+      }
+    }
     const results: DiffStatEntry[] = [];
 
     for (const line of output.trim().split("\n").filter(Boolean)) {
@@ -978,17 +987,14 @@ export class GitIntelligence {
       const file = parts[2]!;
 
       // Determine status
-      let status = "M";
+      let status = nameStatusMap.get(file)?.[0] ?? "M";
       try {
-        const nameStatus = await this.git([
-          "diff",
-          "--name-status",
-          `${base}..HEAD`,
-          "--",
-          file,
-        ]);
-        const s = nameStatus.trim().split("\t")[0];
-        if (s) status = s[0]!;
+const nameStatusMap = new Map<string,string>();
+const nameStatusOutput = await this.git(["diff","--name-status",`${base}..HEAD`]);
+for(const l of nameStatusOutput.split("\n")){
+  const [s,f] = l.split("\t");
+  if(s && f) nameStatusMap.set(f,s);
+}
       } catch {
         // keep M
       }

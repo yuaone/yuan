@@ -1118,8 +1118,8 @@ export class LanguageSupport {
       results.push({
         name,
         line,
-        params: match[2]?.trim() || undefined,
-        returnType: match[3]?.trim() || undefined,
+ params: typeof match[2] === "string" ? match[2].trim() : undefined,
+ returnType: typeof match[3] === "string" ? match[3].trim() : undefined,
         visibility,
       });
     }
@@ -1144,7 +1144,8 @@ export class LanguageSupport {
       const name = match[1];
       if (!name) continue;
 
-      const lineText = content.split("\n")[line - 1] ?? "";
+ const lines = content.split("\n");
+ const lineText = lines[line - 1] ?? "";
       const visibility = this.extractVisibility(lineText, language);
 
       results.push({ name, line, visibility });
@@ -1346,11 +1347,7 @@ export class LanguageSupport {
 
   /** Returns the 1-based line number for a character index. */
   private getLineNumber(content: string, index: number): number {
-    let line = 1;
-    for (let i = 0; i < index && i < content.length; i++) {
-      if (content[i] === "\n") line++;
-    }
-    return line;
+return content.slice(0, index).split("\n").length;
   }
 
   /** Extracts function name from a regex match, handling language-specific patterns. */

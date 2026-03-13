@@ -25,7 +25,9 @@ export function SlashMenu({
   if (!isOpen || commands.length === 0) return null;
 
   const maxVisible = 8;
-  const boxWidth = Math.min(width - 4, 50);
+  const menuWidth = width;
+  const nameWidth = Math.min(22, Math.max(16, Math.floor(menuWidth * 0.24)));
+  const descWidth = Math.max(12, menuWidth - nameWidth - 6);
 
   // Sliding window: keep selectedIndex within the visible range
   let windowStart = 0;
@@ -43,39 +45,36 @@ export function SlashMenu({
   const hasBelow = windowEnd < commands.length;
 
   return (
-    <Box flexDirection="column" width={boxWidth}>
-      <Text dimColor>
-        {TOKENS.box.topLeft}{TOKENS.box.horizontal.repeat(boxWidth - 2)}{TOKENS.box.topRight}
-      </Text>
+<Box flexDirection="column" width={menuWidth} paddingLeft={1}>
       {hasAbove && (
-        <Box>
-          <Text dimColor>
-            {TOKENS.box.vertical}  ↑ {windowStart} more
-          </Text>
+        <Box marginBottom={0}>
+          <Text dimColor>{`  ↑ ${windowStart} more`}</Text>
         </Box>
       )}
       {visible.map((cmd, i) => {
         const actualIdx = windowStart + i;
         const isSelected = actualIdx === selectedIndex;
-        const nameWidth = 12;
-        const name = cmd.name.padEnd(nameWidth);
-        const descWidth = boxWidth - nameWidth - 6;
+        const name =
+          cmd.name.length > nameWidth
+            ? cmd.name.slice(0, nameWidth - 1) + "…"
+            : cmd.name.padEnd(nameWidth);
         const desc =
           cmd.description.length > descWidth
             ? cmd.description.slice(0, descWidth - 1) + "…"
             : cmd.description;
 
         return (
-          <Box key={cmd.name}>
-            <Text dimColor>{TOKENS.box.vertical} </Text>
+          <Box key={cmd.name} paddingLeft={1}>
             {isSelected ? (
               <>
-                <Text bold color="white">{name}</Text>
+                <Text color="cyan">› </Text>
+                <Text bold color="cyan">{name}</Text>
                 <Text color="white"> {desc}</Text>
               </>
             ) : (
               <>
-                <Text>{name}</Text>
+                <Text dimColor>{"  "}</Text>
+                <Text color="white">{name}</Text>
                 <Text dimColor> {desc}</Text>
               </>
             )}
@@ -83,15 +82,10 @@ export function SlashMenu({
         );
       })}
       {hasBelow && (
-        <Box>
-          <Text dimColor>
-            {TOKENS.box.vertical}  ↓ {commands.length - windowEnd} more
-          </Text>
+        <Box marginTop={0}>
+          <Text dimColor>{`  ↓ ${commands.length - windowEnd} more`}</Text>
         </Box>
       )}
-      <Text dimColor>
-        {TOKENS.box.bottomLeft}{TOKENS.box.horizontal.repeat(boxWidth - 2)}{TOKENS.box.bottomRight}
-      </Text>
     </Box>
   );
 }

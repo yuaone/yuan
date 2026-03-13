@@ -46,7 +46,21 @@ export class Governor extends EventEmitter {
   private readonly limits: PlanLimits;
   private readonly autoApproveActions: Set<string>;
   private readonly state: GovernorState;
+  /**
+   * iteration 카운터 초기화
+   */
+  resetIteration(): void {
+    this.state.iterationCount = 0;
+  }
 
+  /**
+   * 세션 복원 시 iteration 카운터 설정
+   */
+  restoreIteration(iteration: number): void {
+    if (Number.isFinite(iteration) && iteration >= 0) {
+      this.state.iterationCount = iteration;
+    }
+  }
   constructor(config: GovernorConfig) {
     super();
     this.limits = {
@@ -171,7 +185,11 @@ export class Governor extends EventEmitter {
   ): Record<string, unknown> {
     if (typeof args === "string") {
       try {
-        return JSON.parse(args) as Record<string, unknown>;
+  const parsed = JSON.parse(args);
+  if (typeof parsed === "object" && parsed !== null) {
+    return parsed as Record<string, unknown>;
+  }
+  return { raw: args };
       } catch {
         return { raw: args };
       }

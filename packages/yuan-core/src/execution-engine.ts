@@ -29,14 +29,20 @@
 
 import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
-
+import path from "node:path";
 import type {
   BYOKConfig,
   ToolExecutor,
   ExecutionPlan,
   AgentTermination,
   ToolDefinition,
+ AgentPlan,
+  PlannedTask,
+  TaskResult,
+  SubAgentContext,
+  ToolResult,
 } from "./types.js";
+
 import { BYOKClient } from "./llm-client.js";
 import { AgentLoop } from "./agent-loop.js";
 import { AgentLogger } from "./agent-logger.js";
@@ -57,6 +63,7 @@ import {
 } from "./state-machine.js";
 import { CodebaseContext } from "./codebase-context.js";
 import { VectorIndex } from "./vector-index.js";
+import type { EmbeddingCache } from "./vector-index.js";
 import type { SQLExecutor, EmbeddingProvider } from "./vector-index.js";
 import { LanguageSupport } from "./language-support.js";
 import {
@@ -85,7 +92,22 @@ import { IntentInferenceEngine } from "./intent-inference.js";
 import type { InferredIntent } from "./intent-inference.js";
 import { SpeculativeExecutor } from "./speculative-executor.js";
 import type { SpeculativeResult } from "./speculative-executor.js";
-
+import { SubAgent } from "./sub-agent.js";
+import { routeSubAgent } from "./sub-agent-router.js";
+import type { SubAgentRole } from "./sub-agent-prompts.js";
+import { DAGOrchestrator } from "./dag-orchestrator.js"
+import { WorkspaceLock } from "./workspace-lock.js"
+import {
+  SkillLoader,
+} from "./skill-loader.js";
+import {
+  SkillLearner,
+} from "./skill-learner.js";
+import type {
+  SkillDefinition,
+  SkillContext,
+  ParsedSkill,
+} from "./plugin-types.js";
 // ─── Types ───────────────────────────────────────────────────────
 
 /** ExecutionEngine 설정 */
@@ -194,6 +216,8 @@ export interface ExecutionEngineConfig {
 
   /** Speculative execution 시 최대 접근법 수 (기본 3) */
   speculativeMaxApproaches?: number;
+
+  skills?: SkillDefinition[];
 }
 
 /** 내부 전용 — 기본값 적용 후 설정 */
@@ -290,7 +314,7 @@ export interface ExecutionEngineEvents {
   /** 도구 결과 */
   "tool:result": (name: string, output: string) => void;
   /** 검증 결과 */
-  "verify:result": (result: DeepVerifyResult) => void;
+  "verify:result": (result: DeepVerifyResult | undefined) => void;
 
   /** AgentLoop 텍스트 델타 패스스루 */
   text_delta: (text: string) => void;
@@ -299,6 +323,15 @@ export interface ExecutionEngineEvents {
 
   /** 사용자 위임 (delegate phase에서 질문 전달) */
   "engine:delegate": (question: string) => void;
+  /** 통합 agent 이벤트 */
+  "agent:event": (event: unknown) => void;
+  /** 서브에이전트 phase 이벤트 */
+  "agent:subagent_phase": (event: {
+    role: SubAgentRole;
+    phase: string;
+    taskId: string;
+    goal: string;
+  }) => void;
 }
 
 // ─── Defaults ────────────────────────────────────────────────────
@@ -340,6 +373,7 @@ export class ExecutionEngine extends EventEmitter {
   private readonly reflection: SelfReflection;
   private codebaseContext: CodebaseContext | null;
   private vectorIndex: VectorIndex | null;
+private embeddingCache: EmbeddingCache;
   private stateMachine: AgentStateMachine | null;
   private abortController: AbortController;
   private readonly changedFiles: Set<string>;
@@ -356,7 +390,8 @@ export class ExecutionEngine extends EventEmitter {
   private parallelStepResults: Map<number, StepResult>;
   /** DAG 기반 병렬 실행이 완료되었는지 */
   private parallelExecutionDone: boolean;
-
+  private dagOrchestrator: DAGOrchestrator | null = null;
+  private workspaceLock: WorkspaceLock;
   /** MCP server configurations (stored from constructor config) */
   private readonly mcpServerConfigs: Array<{ name: string; command: string; args?: string[] }>;
   /** MCP Client — external tool bridge (null if disabled) */
@@ -366,13 +401,41 @@ export class ExecutionEngine extends EventEmitter {
 
   /** Performance optimizer (null if disabled) */
   private perfOptimizer: PerfOptimizer | null = null;
-
+  /**
+   * step / sub-agent 단위 토큰 예산 SSOT.
+   * - 최소 5k 보장
+   * - 병렬도 고려해서 전체 예산을 안전하게 분할
+   */
+  private getSubAgentTokenBudget(): number {
+    const divisor = Math.max(1, this.config.maxParallelAgents + 1);
+    return Math.max(
+      5000,
+      Math.floor(this.config.totalTokenBudget / divisor),
+    );
+  }
   /** Sandbox manager for tool call validation (null if disabled) */
   private sandboxManager: SandboxManager | null = null;
+  /** Skill loader */
+  private readonly skillLoader: SkillLoader;
+  /** Skill learner */
+  private readonly skillLearner: SkillLearner;
+  /** Static + learned skill definitions */
+  private readonly skills: SkillDefinition[];
+  /** Run-level skill context */
+  private activeSkillContext: SkillContext | null = null;
+  /** Step resolved skills */
+  private readonly resolvedSkillsByStepId: Map<string, ParsedSkill[]> = new Map();
 
+  /** Global complexity inferred during analyze phase */
+  private globalComplexity:
+    | "trivial"
+    | "simple"
+    | "moderate"
+    | "complex"
+    | "massive" = "moderate";
   constructor(config: ExecutionEngineConfig) {
     super();
-
+   this.setMaxListeners(200);
     this.config = {
       byokConfig: config.byokConfig,
       projectPath: config.projectPath,
@@ -420,8 +483,19 @@ export class ExecutionEngine extends EventEmitter {
       ...config.loggerConfig,
     });
 
+
     this.codebaseContext = null;
     this.vectorIndex = null;
+const memoryCache = new Map<string, number[]>();
+
+this.embeddingCache = {
+  async get(key: string) {
+    return memoryCache.get(key) ?? null;
+  },
+  async set(key: string, embedding: number[]) {
+    memoryCache.set(key, embedding);
+  },
+};
     this.stateMachine = null;
     this.planGraph = null;
     this.abortController = new AbortController();
@@ -430,7 +504,28 @@ export class ExecutionEngine extends EventEmitter {
     this.lastTermination = { reason: "USER_CANCELLED" };
     this.parallelStepResults = new Map();
     this.parallelExecutionDone = false;
-
+    this.skillLoader = new SkillLoader();
+    this.skillLearner = new SkillLearner(this.config.projectPath);
+    this.skills = config.skills ?? [];
+    this.activeSkillContext = null;
+    this.resolvedSkillsByStepId = new Map();
+   this.workspaceLock = new WorkspaceLock();
+ // Agent DAG orchestrator
+ this.dagOrchestrator = new DAGOrchestrator({
+   maxParallelAgents: this.config.maxParallelAgents,
+   maxRetries: 2,
+   tokenBudget: this.config.totalTokenBudget,
+   wallTimeLimit: 600000,
+   spawnAgent: this.spawnAgent.bind(this),
+ });
+this.dagOrchestrator.on("dag:agent_reasoning", (e: { text: string; taskId: string; agentId: string }) => {
+   this.emit("agent:event", {
+     kind: "agent:reasoning_timeline",
+     source: "dag",
+     taskId: e.taskId,
+     text: e.text,
+   });
+ });
     // Store MCP server configs for use in execute()
     this.mcpServerConfigs = config.mcpServerConfigs ?? [];
 
@@ -446,7 +541,6 @@ export class ExecutionEngine extends EventEmitter {
         defaultTier: config.sandboxTier,
       });
     }
-
     // Wire reflection monologue events to engine events
     this.reflection.on("monologue:entry", (entry: MonologueEntry) => {
       this.emit("monologue", entry);
@@ -511,12 +605,24 @@ export class ExecutionEngine extends EventEmitter {
     this.planGraph = null;
     this.parallelStepResults = new Map();
     this.parallelExecutionDone = false;
-
+    this.resolvedSkillsByStepId.clear();
+    this.activeSkillContext = {
+      taskDescription: goal,
+    };
     this.emit("engine:start", goal);
     this._logger.logInput(goal);
     this.reflection.think("start", `Goal received: "${goal}"`);
 
     try {
+        // 0.5 Load learned skills
+     try {
+        await this.skillLearner.init();
+      } catch (err) {
+        this._logger.warn(
+          "system",
+          `SkillLearner init failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
       // 0. Intent inference pre-processing (refine ambiguous goals)
       if (this.config.enableIntentInference) {
         try {
@@ -539,6 +645,10 @@ export class ExecutionEngine extends EventEmitter {
               `Intent inference refined ambiguous goal: "${goal}" → "${intentResult.refinedGoal}" [${intentResult.category}, confidence=${intentResult.confidence.toFixed(2)}]`,
             );
             goal = intentResult.refinedGoal;
+            this.activeSkillContext = {
+              ...(this.activeSkillContext ?? {}),
+              taskDescription: goal,
+            };
           } else {
             this._logger.info(
               "system",
@@ -568,24 +678,52 @@ export class ExecutionEngine extends EventEmitter {
         );
       }
 
-      // 1b. Conditional VectorIndex initialization (requires pgvector)
+      // 1b. VectorIndex initialization (pgvector semantic search)
       if (this.config.enableVectorSearch && !this.vectorIndex) {
-        // VectorIndex requires a real SQLExecutor and EmbeddingProvider.
-        // When no DB is available, create a no-op stub so the engine
-        // doesn't crash — vector search simply returns empty results.
-        const noopSqlExecutor: SQLExecutor = {
-          query: async () => ({ rows: [] }),
-        };
-        const noopEmbeddingProvider: EmbeddingProvider = {
-          embed: async (texts) => texts.map(() => []),
-          dimension: 1536,
-        };
-        this.vectorIndex = new VectorIndex({
-          projectId: this.config.projectPath,
-          sqlExecutor: noopSqlExecutor,
-          embeddingProvider: noopEmbeddingProvider,
-        });
-        this._logger.info("system", "VectorIndex initialized (no-op stub — supply real DB for pgvector search)");
+        try {
+          const sqlExecutor: SQLExecutor = {
+            query: async (sql: string, params?: unknown[]) => {
+              return this.config.toolExecutor.executeSQL
+                ? await this.config.toolExecutor.executeSQL(sql, params)
+                : { rows: [] };
+            },
+          };
+
+          const embeddingProvider: EmbeddingProvider = {
+            dimension: 1536,
+            embed: async (texts: string[]) => {
+              const results: number[][] = [];
+
+              for (const text of texts) {
+                const resp = await this.llmClient.embed(text);
+                results.push(resp.embedding);
+              }
+
+              return results;
+            },
+          };
+
+          this.vectorIndex = new VectorIndex({
+            projectId: path.basename(this.config.projectPath),
+            sqlExecutor,
+            embeddingProvider,
+            embeddingCache: this.embeddingCache
+          });
+
+          await this.vectorIndex.initialize();
+
+          this._logger.info(
+            "system",
+            "VectorIndex initialized (pgvector semantic search enabled)",
+          );
+        } catch (err) {
+          this._logger.warn(
+            "system",
+            `VectorIndex initialization failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+         );
+        }
       }
 
       // 1c. MCP Client initialization (optional — connect to external MCP servers)
@@ -676,7 +814,6 @@ export class ExecutionEngine extends EventEmitter {
           // Best-effort cleanup
         });
       }
-
       this._logger.logOutput(result.summary, result.success, result.totalTokens);
       await this._logger.flush();
 
@@ -811,7 +948,13 @@ export class ExecutionEngine extends EventEmitter {
     if (complexityMatch) {
       complexity = complexityMatch[1]!.toLowerCase();
     }
-
+    this.globalComplexity =
+      complexity as
+        | "trivial"
+        | "simple"
+        | "moderate"
+        | "complex"
+        | "massive";
     this._logger.logDecision(
       "Goal complexity assessment",
       ["trivial", "simple", "moderate", "complex", "massive"],
@@ -822,8 +965,15 @@ export class ExecutionEngine extends EventEmitter {
       "analyze",
       `Analysis complete — complexity: ${complexity}`,
     );
-
+    this.activeSkillContext = {
+      ...(this.activeSkillContext ?? {}),
+      taskDescription: goal,
+    };
     exitAnalyze();
+    this.activeSkillContext = {
+      ...(this.activeSkillContext ?? {}),
+      taskDescription: goal,
+    };
     return { complexity, context: content };
   }
 
@@ -946,7 +1096,34 @@ Exactly one approach should have recommended=true.`;
       );
 
       const executionPlan = planner.toExecutionPlan(hPlan);
+      for (const step of executionPlan.steps) {
+        const stepSkillContext: SkillContext = {
+          ...(this.activeSkillContext ?? {}),
+          taskDescription: step.goal,
+          filePath: step.targetFiles[0],
+        };
 
+        const matched = this.skillLoader.matchTriggers(this.skills, stepSkillContext);
+        const learned = this.skillLearner
+          .getRelevantSkills({
+            filePath: step.targetFiles[0],
+          })
+          .map((s) => this.skillLearner.toSkillDefinition(s));
+
+        const combined = [...matched, ...learned];
+        const deduped = new Map<string, SkillDefinition>();
+        for (const skill of combined) {
+          deduped.set(skill.id, skill);
+        }
+
+        const resolvedSkills = [...deduped.values()].map((skill) =>
+          this.skillLoader.loadTemplate(skill),
+        );
+
+        step.skillIds = resolvedSkills.map((s) => s.definition.id);
+        step.resolvedSkills = resolvedSkills;
+        this.resolvedSkillsByStepId.set(step.id, resolvedSkills);
+      }
       // Initialize PlanGraphManager for step progress tracking
       this.planGraph = PlanGraphManager.fromExecutionPlan(this.sessionId, executionPlan);
       this._logger.info("system", `PlanGraph initialized: ${executionPlan.steps.length} nodes, ${this.planGraph.getState().parallelGroups.length} parallel groups`);
@@ -967,7 +1144,10 @@ Exactly one approach should have recommended=true.`;
           id: "step-1",
           goal: `${approach.description}: ${goal}`,
           targetFiles: [],
+          role: "coder",
           readFiles: [],
+          skillIds: [],
+          resolvedSkills: [],
           tools: ["file_read", "file_write", "file_edit", "grep", "glob"],
           estimatedIterations: 10,
           dependsOn: [],
@@ -975,7 +1155,26 @@ Exactly one approach should have recommended=true.`;
       ],
       estimatedTokens: 50_000,
     };
-
+    {
+      const step = fallbackPlan.steps[0]!;
+      const stepSkillContext: SkillContext = {
+        ...(this.activeSkillContext ?? {}),
+        taskDescription: step.goal,
+      };
+      const matched = this.skillLoader.matchTriggers(this.skills, stepSkillContext);
+      const learned = this.skillLearner
+        .getRelevantSkills({})
+        .map((s) => this.skillLearner.toSkillDefinition(s));
+      const combined = [...matched, ...learned];
+      const deduped = new Map<string, SkillDefinition>();
+      for (const skill of combined) deduped.set(skill.id, skill);
+      const resolvedSkills = [...deduped.values()].map((skill) =>
+        this.skillLoader.loadTemplate(skill),
+      );
+      step.skillIds = resolvedSkills.map((s) => s.definition.id);
+      step.resolvedSkills = resolvedSkills;
+      this.resolvedSkillsByStepId.set(step.id, resolvedSkills);
+    }
     // Initialize PlanGraphManager for fallback plan too
     this.planGraph = PlanGraphManager.fromExecutionPlan(this.sessionId, fallbackPlan);
     this._logger.info("system", `PlanGraph initialized (fallback): 1 node`);
@@ -1032,7 +1231,61 @@ Exactly one approach should have recommended=true.`;
     }
 
     // First call triggers full DAG execution for ALL steps
-    await this.executeStepsWithDAG(plan, state);
+ if (!this.dagOrchestrator) {
+   throw new Error("DAGOrchestrator not initialized");
+ }
+
+ const agentPlan: AgentPlan = {
+   tasks: plan.steps.map((s, i) => ({
+     id: s.id,
+     goal: s.goal,
+     targetFiles: s.targetFiles,
+     readFiles: s.readFiles,
+     tools: s.tools,
+     estimatedIterations: s.estimatedIterations,
+     priority: plan.steps.length - i,
+     complexity:
+       (state.workingMemory.get("complexity") as
+         | "simple"
+         | "moderate"
+         | "complex"
+         | "massive"
+         | "trivial") ?? "moderate",
+     role: s.role ?? "coder",
+     skillIds: s.skillIds ?? [],
+     resolvedSkills: s.resolvedSkills ?? this.resolvedSkillsByStepId.get(s.id) ?? [],
+   })),
+   estimatedTokens: plan.estimatedTokens,
+   estimatedDurationMs: plan.steps.reduce(
+     (sum, s) => sum + s.estimatedIterations * 1000,
+     0,
+   ),
+   dependencies: plan.steps.flatMap((s) =>
+     (s.dependsOn ?? []).map((dep) => [dep, s.id] as [string, string])
+   ),
+   maxParallelAgents: this.config.maxParallelAgents,
+ };
+
+ const dagResult = await this.dagOrchestrator.execute(agentPlan, {
+  overallGoal: plan.goal,
+  projectPath: this.config.projectPath,
+  projectStructure: this.config.projectPath,
+ });
+
+ for (const task of dagResult.completedTasks) {
+   const stepIndex = plan.steps.findIndex(s => s.id === task.taskId);
+   if (stepIndex >= 0) {
+     this.parallelStepResults.set(stepIndex, {
+       stepIndex,
+       phase: "implement",
+       success: true,
+       output: task.summary,
+      changedFiles: task.changedFiles.map((f) => f.path),
+       tokensUsed: task.tokensUsed,
+       durationMs: 0
+     });
+   }
+ }
     this.parallelExecutionDone = true;
 
     // Return this step's result from cache
@@ -1201,7 +1454,11 @@ Exactly one approach should have recommended=true.`;
       "implement",
       `Executing step ${stepIndex + 1}/${plan.steps.length}: "${step.goal}"`,
     );
-
+    const stepSkillContext: SkillContext = {
+      ...(this.activeSkillContext ?? {}),
+      taskDescription: step.goal,
+      filePath: step.targetFiles[0],
+    };
     // Mark step as running in PlanGraph
     const stepId = step.id;
     if (this.planGraph) {
@@ -1240,13 +1497,21 @@ Exactly one approach should have recommended=true.`;
           "speculative:approach:complete",
           "speculative:evaluation",
           "speculative:complete",
+          "speculative:timeline",
         ] as const;
         for (const eventName of specEvents) {
           specExecutor.on(eventName, (...args: unknown[]) => {
             this.emit(eventName, ...args);
           });
         }
-
+        specExecutor.on("speculative:timeline", (payload) => {
+          this.emit("agent:event", {
+            kind: "agent:reasoning_timeline",
+            source: "speculative",
+            taskId: payload.taskId,
+            text: payload.text,
+          });
+        });
         // Build codebase context summary for speculative executor
         let codebaseContextSummary = "";
         if (this.codebaseContext) {
@@ -1322,33 +1587,100 @@ Exactly one approach should have recommended=true.`;
     }
 
     // ─── Normal AgentLoop Execution ─────────────────────────────
-    // Build step-specific system prompt
-    const systemPrompt = this.buildStepPrompt(plan, step, stepIndex);
-
-    // Create and run AgentLoop for this step
-    const loop = this.createAgentLoop(systemPrompt);
-    this.wireAgentLoopEvents(loop);
+    // ─────────────────────────────────────────
+    // SubAgent execution
+    // ─────────────────────────────────────────
 
     const startMs = Date.now();
-    const termination = await loop.run(step.goal);
+
+ const routing = routeSubAgent({
+   role: step.role ?? "coder",
+  complexity:
+    (state.workingMemory.get("complexity") as
+      | "trivial"
+      | "simple"
+      | "moderate"
+      | "complex"
+      | "massive") ?? "moderate",
+   fileCount: step.targetFiles.length,
+   hasTests: step.tools.includes("test_run"),
+   isCriticalPath: false,
+   previousFailures: 0,
+   parentModelTier: "NORMAL"
+ })
+const role: SubAgentRole = step.role ?? "coder";
+ const tier = routing.tier;
+
+    const subAgent = new SubAgent({
+      taskId: step.id,
+      goal: step.goal,
+      targetFiles: step.targetFiles,
+      readFiles: step.readFiles,
+      maxIterations: this.config.maxIterations,
+     totalTokenBudget: this.getSubAgentTokenBudget(),
+      projectPath: this.config.projectPath,
+      byokConfig: this.config.byokConfig,
+      tools: step.tools,
+      createToolExecutor: () => this.config.toolExecutor,
+      role,
+      parentModelTier: tier,
+    });
+const agentRole = subAgent.role;
+   // ─────────────────────────────────────────
+    // SubAgent lifecycle forwarding (CLI stream)
+    // ─────────────────────────────────────────
+
+ subAgent.on("subagent:phase", (_taskId, phase) => {
+   this.emit("agent:subagent_phase", {
+     role: agentRole,
+     phase,
+     taskId: step.id,
+     goal: step.goal,
+   });
+ });
+    // ─────────────────────────────────────────
+    // Forward SubAgent events → ExecutionEngine
+    // ─────────────────────────────────────────
+
+    subAgent.on("event", (event) => {
+      this.emit("agent:event", event);
+    });
+    const subResult = await subAgent.run({
+      overallGoal: plan.goal,
+      taskGoal: step.goal,
+      targetFiles: step.targetFiles,
+      readFiles: step.readFiles,
+      projectStructure: this.config.projectPath,
+      skillContext: stepSkillContext,
+      resolvedSkills: step.resolvedSkills ?? this.resolvedSkillsByStepId.get(step.id) ?? [],
+      totalTasks: plan.steps.length,
+      completedTasks: [],
+      runningTasks: [],
+    });
+
     const durationMs = Date.now() - startMs;
 
-    // Track last termination
-    this.lastTermination = termination;
+const stepChangedFiles = new Set(
+  subResult.changedFiles.map((f: any) =>
+    typeof f === "string" ? f : f.path
+  )
+);
 
-    // Collect changed files from loop
-    const loopUsage = loop.getTokenUsage();
-    const stepChangedFiles: string[] = [];
+    const loopUsage = {
+  input: subResult.tokensUsed?.input ?? 0,
+  output: subResult.tokensUsed?.output ?? 0,
+    };
 
-    // Extract changed files from agent events (tracked via tool results)
-    // The changedFiles set is updated via wireAgentLoopEvents
-    for (const file of this.changedFiles) {
-      if (step.targetFiles.includes(file) || step.targetFiles.length === 0) {
-        stepChangedFiles.push(file);
-      }
-    }
+    const success = subResult.success;
 
-    const success = termination.reason === "GOAL_ACHIEVED";
+ for (const file of this.changedFiles) {
+   if (step.targetFiles.length === 0) continue;
+   if (step.targetFiles.some(f => file.endsWith(f))) {
+     stepChangedFiles.add(file);
+   }
+ }
+
+
 
     // Update PlanGraph with step outcome
     if (this.planGraph) {
@@ -1356,17 +1688,13 @@ Exactly one approach should have recommended=true.`;
         if (success) {
           this.planGraph.markCompleted(
             stepId,
-            termination.reason === "GOAL_ACHIEVED"
-              ? (termination as { reason: "GOAL_ACHIEVED"; summary: string }).summary
-              : "completed",
-            stepChangedFiles,
+            subResult.summary,
+            [...stepChangedFiles],
             { input: loopUsage.input, output: loopUsage.output },
           );
           this._logger.info("system", `PlanGraph: node "${stepId}" → completed`);
         } else {
-          const errorMsg = termination.reason === "ERROR"
-            ? (termination as { reason: "ERROR"; error: string }).error
-            : `Step failed: ${termination.reason}`;
+          const errorMsg = subResult.error ?? "SubAgent failed";
           this.planGraph.markFailed(stepId, errorMsg);
           this._logger.info("system", `PlanGraph: node "${stepId}" → failed`);
         }
@@ -1383,14 +1711,12 @@ Exactly one approach should have recommended=true.`;
       `Step ${stepIndex + 1} outcome`,
       ["succeeded", "failed"],
       success ? "succeeded" : "failed",
-      `AgentLoop terminated with reason: ${termination.reason}`,
+      `SubAgent execution result`,
     );
     this.reflection.think(
       "implement",
       `Step ${stepIndex + 1} ${success ? "succeeded" : "failed"}: ${
-        termination.reason === "GOAL_ACHIEVED"
-          ? (termination as { reason: "GOAL_ACHIEVED"; summary: string }).summary
-          : termination.reason
+        subResult.summary
       }`,
     );
 
@@ -1402,13 +1728,8 @@ Exactly one approach should have recommended=true.`;
       stepIndex,
       phase: "implement",
       success,
-      output:
-        termination.reason === "GOAL_ACHIEVED"
-          ? (termination as { reason: "GOAL_ACHIEVED"; summary: string }).summary
-          : termination.reason === "ERROR"
-            ? (termination as { reason: "ERROR"; error: string }).error
-            : `Terminated: ${termination.reason}`,
-      changedFiles: stepChangedFiles,
+      output: subResult.summary,
+      changedFiles: [...stepChangedFiles],
       tokensUsed: loopUsage.input + loopUsage.output,
       durationMs,
     };
@@ -1437,6 +1758,8 @@ Exactly one approach should have recommended=true.`;
         "Deep verify skipped (disabled or no changed files)",
       );
       exitVerify();
+
+
       return {
         verdict: "pass",
         checks: {
@@ -1703,6 +2026,35 @@ Exactly one approach should have recommended=true.`;
     }
 
     exitVerify();
+
+    // Best-effort learned skill persistence hook
+    try {
+      const syntheticAnalysis = {
+        errorPatterns: deepResult.suggestedFixes
+          .filter((f) => !!f.description)
+          .map((f) => ({
+            message: f.description,
+            resolution: f.description,
+            frequency: 1,
+            type: "VerificationIssue",
+            tool: "verify",
+          })),
+        toolPatterns: [],
+      } as unknown as import("./memory-updater.js").RunAnalysis;
+
+      const learned = this.skillLearner.extractSkillFromRun(
+        syntheticAnalysis,
+        this.sessionId,
+      );
+      if (learned) {
+        await this.skillLearner.save();
+      }
+    } catch (err) {
+      this._logger.warn(
+        "system",
+        `Skill learn/save failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     // Map DeepVerifyResult → VerifyResult
     return this.mapVerifyResult(deepResult);
   }
@@ -1935,6 +2287,73 @@ ${[...this.changedFiles].join(", ")}
     }
   }
 
+
+ /**
+  * DAGOrchestrator가 호출하는 Agent worker
+  */
+ private async spawnAgent(
+   task: PlannedTask,
+  context: SubAgentContext,
+  _signal?: AbortSignal
+ ): Promise<TaskResult> {
+
+   const routing = routeSubAgent({
+     role: task.role ?? "coder",
+     complexity: this.globalComplexity,
+     fileCount: task.targetFiles.length,
+     hasTests: task.tools?.includes("test_run") ?? false,
+     isCriticalPath: false,
+     previousFailures: 0,
+     parentModelTier: "NORMAL"
+   });
+
+   const role: SubAgentRole = task.role ?? "coder";
+
+   const subAgent = new SubAgent({
+     taskId: task.id,
+     goal: task.goal,
+     targetFiles: task.targetFiles,
+     readFiles: task.readFiles,
+     maxIterations: this.config.maxIterations,
+     totalTokenBudget: this.getSubAgentTokenBudget(),
+     projectPath: this.config.projectPath,
+     byokConfig: this.config.byokConfig,
+     tools: task.tools,
+     createToolExecutor: () => this.config.toolExecutor,
+     role,
+     parentModelTier: routing.tier,
+   });
+
+   const result = await subAgent.run({
+     overallGoal: context.overallGoal,
+     taskGoal: context.taskGoal ?? task.goal,
+     targetFiles: context.targetFiles ?? task.targetFiles,
+     readFiles: context.readFiles ?? task.readFiles,
+     projectStructure: context.projectStructure,
+     skillContext: context.skillContext ?? {
+       taskDescription: task.goal,
+       filePath: task.targetFiles[0],
+     },
+     resolvedSkills: context.resolvedSkills ?? task.resolvedSkills ?? [],
+     totalTasks: 1,
+     completedTasks: [],
+     runningTasks: [],
+   });
+
+   return {
+     taskId: task.id,
+     summary: result.summary,
+    changedFiles: result.changedFiles.map((file) => ({
+      path: typeof file === "string" ? file : file.path,
+      diff: "",
+    })),
+     tokensUsed:
+       (result.tokensUsed?.input ?? 0) +
+       (result.tokensUsed?.output ?? 0),
+     iterations: this.config.maxIterations,
+     usedSkillIds: task.skillIds ?? [],
+   };
+ }
   /**
    * 개별 step 실행을 위한 AgentLoop 인스턴스를 생성한다.
    *
@@ -1943,9 +2362,16 @@ ${[...this.changedFiles].join(", ")}
    */
   private createAgentLoop(systemPrompt: string): AgentLoop {
     // Merge base tool definitions with MCP tool definitions
+    // Tool filtering to avoid token explosion
+    const baseTools = this.config.toolExecutor.definitions;
+
+    const mcpToolsFiltered = this.mcpToolDefinitions.filter((t) =>
+     true
+    );
+
     const tools: ToolDefinition[] = [
-      ...this.config.toolExecutor.definitions,
-      ...this.mcpToolDefinitions,
+      ...baseTools,
+      ...mcpToolsFiltered,
     ];
 
     // Wrap tool executor to add sandbox validation and MCP tool routing
@@ -1957,49 +2383,89 @@ ${[...this.changedFiles].join(", ")}
     const wrappedExecutor: ToolExecutor = {
       definitions: tools,
       execute: async (call, abortSignal) => {
-        // Parse arguments to object if needed
-        let args: Record<string, unknown>;
-        try {
-          args = typeof call.arguments === "string"
-            ? (JSON.parse(call.arguments) as Record<string, unknown>)
-            : call.arguments;
-        } catch {
-          return {
-            tool_call_id: call.id,
-            name: call.name,
-            output: `[Error] Invalid JSON in tool arguments: ${String(call.arguments).slice(0, 200)}`,
-            success: false,
-            durationMs: 0,
-          };
-        }
+    let args: Record<string, unknown> = {};
 
-        // Sandbox pre-validation
-        if (sandboxMgr) {
-          const validation = sandboxMgr.validateToolCall(call.name, args);
-          if (!validation.allowed) {
+       let release: (() => void) | null = null;
+
+        try {
+          // Parse arguments to object if needed
+          try {
+            args = typeof call.arguments === "string"
+              ? (JSON.parse(call.arguments) as Record<string, unknown>)
+              : call.arguments;
+          } catch {
             return {
               tool_call_id: call.id,
               name: call.name,
-              output: `[Sandbox blocked] ${validation.violations.join("; ")}`,
+              output: "[Error] invalid tool arguments JSON",
               success: false,
               durationMs: 0,
             };
           }
-        }
+        
 
-        // Route MCP tool calls to MCPClient (check MCP registry, not string pattern)
-        if (mcpCli && mcpToolDefs.some((t) => t.name === call.name)) {
-          return mcpCli.callToolAsYuan(call.name, args, call.id);
-        }
+          const targetFile =
+            typeof args?.path === "string"
+              ? args.path
+              : typeof args?.file === "string"
+              ? args.file
+              : null;
 
-        // Default: use base executor
-        return baseExecutor.execute(call, abortSignal);
-      },
+          if (targetFile && this.isFileMutationTool(call.name)) {
+            release = await this.workspaceLock.acquire(targetFile);
+          }
+          // Sandbox pre-validation
+          if (sandboxMgr) {
+            const validation = sandboxMgr.validateToolCall(call.name, args);
+            if (!validation.allowed) {
+              return {
+                tool_call_id: call.id,
+                name: call.name,
+                output: `[Sandbox blocked] ${validation.violations.join("; ")}`,
+                success: false,
+                durationMs: 0,
+              };
+            }
+          }
+
+          // Route MCP tool calls to MCPClient (check MCP registry, not string pattern)
+          if (mcpCli && mcpToolDefs.some((t) => t.name === call.name)) {
+            const MCP_TIMEOUT = 20000;
+
+            const timeout = new Promise((_, reject) =>
+              setTimeout(() => reject(new Error("MCP timeout")), MCP_TIMEOUT)
+            );
+
+  try {
+    return (await Promise.race([
+      mcpCli.callToolAsYuan(call.name, args, call.id),
+      timeout,
+    ])) as ToolResult;
+  } catch (err) {
+    return {
+      tool_call_id: call.id,
+      name: call.name,
+      output: `[MCP error] ${err instanceof Error ? err.message : String(err)}`,
+      success: false,
+      durationMs: MCP_TIMEOUT,
+    };
+  }
+          }
+
+          // Default: use base executor
+          return await baseExecutor.execute(call, abortSignal);
+        } finally {
+          if (release) {
+            release();
+          }
+        }
+     },
     };
 
     return new AgentLoop({
-      config: {
-        byok: this.config.byokConfig,
+  abortSignal: this.abortController.signal,
+  config: {
+    byok: this.config.byokConfig,
         loop: {
           model: "coding",
           maxIterations: this.config.maxIterations,
@@ -2195,7 +2661,18 @@ Then provide your analysis.`;
       confidence: deep.confidence,
     };
   }
+ private isFileMutationTool(toolName: string): boolean {
+    const mutationTools = new Set([
+      "file_write",
+      "file_edit",
+      "file_delete",
+      "file_move",
+      "file_rename",
+      "apply_patch",
+    ]);
 
+    return mutationTools.has(toolName);
+  }
   /**
    * StateMachine 최종 상태에서 ExecutionResult를 생성한다.
    *
@@ -2258,15 +2735,17 @@ Then provide your analysis.`;
     }
 
     // Find first JSON array or object
-    const arrayMatch = content.match(/\[[\s\S]*\]/);
-    if (arrayMatch) {
-      return arrayMatch[0];
-    }
+ const start = content.indexOf("[");
+ const end = content.lastIndexOf("]");
+ if (start !== -1 && end !== -1 && end > start) {
+   return content.slice(start, end + 1);
+ }
 
-    const objectMatch = content.match(/\{[\s\S]*\}/);
-    if (objectMatch) {
-      return objectMatch[0];
-    }
+ const objStart = content.indexOf("{");
+ const objEnd = content.lastIndexOf("}");
+ if (objStart !== -1 && objEnd !== -1 && objEnd > objStart) {
+   return content.slice(objStart, objEnd + 1);
+ }
 
     return content.trim();
   }

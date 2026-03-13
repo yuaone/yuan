@@ -263,9 +263,14 @@ export class ContinuousReflection extends EventEmitter {
 
     this.overflowTriggered = false;
 
-    this.timer = setInterval(() => {
-      void this.tick();
-    }, this.config.intervalMs);
+  const run = async () => {
+    await this.tick();
+    if (this.timer) {
+      this.timer = setTimeout(run, this.config.intervalMs) as unknown as NodeJS.Timeout;
+    }
+  };
+
+  this.timer = setTimeout(run, this.config.intervalMs) as unknown as NodeJS.Timeout;
   }
 
   /**
@@ -443,7 +448,9 @@ export class ContinuousReflection extends EventEmitter {
   private async performContextMonitor(state: AgentStateSnapshot): Promise<void> {
     const usage = state.contextUsagePercent;
 
-    if (usage >= CONTEXT_OVERFLOW_THRESHOLD && !this.overflowTriggered) {
+if (usage >= CONTEXT_OVERFLOW_THRESHOLD) {
+  if (this.overflowTriggered) return;
+  this.overflowTriggered = true;
       // 95%+: 새 세션 스폰 요청 (중복 방지)
       this.overflowTriggered = true;
 
@@ -461,7 +468,10 @@ export class ContinuousReflection extends EventEmitter {
           currentTask: state.currentTask,
           remainingTasks: state.remainingTasks,
         },
-        changedFiles: state.changedFiles.map((path) => ({ path, diff: "" })),
+ changedFiles: state.changedFiles.map((f) => ({
+   path: f,
+   diff: "",
+ })),
         workingMemory: state.workingMemory,
         yuanMdUpdates: [],
         errors: state.errors,
@@ -497,15 +507,15 @@ export class ContinuousReflection extends EventEmitter {
    */
   private buildSelfVerifyPrompt(state: AgentStateSnapshot): string {
     const recentCalls = state.recentToolCalls
-      .map((c) => `${c.tool}(${c.input}) → ${c.output.slice(0, 100)}`)
+      .map((c) => `${c.tool}(${c.input}) → ${(c.output ?? "").slice(0, 100)}`)
       .join("\n");
 
-    return SELF_VERIFY_PROMPT
-      .replace("{goal}", state.goal)
-      .replace("{iteration}", String(state.iteration))
-      .replace("{maxIteration}", String(state.maxIteration))
-      .replace("{changedFiles}", state.changedFiles.join(", ") || "없음")
-      .replace("{recentToolCalls}", recentCalls || "없음")
-      .replace("{errors}", state.errors.join(", ") || "없음");
+return SELF_VERIFY_PROMPT
+  .replaceAll("{goal}", state.goal)
+  .replaceAll("{iteration}", String(state.iteration))
+  .replaceAll("{maxIteration}", String(state.maxIteration))
+  .replaceAll("{changedFiles}", state.changedFiles.join(", ") || "없음")
+  .replaceAll("{recentToolCalls}", recentCalls || "없음")
+  .replaceAll("{errors}", state.errors.join(", ") || "없음");
   }
 }

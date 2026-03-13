@@ -453,7 +453,7 @@ export class CostOptimizer {
     estimatedTokens?: number,
   ): ModelTier {
     const spent = this.totalSpent();
-    const remaining = this.config.budgetUSD - spent;
+const remaining = Math.max(0, this.config.budgetUSD - spent);
     const budgetFraction = this.config.budgetUSD > 0
       ? remaining / this.config.budgetUSD
       : 0;

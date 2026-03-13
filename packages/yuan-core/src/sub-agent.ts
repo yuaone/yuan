@@ -11,10 +11,12 @@
 import { EventEmitter } from "node:events";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import path from "node:path";
 import type {
   BYOKConfig,
   ToolExecutor,
   PlannedTask,
+  ModelTier,
   SubAgentContext,
   AgentTermination,
 } from "./types.js";
@@ -33,7 +35,13 @@ import {
   type RoutingDecision,
 } from "./sub-agent-router.js";
 import { getCodingStandards, getGeneralStandards } from "./coding-standards.js";
-
+import type {
+  ParsedSkill,
+  SkillContext,
+} from "./plugin-types.js";
+import {
+detectProjectEnvironment,
+} from "./language-detector.js";
 const execFileAsync = promisify(execFile);
 
 // ─── Types ───
@@ -47,6 +55,7 @@ export type SubAgentPhase =
   | "report"
   | "cleanup";
 
+  
 /** Configuration for spawning a sub-agent */
 export interface SubAgentConfig {
   /** Unique task identifier */
@@ -59,6 +68,7 @@ export interface SubAgentConfig {
   readFiles: string[];
   /** Maximum iterations before forced stop */
   maxIterations: number;
+  totalTokenBudget?: number;
   /** Absolute path to the project root */
   projectPath: string;
   /** BYOK configuration for LLM calls */
@@ -80,6 +90,14 @@ export interface SubAgentConfig {
   language?: string;
   /** Framework in use (e.g. "react", "next.js") */
   framework?: string;
+ /** Test framework in use (e.g. "vitest", "pytest") */
+  testFramework?: string;
+  /** Package manager in use (e.g. "pnpm", "npm", "cargo") */
+  packageManager?: string;
+  /** Whether the project is a monorepo */
+  isMonorepo?: boolean;
+  /** Monorepo/workspace tool if detected */
+  workspaceTool?: string;
   /** Whether this task is on a critical path (security, auth, payments) */
   isCriticalPath?: boolean;
   /** Number of previous failures for this task (for routing escalation) */
@@ -136,6 +154,16 @@ export interface SubAgentResult {
 export interface DAGContextLike {
   /** The overall user goal for the entire DAG */
   overallGoal: string;
+  remainingBudget?: number
+
+  // SubAgent context
+  taskGoal?: string
+  targetFiles?: string[]
+  readFiles?: string[]
+  /** skill matching context */
+  skillContext?: SkillContext
+  /** resolved skills injected for this task */
+  resolvedSkills?: ParsedSkill[]
   /** Total number of tasks in the DAG */
   totalTasks: number;
   /** Already-completed tasks with summaries */
@@ -164,6 +192,16 @@ export interface SubAgentEvents {
   "subagent:complete": (result: SubAgentResult) => void;
 }
 
+function mapTierToModel(tier: "FAST" | "NORMAL" | "DEEP") {
+  switch (tier) {
+    case "FAST":
+      return "fast";
+    case "DEEP":
+     return "coding";
+    default:
+     return "standard";
+  }
+}
 // ─── SubAgent Class ───
 
 /**
@@ -194,7 +232,9 @@ export interface SubAgentEvents {
 export class SubAgent extends EventEmitter {
   /** Task identifier for this sub-agent */
   readonly taskId: string;
-
+  get role(): SubAgentRole {
+    return this.config.role ?? "coder";
+  }
   private phase: SubAgentPhase = "spawn";
   private aborted = false;
   private readonly config: SubAgentConfig;
@@ -204,7 +244,21 @@ export class SubAgent extends EventEmitter {
 
   constructor(config: SubAgentConfig) {
     super();
-    this.config = config;
+    // auto-detect language if not provided
+    const detected = detectProjectEnvironment(
+      config.projectPath,
+      config.targetFiles,
+    );
+
+    this.config = {
+      ...config,
+      language: config.language ?? detected.language,
+      framework: config.framework ?? detected.framework,
+      testFramework: config.testFramework ?? detected.testFramework,
+      packageManager: config.packageManager ?? detected.packageManager,
+      isMonorepo: config.isMonorepo ?? detected.isMonorepo,
+      workspaceTool: config.workspaceTool ?? detected.workspaceTool,
+    };
     this.taskId = config.taskId;
   }
 
@@ -229,10 +283,56 @@ export class SubAgent extends EventEmitter {
       role,
       language: this.config.language,
       framework: this.config.framework,
+   testFramework: this.config.testFramework,
+      packageManager: this.config.packageManager,
+      isMonorepo: this.config.isMonorepo,
+      workspaceTool: this.config.workspaceTool,
       projectContext: dagContext.overallGoal,
     });
     sections.push(rolePrompt);
 
+    // ─────────────────────────────────────────
+    // Language Coding Standards Injection
+    // ─────────────────────────────────────────
+
+    const language = this.config.language;
+
+    if (language) {
+      const standards = getCodingStandards(language);
+
+      if (standards) {
+        sections.push(`## Coding Standards (${language})
+Follow these language-specific best practices when writing code:
+
+${standards}`);
+      } else {
+        sections.push(`## Coding Standards
+${getGeneralStandards()}`);
+      }
+    }
+
+   const envLines: string[] = [];
+    if (this.config.framework) {
+      envLines.push(`- Framework: ${this.config.framework}`);
+    }
+    if (this.config.testFramework) {
+      envLines.push(`- Test framework: ${this.config.testFramework}`);
+    }
+    if (this.config.packageManager) {
+      envLines.push(`- Package manager: ${this.config.packageManager}`);
+    }
+    if (this.config.isMonorepo) {
+      envLines.push(
+        `- Monorepo: yes${this.config.workspaceTool ? ` (${this.config.workspaceTool})` : ""}`,
+      );
+    } else {
+      envLines.push(`- Monorepo: no`);
+    }
+
+    if (envLines.length > 0) {
+      sections.push(`## Detected Repository Facts
+${envLines.join("\n")}`);
+    }
     // 2. Task-specific goal
     sections.push(
       `## Your Task\n${this.config.goal}`,
@@ -248,6 +348,33 @@ export class SubAgent extends EventEmitter {
     // 3. Overall mission
     sections.push(`## Overall Mission
 ${dagContext.overallGoal}`);
+
+    // 3.5 Skill injection
+    if (dagContext.resolvedSkills && dagContext.resolvedSkills.length > 0) {
+      const renderedSkills = dagContext.resolvedSkills
+        .map((skill, idx) => {
+          const toolSequence =
+            skill.toolSequence && skill.toolSequence.length > 0
+              ? `\nTool sequence: ${skill.toolSequence.join(" -> ")}`
+              : "";
+
+          const checklist =
+            skill.validationChecklist && skill.validationChecklist.length > 0
+              ? `\nValidation:\n${skill.validationChecklist
+                  .map((item) => `- ${item}`)
+                  .join("\n")}`
+              : "";
+
+          return `### Skill ${idx + 1}: ${skill.definition.name}
+${skill.content}${toolSequence}${checklist}`;
+        })
+        .join("\n\n");
+
+      sections.push(`## Activated Skills
+The following skills were matched for this task. Reuse them when relevant, but do not follow them blindly if the live codebase contradicts them.
+
+${renderedSkills}`);
+    }
 
     // 4. DAG context
     const completedSummaries =
@@ -358,15 +485,24 @@ ${dagContext.projectStructure}
         planTier: "PRO",
         ...this.config.governorConfig,
       };
-
+const model = mapTierToModel(this.routingResult?.tier ?? "NORMAL");
+ const loopBudget =
+   dagContext.remainingBudget
+     ? Math.min(
+         dagContext.remainingBudget,
+         this.config.maxIterations * 16384
+       )
+     : this.config.maxIterations * 16384;
       this.agentLoop = new AgentLoop({
         config: {
           byok: this.config.byokConfig,
           loop: {
-            model: "coding",
+            model,
             maxIterations: this.config.maxIterations,
             maxTokensPerIteration: 16_384,
-            totalTokenBudget: this.config.maxIterations * 16_384,
+            totalTokenBudget:
+              this.config.totalTokenBudget ??
+              this.config.maxIterations * 16_384,
             tools: toolExecutor.definitions,
             systemPrompt,
             projectPath: this.config.projectPath,
@@ -375,17 +511,42 @@ ${dagContext.projectStructure}
         toolExecutor,
         governorConfig,
       });
+      // ─────────────────────────────────────────
+      // Bridge AgentLoop events → SubAgent events
+      // (so ExecutionEngine / CLI can observe them)
+      // ─────────────────────────────────────────
 
-      // Forward iteration events
       this.agentLoop.on("event", (event) => {
-        if (event.kind === "agent:iteration") {
-          this.iterationCount = event.index;
-          this.emit(
-            "subagent:iteration",
-            this.taskId,
-            event.index,
-            event.tokensUsed,
-          );
+        switch (event.kind) {
+          case "agent:text_delta":
+          case "agent:thinking":
+          case "agent:tool_call":
+          case "agent:tool_result":
+          case "agent:token_usage":
+          case "agent:error":
+          case "agent:completed":
+            this.emit("event", event);
+            break;
+
+          case "agent:reasoning_delta":
+            this.emit("event", {
+              kind: "agent:reasoning_timeline",
+              source: "subagent",
+              taskId: this.taskId,
+              role: this.role,
+              text: String(event.text ?? ""),
+            });
+            break;
+
+          case "agent:iteration":
+            this.iterationCount = event.index + 1;
+            this.emit(
+              "subagent:iteration",
+              this.taskId,
+              event.index,
+              event.tokensUsed,
+            );
+            break;
         }
       });
 
@@ -437,7 +598,10 @@ ${dagContext.projectStructure}
 
       // Phase: CLEANUP
       this.setPhase("cleanup");
-
+ if (this.agentLoop) {
+   this.agentLoop.removeAllListeners("event");
+   this.agentLoop = null;
+ }
       this.emit("subagent:complete", result);
       return result;
     } catch (err) {
@@ -496,7 +660,7 @@ ${dagContext.projectStructure}
     try {
       const { stdout } = await execFileAsync(
         "git",
-        ["diff", "--name-only"],
+        ["diff", "--name-only", "HEAD"],
         { cwd: this.config.projectPath, timeout: 10_000 },
       );
 
@@ -511,9 +675,11 @@ ${dagContext.projectStructure}
 
       for (const filePath of files) {
         // Only include files in our target scope
-        const isTargetFile = this.config.targetFiles.some(
-          (t) => filePath === t || filePath.endsWith(`/${t}`) || t.endsWith(`/${filePath}`),
-        );
+const isTargetFile = this.config.targetFiles.some((t) => {
+  const normalizedTarget = path.normalize(t);
+  const normalizedFile = path.normalize(filePath);
+ return normalizedFile.endsWith(normalizedTarget);
+});
 
         if (!isTargetFile) continue;
 
@@ -628,10 +794,10 @@ ${dagContext.projectStructure}
       if (iterRatio >= 1.0) {
         issues.push("Reached maximum iteration limit");
         causalChain.push("evidence: all iterations consumed without early completion");
-        confidence *= 0.6;
+        confidence = Math.min(confidence, confidence * 0.6);
       } else if (iterRatio > 0.8) {
         issues.push("Used >80% of iteration budget");
-        confidence *= 0.8;
+        confidence = Math.min(confidence, confidence * 0.8);
       }
     }
 

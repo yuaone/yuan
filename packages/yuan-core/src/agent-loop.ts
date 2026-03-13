@@ -8,6 +8,7 @@
  */
 
 import { EventEmitter } from "node:events";
+import { randomUUID } from "node:crypto";
 import type {
   AgentConfig,
   AgentEvent,
@@ -21,6 +22,12 @@ import type {
 import { BYOKClient, type LLMResponse, type LLMStreamChunk } from "./llm-client.js";
 import { Governor, type GovernorConfig } from "./governor.js";
 import { ContextManager, type ContextManagerConfig } from "./context-manager.js";
+import { 
+  SessionPersistence, 
+  type SessionData, 
+  type CheckpointData,
+  type SessionSnapshot
+} from "./session-persistence.js";
 import {
   YuanError,
   ToolError,
@@ -78,9 +85,11 @@ import { SelfDebugLoop, type DebugResult } from "./self-debug-loop.js";
 import { SkillLearner } from "./skill-learner.js";
 import { RepoKnowledgeGraph, type ImpactReport as GraphImpactReport } from "./repo-knowledge-graph.js";
 import { BackgroundAgentManager, type BackgroundEvent } from "./background-agent.js";
-
+import { ReasoningAggregator } from "./reasoning-aggregator.js";
+import { ReasoningTree } from "./reasoning-tree.js";
 /** AgentLoop 설정 */
 export interface AgentLoopOptions {
+  abortSignal?: AbortSignal
   /** 에이전트 설정 */
   config: AgentConfig;
   /** 도구 실행기 */
@@ -151,6 +160,7 @@ export interface AgentLoopOptions {
  * ```
  */
 export class AgentLoop extends EventEmitter {
+  private readonly abortSignal?: AbortSignal;
   private readonly llmClient: BYOKClient;
   private readonly governor: Governor;
   private readonly contextManager: ContextManager;
@@ -186,6 +196,7 @@ export class AgentLoop extends EventEmitter {
   private worldState: WorldStateSnapshot | null = null;
   private costOptimizer: CostOptimizer;
   private impactAnalyzer: ImpactAnalyzer | null = null;
+  private impactHintInjected = false;
   private selfReflection: SelfReflection | null = null;
   private debateOrchestrator: DebateOrchestrator | null = null;
   private continuousReflection: ContinuousReflection | null = null;
@@ -205,6 +216,8 @@ export class AgentLoop extends EventEmitter {
   private skillLearner: SkillLearner | null = null;
   private repoGraph: RepoKnowledgeGraph | null = null;
   private backgroundAgentManager: BackgroundAgentManager | null = null;
+ private sessionPersistence: SessionPersistence | null = null;
+  private sessionId: string | null = null;
   private readonly enableToolPlanning: boolean;
   private readonly enableSkillLearning: boolean;
   private readonly enableBackgroundAgents: boolean;
@@ -221,12 +234,77 @@ export class AgentLoop extends EventEmitter {
     reasoning: 0,
     total: 0,
   };
+private readonly reasoningAggregator = new ReasoningAggregator();
+private readonly reasoningTree = new ReasoningTree();
+private resumedFromSession = false;
+  /**
+   * Restore AgentLoop state from persisted session (yuan resume)
+   */
+async restoreSession(data: SessionData): Promise<void> {
+    if (!data) return;
+
+    try {
+      this.governor.resetIteration?.();
+      if (data.snapshot?.id) {
+        this.sessionId = data.snapshot.id;
+      }
+      if (data.snapshot?.iteration) {
+ this.iterationCount = data.snapshot.iteration;
+ this.governor.restoreIteration?.(data.snapshot.iteration);
+      }
+
+      if (data.snapshot?.tokenUsage) {
+        const input = data.snapshot.tokenUsage.input ?? 0;
+        const output = data.snapshot.tokenUsage.output ?? 0;
+        this.tokenUsage = {
+          input,
+          output,
+          reasoning: 0,
+          total: input + output,
+        };
+      }
+
+      if (Array.isArray(data.changedFiles)) {
+        this.changedFiles = data.changedFiles;
+      }
+
+      if (Array.isArray(data.messages) && data.messages.length > 0) {
+        this.contextManager.clear();
+
+        for (const msg of data.messages) {
+          this.contextManager.addMessage(msg);
+        }
+        if (!data.messages.some((msg) => msg.role === "system")) {
+          this.contextManager.addMessage({
+            role: "system",
+            content: this.config.loop.systemPrompt,
+          });
+        }
+      }
+
+
+      this.activePlan = data.plan ?? null;
+     this.resumedFromSession = true;
+      this.emitEvent({
+        kind: "agent:thinking",
+        content: "Session restored.",
+      });
+    } catch (err) {
+      this.emitEvent({
+        kind: "agent:error",
+        message: err instanceof Error ? err.message : String(err),
+        retryable: false,
+      });
+    }
+  }
+  
 
   constructor(options: AgentLoopOptions) {
     super();
-
+    this.setMaxListeners(100);
     this.config = options.config;
     this.toolExecutor = options.toolExecutor;
+    this.abortSignal = options.abortSignal
     this.enableMemory = options.enableMemory !== false;
     this.enablePlanning = options.enablePlanning !== false;
     this.planningThreshold = options.planningThreshold ?? "moderate";
@@ -307,7 +385,12 @@ export class AgentLoop extends EventEmitter {
 
     const projectPath = this.config.loop.projectPath;
     if (!projectPath) return;
-
+  // Session persistence init
+  try {
+    this.sessionPersistence = new SessionPersistence(undefined, projectPath);
+  } catch {
+    this.sessionPersistence = null;
+  }
     let yuanMdContent: string | undefined;
     let projectStructure: ProjectStructure | undefined;
 
@@ -405,11 +488,6 @@ export class AgentLoop extends EventEmitter {
       }
     }
 
-    // HierarchicalPlanner 생성
-    if (this.enablePlanning && projectPath) {
-      this.planner = new HierarchicalPlanner({ projectPath });
-    }
-
     // ReflexionEngine 생성
     if (projectPath) {
       this.reflexionEngine = new ReflexionEngine({ projectPath });
@@ -489,22 +567,30 @@ export class AgentLoop extends EventEmitter {
       try {
         this.skillLearner = new SkillLearner(projectPath);
         await this.skillLearner.init();
-        // 학습된 스킬 중 관련 있는 것을 플러그인 레지스트리에 등록
-        const learnedSkills = this.skillLearner.getAllSkills();
-        if (learnedSkills.length > 0) {
-          const skillNames = learnedSkills
-            .filter((s) => s.confidence >= 0.3)
-            .map((s) => s.id);
-          if (skillNames.length > 0) {
-            this.contextManager.addMessage({
-              role: "system",
-              content: `[Learned Skills: ${skillNames.join(", ")}] — Auto-activate on matching error patterns.`,
-            });
-          }
-        }
       } catch {
-        // SkillLearner 초기화 실패는 치명적이지 않음
         this.skillLearner = null;
+      }
+    }
+
+    // HierarchicalPlanner 생성
+    this.planner = new HierarchicalPlanner({ projectPath });
+
+    if (this.skillLearner) {
+      this.planner.setSkillLearner(this.skillLearner);
+    }
+
+    if (this.skillLearner) {
+      const learnedSkills = this.skillLearner.getAllSkills();
+      if (learnedSkills.length > 0) {
+        const skillNames = learnedSkills
+          .filter((s) => s.confidence >= 0.3)
+          .map((s) => s.id);
+        if (skillNames.length > 0) {
+          this.contextManager.addMessage({
+            role: "system",
+            content: `[Learned Skills: ${skillNames.join(", ")}] — Auto-activate on matching error patterns.`,
+          });
+        }
       }
     }
 
@@ -564,7 +650,7 @@ export class AgentLoop extends EventEmitter {
       checkpoint: async (state, emergency) => {
         if (!this.continuationEngine) return;
         const checkpoint: ContinuationCheckpoint = {
-          sessionId: crypto.randomUUID(),
+          sessionId: this.sessionId ?? "unknown-session",
           goal: state.goal,
           progress: {
             completedTasks: state.completedTasks,
@@ -626,12 +712,7 @@ export class AgentLoop extends EventEmitter {
       });
     });
     this.continuousReflection.on("reflection:context_overflow", () => {
-      // Trigger abort — the continuation checkpoint is already saved
-      this.emitEvent({
-        kind: "agent:thinking",
-        content: "Context usage at 95%+ — saving state and stopping.",
-      });
-      this.abort();
+      void this.handleSoftContextOverflow();
     });
   }
 
@@ -681,14 +762,26 @@ export class AgentLoop extends EventEmitter {
    */
   async run(userMessage: string): Promise<AgentTermination> {
     this.aborted = false;
-    this.changedFiles = [];
-    this.allToolResults = [];
-    this.checkpointSaved = false;
-    this.iterationCount = 0;
-    this.originalSnapshots.clear();
-    this.previousStrategies = [];
-    this.activeSkillIds = [];
-    this.iterationSystemMsgCount = 0;
+    this.reasoningAggregator.reset();
+    this.reasoningTree.reset();
+    if (!this.resumedFromSession) {
+      this.changedFiles = [];
+      this.allToolResults = [];
+      this.iterationCount = 0;
+      this.originalSnapshots.clear();
+      this.previousStrategies = [];
+      this.activeSkillIds = [];
+      this.iterationSystemMsgCount = 0;
+      this.tokenUsage = {
+        input: 0,
+        output: 0,
+        reasoning: 0,
+        total: 0,
+      };
+      this.impactHintInjected = false;
+    }
+
+this.checkpointSaved = false;
     this.failureRecovery.reset();
     this.costOptimizer.reset();
     this.tokenBudgetManager.reset();
@@ -696,7 +789,35 @@ export class AgentLoop extends EventEmitter {
 
     // 첫 실행 시 메모리/프로젝트 컨텍스트 자동 로드
     await this.init();
+  if (this.sessionPersistence) {
+    if (!this.sessionId) {
+      this.sessionId = randomUUID();
+    }
 
+    const nowIso = new Date().toISOString();
+    const snapshot: SessionSnapshot = {
+      id: this.sessionId,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      workDir: this.config.loop.projectPath ?? "",
+      provider: String(this.config.byok.provider ?? "unknown"),
+      model: String(this.config.byok.model ?? "unknown"),
+      status: "running",
+      iteration: this.iterationCount,
+      tokenUsage: {
+        input: this.tokenUsage.input,
+        output: this.tokenUsage.output,
+      },
+      messageCount: this.contextManager.getMessages().length,
+    };
+
+    await this.sessionPersistence.save(this.sessionId, {
+      snapshot,
+      messages: this.contextManager.getMessages(),
+      plan: this.activePlan,
+      changedFiles: this.changedFiles,
+    });
+  }
     // 사용자 입력 검증 (prompt injection 방어)
     const inputValidation = this.promptDefense.validateUserInput(userMessage);
     if (inputValidation.injectionDetected && (inputValidation.severity === "critical" || inputValidation.severity === "high")) {
@@ -796,13 +917,20 @@ export class AgentLoop extends EventEmitter {
           this.continuousReflection.stop();
         }
       }
-
+      if (this.sessionPersistence && this.sessionId) {
+        const finalStatus =
+          result.reason === "ERROR"
+            ? "crashed"
+            : "completed";
+        await this.sessionPersistence.updateStatus(this.sessionId, finalStatus);
+      }
       // 실행 완료 후 메모리 자동 업데이트
       await this.updateMemoryAfterRun(userMessage, result, Date.now() - runStartTime);
 
       // SkillLearner: 성공적 에러 해결 시 새로운 스킬 학습
       if (this.skillLearner && result.reason === "GOAL_ACHIEVED") {
         try {
+          let newSkillId: string | null = null;
           const errorToolResults = this.allToolResults.filter((r) => !r.success);
           if (errorToolResults.length > 0 && this.changedFiles.length > 0) {
             // 에러가 있었지만 결국 성공 → 학습 가능한 패턴
@@ -820,8 +948,20 @@ export class AgentLoop extends EventEmitter {
               durationMs: Date.now() - runStartTime,
               iterations: this.iterationCount,
             });
-            this.skillLearner.extractSkillFromRun(runAnalysis, `session-${Date.now()}`);
+            const learned = this.skillLearner.extractSkillFromRun(
+              runAnalysis,
+              this.sessionId ?? `session-${Date.now()}`,
+            );
+            if (learned) {
+              newSkillId = learned.id;
+            }
             await this.skillLearner.save();
+            if (newSkillId) {
+              this.emitEvent({
+                kind: "agent:thinking",
+                content: `Learned new skill: ${newSkillId}`,
+              });
+            }
           }
         } catch {
           // 학습 실패는 치명적이지 않음
@@ -851,6 +991,7 @@ export class AgentLoop extends EventEmitter {
       // Background agents는 세션 간 지속되므로 여기서 stop하지 않음
 
       return result;
+      
     } catch (err) {
       return this.handleFatalError(err);
     }
@@ -918,7 +1059,7 @@ export class AgentLoop extends EventEmitter {
       try {
         const entry = this.reflexionEngine.reflect({
           goal: userGoal,
-          runId: crypto.randomUUID(),
+          runId: randomUUID(),
           termination: result,
           toolResults: this.allToolResults,
           messages: this.contextManager.getMessages(),
@@ -1038,7 +1179,7 @@ export class AgentLoop extends EventEmitter {
         this.config.loop.totalTokenBudget > 0
           ? this.tokenUsage.total / this.config.loop.totalTokenBudget
           : 0,
-      sessionId: crypto.randomUUID(),
+      sessionId: this.sessionId ?? "unknown-session",
       totalTokensUsed: this.tokenUsage.total,
       workingMemory: this.buildWorkingMemorySummary(),
       completedTasks: progress.completedTasks,
@@ -1111,41 +1252,40 @@ export class AgentLoop extends EventEmitter {
       return;
     }
 
-    this.emitEvent({
-      kind: "agent:thinking",
-      content: `Task complexity: ${complexity}. Creating execution plan...`,
-    });
+this.emitSubagent("planner", "start", `task complexity ${complexity}. creating execution plan`);
 
-    try {
-      const plan = await this.planner.createHierarchicalPlan(
-        userMessage,
-        this.llmClient,
-      );
+try {
+  const plan = await this.planner.createHierarchicalPlan(
+    userMessage,
+    this.llmClient,
+  );
 
-      this.activePlan = plan;
-      this.currentTaskIndex = 0;
+  this.activePlan = plan;
+  this.currentTaskIndex = 0;
 
-      // Estimate planner token usage (plan creation typically uses ~500 tokens per task)
-      const planTokenEstimate = plan.tactical.length * 500;
-      this.tokenBudgetManager.recordUsage("planner", planTokenEstimate, planTokenEstimate);
+  const planTokenEstimate = plan.tactical.length * 500;
+  this.tokenBudgetManager.recordUsage("planner", planTokenEstimate, planTokenEstimate);
 
-      // 계획을 컨텍스트에 주입 (LLM이 따라갈 수 있도록)
-      const planContext = this.formatPlanForContext(plan);
-      this.contextManager.addMessage({
-        role: "system",
-        content: planContext,
-      });
+  const planContext = this.formatPlanForContext(plan);
+  this.contextManager.addMessage({
+    role: "system",
+    content: planContext,
+  });
 
-      this.emitEvent({
-        kind: "agent:thinking",
-        content: `Plan created: ${plan.tactical.length} tasks, ${plan.totalEstimatedIterations} estimated iterations. Risk: ${plan.strategic.riskAssessment.level}.`,
-      });
-    } catch {
-      // 플래닝 실패는 치명적이지 않음 — LLM이 직접 처리하도록 폴백
-      this.activePlan = null;
-    }
+  this.emitSubagent(
+    "planner",
+    "done",
+    `plan created: ${plan.tactical.length} tasks, ${plan.totalEstimatedIterations} estimated iterations, risk ${plan.strategic.riskAssessment.level}`,
+  );
+
+} catch (err) {
+  this.emitEvent({
+    kind: "agent:error",
+    message: `Planning failed: ${err instanceof Error ? err.message : String(err)}`,
+    retryable: false,
+  });
+}
   }
-
   /**
    * 사용자 메시지에서 태스크 복잡도를 휴리스틱으로 추정.
    * LLM 호출 없이 빠르게 결정 (토큰 절약).
@@ -1331,9 +1471,17 @@ export class AgentLoop extends EventEmitter {
   // ─── Core Loop ───
 
   private async executeLoop(): Promise<AgentTermination> {
-    let iteration = 0;
+let iteration = this.iterationCount;
 
     while (!this.aborted) {
+  // ensure loop state always matches persisted iteration
+  if (iteration !== this.iterationCount) {
+    iteration = this.iterationCount;
+  }
+ if (this.abortSignal?.aborted) {
+    return { reason: "USER_CANCELLED" };
+  }
+      if (iteration === 0) this.emitReasoning("starting agent loop");
       // Interrupt: pause 상태이면 resume될 때까지 대기
       if (this.interruptManager.isPaused()) {
         await this.waitForResume();
@@ -1357,7 +1505,23 @@ export class AgentLoop extends EventEmitter {
       iteration++;
       this.iterationCount = iteration;
       const iterationStart = Date.now();
+      this.emitReasoning(`iteration ${iteration}: preparing context`);
       this.iterationSystemMsgCount = 0; // Reset per-iteration system message counter
+      // Soft context rollover:
+      // checkpoint first, then let ContextManager compact instead of aborting/throwing.
+      const contextUsageRatio = this.contextManager.getUsageRatio();
+      if (contextUsageRatio >= 0.85) {
+        if (!this.checkpointSaved) {
+          await this.saveAutoCheckpoint(iteration);
+          this.checkpointSaved = true;
+        }
+        this.emitEvent({
+          kind: "agent:thinking",
+          content:
+            `High context pressure detected (${Math.round(contextUsageRatio * 100)}%). ` +
+            `Compressing conversation state and continuing.`,
+        });
+      }
 
       // Check file-pattern skill triggers based on changed files
       // Guard: skip skill injection if over 80% token budget to preserve remaining budget
@@ -1406,10 +1570,7 @@ export class AgentLoop extends EventEmitter {
         this.tokenBudgetManager.rebalance();
       }
 
-      this.emitEvent({
-        kind: "agent:thinking",
-        content: `Iteration ${iteration}...`,
-      });
+     this.emitReasoning(`iteration ${iteration}: calling model`);
 
       let response: LLMResponse;
       try {
@@ -1473,7 +1634,12 @@ export class AgentLoop extends EventEmitter {
       // 3. 응답 처리
       if (response.toolCalls.length === 0) {
         const content = response.content ?? "";
+        let finalSummary = content || "Task completed.";
 
+        const finalImpactSummary = await this.buildFinalImpactSummary();
+        if (finalImpactSummary) {
+          finalSummary = `${finalSummary}\n\n${finalImpactSummary}`;
+        }
         // Level 2: Deep verification before declaring completion
         if (this.selfReflection && this.changedFiles.length > 0) {
           try {
@@ -1522,10 +1688,7 @@ export class AgentLoop extends EventEmitter {
                 role: "system",
                 content: `[Self-Reflection L2] Verification failed (score: ${deepResult.overallScore}, confidence: ${deepResult.confidence.toFixed(2)}). ${deepResult.selfCritique}${issuesList ? ` Issues: ${issuesList}` : ""}. Please address these before completing.`,
               });
-              this.emitEvent({
-                kind: "agent:thinking",
-                content: `Deep verification failed (score: ${deepResult.overallScore}). Continuing to address issues...`,
-              });
+             this.emitSubagent("verifier", "done", `deep verification failed, score ${deepResult.overallScore}. continuing to address issues`);
               continue; // Don't return GOAL_ACHIEVED, continue the loop
             }
 
@@ -1536,10 +1699,8 @@ export class AgentLoop extends EventEmitter {
               deepResult.verdict !== "pass"
             ) {
               try {
-                this.emitEvent({
-                  kind: "agent:thinking",
-                  content: `Triggering multi-agent debate for ${this.currentComplexity} task verification...`,
-                });
+                this.emitSubagent("reviewer", "start", `starting debate for ${this.currentComplexity} task verification`);
+
 
                 const debateContext = [
                   `Changed files: ${this.changedFiles.join(", ")}`,
@@ -1575,10 +1736,7 @@ export class AgentLoop extends EventEmitter {
                   continue; // Continue loop to address debate feedback
                 }
 
-                this.emitEvent({
-                  kind: "agent:thinking",
-                  content: `Debate passed (score: ${debateResult.finalScore}). Proceeding to completion.`,
-                });
+                this.emitSubagent("reviewer", "done", `debate failed, score ${debateResult.finalScore}. continuing to address issues`);
               } catch {
                 // Debate failure is non-fatal — proceed with completion
               }
@@ -1600,19 +1758,22 @@ export class AgentLoop extends EventEmitter {
         if (content) {
           this.contextManager.addMessage({
             role: "assistant",
-            content,
+            content: finalSummary,
           });
         }
 
         this.emitEvent({
           kind: "agent:completed",
-          summary: content || "Task completed.",
-          filesChanged: [],
+    summary: finalSummary,
+  filesChanged: this.changedFiles
         });
-
+this.emitEvent({
+  kind: "agent:reasoning_tree",
+  tree: this.reasoningTree.toJSON(),
+});
         return {
           reason: "GOAL_ACHIEVED",
-          summary: content || "Task completed.",
+          summary: finalSummary,
         };
       }
 
@@ -1623,13 +1784,14 @@ export class AgentLoop extends EventEmitter {
         tool_calls: response.toolCalls,
       });
 
-      if (response.content) {
+      if (response.toolCalls.length > 1 && iteration === this.iterationCount) {
+        const batchId = `batch_${Date.now()}`;
         this.emitEvent({
-          kind: "agent:thinking",
-          content: response.content,
+          kind: "agent:tool_batch",
+          batchId,
+          size: response.toolCalls.length,
         });
       }
-
       // 4. 도구 실행
       const { results: toolResults, deferredFixPrompts } = await this.executeTools(response.toolCalls);
 
@@ -1686,10 +1848,24 @@ export class AgentLoop extends EventEmitter {
         tokensUsed: response.usage.input + response.usage.output,
         durationMs: Date.now() - iterationStart,
       });
+// session checkpoint
+if (this.sessionPersistence && this.sessionId) {
+  const checkpoint: CheckpointData = {
+    iteration,
+    tokenUsage: {
+      input: this.tokenUsage.input,
+      output: this.tokenUsage.output,
+    },
+    timestamp: new Date().toISOString(),
+    changedFiles: this.changedFiles,
+  };
 
+  await this.sessionPersistence.checkpoint(this.sessionId, checkpoint);
+}
       // Level 1: Quick verification after every 3rd iteration
       if (this.selfReflection && iteration % 3 === 0) {
         try {
+          this.emitSubagent("verifier", "start", "running quick verification");
           const changedFilesMap = new Map<string, string>();
           for (const filePath of this.changedFiles) {
             // Collect changed file contents from tool results
@@ -1727,10 +1903,9 @@ export class AgentLoop extends EventEmitter {
                 role: "system",
                 content: `[Self-Reflection L1] Issues detected: ${issues.join(", ")}. Confidence: ${quickResult.confidence}`,
               });
-              this.emitEvent({
-                kind: "agent:thinking",
-                content: `Self-reflection flagged ${issues.length} issues (confidence: ${quickResult.confidence.toFixed(2)})`,
-              });
+              this.emitSubagent("verifier", "done", `quick verification flagged ${issues.length} issues, confidence ${quickResult.confidence.toFixed(2)}`);
+            } else {
+              this.emitSubagent("verifier", "done", `quick verification passed, confidence ${quickResult.confidence.toFixed(2)}`);
             }
           }
         } catch {
@@ -1778,8 +1953,9 @@ export class AgentLoop extends EventEmitter {
             this.originalSnapshots,
           );
           this.emitEvent({
-            kind: "agent:thinking",
-            content: `Rolled back changes. ${decision.reason}`,
+  kind: "agent:reasoning_delta",
+  text: `rollback executed: ${decision.reason}`,
+  source: "agent",
           });
         } else if (this.iterationSystemMsgCount < 5) {
           // retry, approach_change, scope_reduce → 복구 프롬프트 주입
@@ -1926,7 +2102,15 @@ export class AgentLoop extends EventEmitter {
           // reflection 체크포인트 실패는 치명적이지 않음
         }
       }
-
+      // complex/massive task + 다중 변경 파일일 때만 aggregate impact hint 1회 주입
+      if (
+        !this.impactHintInjected &&
+        this.impactAnalyzer &&
+        this.changedFiles.length >= 2 &&
+        (this.currentComplexity === "complex" || this.currentComplexity === "massive")
+      ) {
+        await this.maybeInjectAggregateImpactHint();
+      }
       // 예산 초과 체크
       if (this.tokenUsage.total >= this.config.loop.totalTokenBudget) {
         return {
@@ -1978,8 +2162,32 @@ export class AgentLoop extends EventEmitter {
 
     for await (const chunk of stream) {
       if (this.aborted) break;
+      if (chunk.type === "reasoning" && chunk.reasoning?.text) {
+        const aggregated = this.reasoningAggregator.push(
+          chunk.reasoning.text,
+          {
+            id: chunk.reasoning.id,
+            provider: chunk.reasoning.provider,
+            model: chunk.reasoning.model,
+            source: chunk.reasoning.source ?? "llm",
+          },
+        );
 
+        for (const item of aggregated) {
+          this.reasoningTree.add("llm", item.text);
+          this.emitEvent({
+            kind: "agent:reasoning_delta",
+            id: item.id,
+            text: item.text,
+            provider: item.provider,
+            model: item.model,
+            source: item.source ?? "llm",
+          });
+        }
+        continue;
+      }
       switch (chunk.type) {
+
         case "text":
           if (chunk.text) {
             content += chunk.text;
@@ -1997,6 +2205,16 @@ export class AgentLoop extends EventEmitter {
         case "tool_call":
           // tool_call 전에 남은 텍스트 flush
           flushTextBuffer();
+          for (const item of this.reasoningAggregator.flush()) {
+            this.emitEvent({
+              kind: "agent:reasoning_delta",
+              id: item.id,
+              text: item.text,
+              provider: item.provider,
+              model: item.model,
+              source: item.source ?? "llm",
+            });
+          }
           if (chunk.toolCall) {
             toolCalls.push(chunk.toolCall);
             this.emitEvent({
@@ -2008,16 +2226,39 @@ export class AgentLoop extends EventEmitter {
           break;
 
         case "done":
-          if (chunk.usage) {
-            usage = chunk.usage;
+          for (const item of this.reasoningAggregator.flush()) {
+            this.emitEvent({
+              kind: "agent:reasoning_delta",
+              id: item.id,
+              text: item.text,
+              provider: item.provider,
+              model: item.model,
+              source: item.source ?? "llm",
+            });
           }
+ if (chunk.usage) {
+   usage = {
+     input: chunk.usage.input ?? 0,
+     output: chunk.usage.output ?? 0,
+   };
+ }
           break;
       }
     }
 
     // 스트림 종료 후 남은 버퍼 flush
     flushTextBuffer();
-
+    for (const item of this.reasoningAggregator.flush()) {
+      this.emitEvent({
+        kind: "agent:reasoning_delta",
+        id: item.id,
+        text: item.text,
+        provider: item.provider,
+        model: item.model,
+        source: item.source ?? "llm",
+      });
+    }
+   if (flushTimer) clearTimeout(flushTimer);
     return {
       content: content || null,
       toolCalls,
@@ -2037,30 +2278,61 @@ export class AgentLoop extends EventEmitter {
   private async executeTools(
     toolCalls: ToolCall[],
   ): Promise<{ results: ToolResult[]; deferredFixPrompts: string[] }> {
-    const results: ToolResult[] = [];
+     if (toolCalls.length > 1) this.emitReasoning(`parallel tool batch started (${toolCalls.length} tools)`);
+     const results: ToolResult[] = [];
     const deferredFixPrompts: string[] = [];
 
     for (const toolCall of toolCalls) {
+      const args = this.parseToolArgs(toolCall.arguments);
+      const allDefinitions = [...this.config.loop.tools, ...this.mcpToolDefinitions];
+      const matchedDefinition = allDefinitions.find((t) => t.name === toolCall.name);
       // Governor: 안전성 검증
       try {
         this.governor.validateToolCall(toolCall);
       } catch (err) {
         if (err instanceof ApprovalRequiredError) {
           // Governor가 위험 감지 → ApprovalManager로 승인 프로세스 위임
-          const args = this.parseToolArgs(toolCall.arguments);
+      
           const approvalResult = await this.handleApproval(toolCall, args, err);
           if (approvalResult) {
             results.push(approvalResult);
             continue;
           }
           // 승인됨 → 계속 실행
-        } else {
+        } 
+      // Generic tool-definition approval gate
+      if (matchedDefinition?.requiresApproval) {
+        const definitionApprovalReq: ApprovalRequest = {
+          id: `definition-approval-${toolCall.id}`,
+          toolName: toolCall.name,
+          arguments: args as Record<string, unknown>,
+          reason:
+            matchedDefinition.source === "mcp"
+              ? `MCP tool "${toolCall.name}" requires approval`
+              : `Tool "${toolCall.name}" requires approval`,
+          riskLevel:
+            matchedDefinition.riskLevel === "critical" ||
+            matchedDefinition.riskLevel === "high"
+              ? "high"
+              : "medium",
+          timeout: 120_000,
+        };
+
+        const definitionApprovalResult = await this.handleApprovalRequest(
+          toolCall,
+          definitionApprovalReq,
+        );
+        if (definitionApprovalResult) {
+          results.push(definitionApprovalResult);
+          continue;
+        }
+      }
+        else {
           throw err;
         }
       }
 
       // ApprovalManager: 추가 승인 체크 (Governor가 못 잡은 규칙)
-      const args = this.parseToolArgs(toolCall.arguments);
       const approvalRequest = this.approvalManager.checkApproval(
         toolCall.name,
         args,
@@ -2121,6 +2393,10 @@ export class AgentLoop extends EventEmitter {
               : mcpResult.output,
           durationMs: mcpResult.durationMs,
         });
+this.emitEvent({
+  kind: "agent:reasoning_delta",
+  text: `tool finished: ${toolCall.name}`,
+});
         continue;
       }
 
@@ -2128,10 +2404,50 @@ export class AgentLoop extends EventEmitter {
       const startTime = Date.now();
       const toolAbort = new AbortController();
       this.interruptManager.registerToolAbort(toolAbort);
+      // rollback용 원본 스냅샷은 실행 전에 저장
+      if (["file_write", "file_edit"].includes(toolCall.name)) {
+        const candidatePath =
+          (args as Record<string, unknown>).path ??
+          (args as Record<string, unknown>).file;
 
+        if (candidatePath) {
+          const filePathStr = String(candidatePath);
+          if (!this.originalSnapshots.has(filePathStr)) {
+            try {
+              const { readFile } = await import("node:fs/promises");
+              const original = await readFile(filePathStr, "utf-8");
+              this.originalSnapshots.set(filePathStr, original);
+} catch (err) {
+ if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+   throw err;
+ }
+}
+          }
+        }
+      }
       try {
-        const result = await this.toolExecutor.execute(toolCall, toolAbort.signal);
+       const result = await this.toolExecutor.execute(toolCall, toolAbort?.signal);
         this.interruptManager.clearToolAbort();
+
+        // Learned skill confidence feedback
+        // 성공한 실행 결과/도구명/출력에 매칭되는 learned skill이 있으면 confidence 갱신
+        if (this.skillLearner) {
+          try {
+            const relevantSkills = this.skillLearner.getRelevantSkills({
+              errorMessage: `${toolCall.name}\n${result.output}`,
+              filePath:
+                typeof args.path === "string"
+                  ? args.path
+                  : typeof args.file === "string"
+                  ? args.file
+                  : undefined,
+            });
+
+            for (const skill of relevantSkills.slice(0, 1)) {
+              this.skillLearner.updateConfidence(skill.id, result.success);
+            }
+          } catch {}
+        }
         results.push(result);
 
         this.emitEvent({
@@ -2143,6 +2459,8 @@ export class AgentLoop extends EventEmitter {
               : result.output,
           durationMs: result.durationMs,
         });
+        this.emitReasoning(`success: ${toolCall.name}`);
+        this.reasoningTree.add("tool", `success: ${toolCall.name}`);
 
         // 파일 변경 이벤트 + 추적
         if (
@@ -2158,16 +2476,6 @@ export class AgentLoop extends EventEmitter {
           // 변경 파일 추적 (메모리 업데이트용)
           if (!this.changedFiles.includes(filePathStr)) {
             this.changedFiles.push(filePathStr);
-            // 원본 스냅샷 저장 (rollback용) — 최초 변경 시에만
-            if (!this.originalSnapshots.has(filePathStr)) {
-              try {
-                const { readFile } = await import("node:fs/promises");
-                const original = await readFile(filePathStr, "utf-8");
-                this.originalSnapshots.set(filePathStr, original);
-              } catch {
-                // 파일이 새로 생성된 경우 스냅샷 없음
-              }
-            }
           }
 
           this.emitEvent({
@@ -2224,7 +2532,24 @@ export class AgentLoop extends EventEmitter {
 
         const errorMessage =
           err instanceof Error ? err.message : String(err);
+        // Learned skill confidence feedback (failure path)
+        if (this.skillLearner) {
+          try {
+            const relevantSkills = this.skillLearner.getRelevantSkills({
+              errorMessage: `${toolCall.name}\n${errorMessage}`,
+              filePath:
+                typeof args.path === "string"
+                  ? args.path
+                  : typeof args.file === "string"
+                  ? args.file
+                  : undefined,
+            });
 
+            for (const skill of relevantSkills.slice(0, 1)) {
+              this.skillLearner.updateConfidence(skill.id, false);
+            }
+          } catch {}
+        }
         results.push({
           tool_call_id: toolCall.id,
           name: toolCall.name,
@@ -2238,6 +2563,11 @@ export class AgentLoop extends EventEmitter {
           message: `Tool ${toolCall.name} failed: ${errorMessage}`,
           retryable: true,
         });
+this.emitEvent({
+  kind: "agent:reasoning_delta",
+ text: `failed: ${toolCall.name}`,
+});
+this.reasoningTree.add("tool", `failed: ${toolCall.name}`);
       }
     }
 
@@ -2254,7 +2584,7 @@ export class AgentLoop extends EventEmitter {
     err: ApprovalRequiredError,
   ): Promise<ToolResult | null> {
     const request: ApprovalRequest = {
-      id: crypto.randomUUID(),
+      id: randomUUID(),
       toolName: toolCall.name,
       arguments: args,
       riskLevel: "high",
@@ -2307,8 +2637,8 @@ export class AgentLoop extends EventEmitter {
     toolName: string,
     result: ToolResult,
   ): Promise<string | null> {
-    // file_write/file_edit만 검증 (다른 도구는 스킵)
-    if (!["file_write", "file_edit"].includes(toolName)) {
+    // file_write/file_edit/shell_exec만 검증
+    if (!["file_write", "file_edit", "shell_exec"].includes(toolName)) {
       return null;
     }
 
@@ -2366,7 +2696,11 @@ export class AgentLoop extends EventEmitter {
   ): Record<string, unknown> {
     if (typeof args === "string") {
       try {
-        return JSON.parse(args) as Record<string, unknown>;
+  const parsed = JSON.parse(args);
+  if (parsed && typeof parsed === "object") {
+    return parsed as Record<string, unknown>;
+  }
+  return { raw: args };
       } catch {
         return { raw: args };
       }
@@ -2388,7 +2722,7 @@ export class AgentLoop extends EventEmitter {
       const progress = this.extractProgress();
 
       const checkpoint: ContinuationCheckpoint = {
-        sessionId: crypto.randomUUID(),
+        sessionId: this.sessionId ?? "unknown-session",
         goal: this.contextManager.getMessages().find((m) => m.role === "user")?.content as string ?? "",
         progress,
         changedFiles: this.changedFiles.map((path) => ({ path, diff: "" })),
@@ -2398,7 +2732,10 @@ export class AgentLoop extends EventEmitter {
           .filter((r) => !r.success)
           .slice(-5)
           .map((r) => `${r.name}: ${r.output.slice(0, 200)}`),
-        contextUsageAtSave: this.tokenUsage.total / this.config.loop.totalTokenBudget,
+        contextUsageAtSave: 
+ this.config.loop.totalTokenBudget > 0
+   ? this.tokenUsage.total / this.config.loop.totalTokenBudget
+   : 0,
         totalTokensUsed: this.tokenUsage.total,
         iterationsCompleted: iteration,
         createdAt: new Date(),
@@ -2572,7 +2909,104 @@ export class AgentLoop extends EventEmitter {
       // Impact analysis 실패는 치명적이지 않음
     }
   }
+  /**
+   * 다중 파일 변경이 누적된 경우 aggregate impact를 1회만 컨텍스트에 주입한다.
+   * 무거운 분석이므로 complex/massive 태스크에서만 사용.
+   */
+  private async maybeInjectAggregateImpactHint(): Promise<void> {
+    if (!this.impactAnalyzer || this.changedFiles.length < 2) return;
 
+    try {
+      const report = await this.impactAnalyzer.analyzeChanges(this.changedFiles);
+
+      const shouldInject =
+        report.breakingChanges.length > 0 ||
+        report.deadCodeCandidates.length > 0 ||
+        report.testCoverage.some((t) => t.inferredCoverage === "low") ||
+        report.riskLevel === "high" ||
+        report.riskLevel === "critical";
+
+      if (!shouldInject) return;
+
+      const planPreview = report.refactorPlan
+        .slice(0, 3)
+        .map((step) => `${step.step}. ${step.action}`)
+        .join("\n");
+
+      const hintLines: string[] = [
+        "[Aggregate Impact Hint]",
+        `Risk: ${report.riskLevel}`,
+        `Breaking changes: ${report.breakingChanges.length}`,
+        `Dead code candidates: ${report.deadCodeCandidates.length}`,
+        `Low coverage files: ${report.testCoverage.filter((t) => t.inferredCoverage === "low").length}`,
+      ];
+
+      if (planPreview) {
+        hintLines.push("", "Suggested refactor order:", planPreview);
+      }
+
+      this.contextManager.addMessage({
+        role: "system",
+        content: hintLines.join("\n"),
+      });
+
+      this.impactHintInjected = true;
+
+      this.emitEvent({
+        kind: "agent:thinking",
+        content:
+          `Aggregate impact hint injected: ${report.riskLevel} risk, ` +
+          `${report.breakingChanges.length} breaking changes, ` +
+          `${report.deadCodeCandidates.length} dead code candidates.`,
+      });
+    } catch {
+      // aggregate impact 실패는 치명적이지 않음
+    }
+  }
+
+  /**
+   * 종료 직전 최종 impact 요약 생성.
+   * assistant final summary에만 붙이고 system prompt 오염은 하지 않는다.
+   */
+  private async buildFinalImpactSummary(): Promise<string | null> {
+    if (!this.impactAnalyzer || this.changedFiles.length === 0) return null;
+
+    try {
+      const report = await this.impactAnalyzer.analyzeChanges(this.changedFiles);
+
+      const lines: string[] = [];
+      lines.push("Impact summary:");
+      lines.push(
+        `- Risk: ${report.riskLevel}, affected files: ${report.affectedFiles.length}, breaking changes: ${report.breakingChanges.length}`,
+      );
+
+      const lowCoverage = report.testCoverage.filter(
+        (t) => t.inferredCoverage === "low",
+      );
+      if (lowCoverage.length > 0) {
+        lines.push(`- Low inferred test coverage: ${lowCoverage.map((t) => t.file).join(", ")}`);
+      }
+
+      if (report.deadCodeCandidates.length > 0) {
+        lines.push(
+          `- Dead code candidates: ${report.deadCodeCandidates
+            .slice(0, 5)
+            .map((d) => `${d.file}:${d.symbol}`)
+            .join(", ")}`,
+        );
+      }
+
+      if (report.refactorPlan.length > 0) {
+        lines.push(
+          `- Suggested next step: ${report.refactorPlan[0]?.action ?? "review refactor plan"}`,
+        );
+      }
+
+      return lines.join("\n");
+    } catch {
+      return null;
+    }
+  }
   /**
    * CostOptimizer 인스턴스를 반환한다.
    */
@@ -2599,7 +3033,26 @@ export class AgentLoop extends EventEmitter {
     const args = this.parseToolArgs(toolCall.arguments);
     return this.mcpClient!.callToolAsYuan(toolCall.name, args, toolCall.id);
   }
+  /**
+   * ContinuousReflection overflow signal을 soft rollover로 처리한다.
+   * 절대 abort하지 않고, 체크포인트 저장 후 다음 iteration에서
+   * ContextManager가 압축된 컨텍스트를 사용하도록 둔다.
+   */
+  private async handleSoftContextOverflow(): Promise<void> {
+    try {
+      await this.saveAutoCheckpoint(this.iterationCount);
+      this.checkpointSaved = true;
+    } catch {
+      // checkpoint 실패는 치명적이지 않음
+    }
 
+    this.emitEvent({
+      kind: "agent:thinking",
+      content:
+        "Context usage exceeded safe threshold. " +
+        "Saved checkpoint, compacting history, and continuing without abort.",
+    });
+  }
   /** MCP 클라이언트 정리 (세션 종료 시 호출) */
   async dispose(): Promise<void> {
     if (this.mcpClient) {
@@ -2616,10 +3069,24 @@ export class AgentLoop extends EventEmitter {
   private emitEvent(event: AgentEvent): void {
     this.emit("event", event);
   }
+  private emitReasoning(content: string): void {
+    this.reasoningTree.add("reasoning", content);
+    this.emitEvent({
+      kind: "agent:reasoning_delta",
+      text: content,
+      source: "agent",
+    });
+  }
 
+  private emitSubagent(name: string, phase: "start" | "done", content: string): void {
+    this.reasoningTree.add(name, `[${phase}] ${content}`);
+    this.emitReasoning(`[${name}:${phase}] ${content}`);
+  }
   private handleFatalError(err: unknown): AgentTermination {
     const message = err instanceof Error ? err.message : String(err);
-
+  if (this.sessionPersistence && this.sessionId) {
+    void this.sessionPersistence.updateStatus(this.sessionId, "crashed");
+  }
     this.emitEvent({
       kind: "agent:error",
       message,

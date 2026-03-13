@@ -376,8 +376,12 @@ export class PersonaManager {
     try {
       await access(this.config.profilePath);
       const raw = await readFile(this.config.profilePath, "utf-8");
-      const data = JSON.parse(raw) as UserProfile;
-      this.profile = data;
+try {
+  const data = JSON.parse(raw) as UserProfile;
+  this.profile = data;
+} catch {
+  this.profile = this.createDefaultProfile();
+}
     } catch {
       // 파일 없음 — 기본 프로필 유지
       this.profile = this.createDefaultProfile();
@@ -514,7 +518,7 @@ export class PersonaManager {
       lineLength: this.detectMaxLineLength(code),
     };
     if (this.codeObservations.length >= PersonaManager.MAX_OBSERVATIONS) {
-      this.codeObservations = this.codeObservations.slice(-Math.floor(PersonaManager.MAX_OBSERVATIONS / 2));
+      this.codeObservations.shift();
     }
     this.codeObservations.push(observation);
 

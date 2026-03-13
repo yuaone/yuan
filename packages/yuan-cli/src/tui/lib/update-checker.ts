@@ -55,7 +55,7 @@ export function saveSettings(settings: YuanSettings): void {
 /** Fetch latest version from npm registry (non-blocking) */
 function fetchLatestVersion(): Promise<string | null> {
   return new Promise((resolve) => {
-    const url = `https://registry.npmjs.org/${PACKAGE_NAME}/latest`;
+    const url = `https://registry.npmjs.org/${encodeURIComponent(PACKAGE_NAME)}/latest`;
     const req = https.get(url, { timeout: 5000 }, (res) => {
       let data = "";
       res.on("data", (chunk) => { data += chunk; });
@@ -78,13 +78,17 @@ function fetchLatestVersion(): Promise<string | null> {
 
 /** Compare semver versions. Returns true if b > a */
 function isNewer(a: string, b: string): boolean {
-  const pa = a.split(".").map(Number);
-  const pb = b.split(".").map(Number);
-  for (let i = 0; i < 3; i++) {
-    if ((pb[i] ?? 0) > (pa[i] ?? 0)) return true;
-    if ((pb[i] ?? 0) < (pa[i] ?? 0)) return false;
-  }
-  return false;
+ const pa = a.split(".").map(n => parseInt(n,10));
+ const pb = b.split(".").map(n => parseInt(n,10));
+
+ for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+   const ai = pa[i] ?? 0;
+   const bi = pb[i] ?? 0;
+   if (bi > ai) return true;
+   if (bi < ai) return false;
+ }
+
+ return false;
 }
 
 /** Check for updates (cached, non-blocking) */
@@ -136,7 +140,7 @@ export async function performUpdate(): Promise<boolean> {
 
   // Try pnpm global add first (handles workspace:* correctly)
   try {
-    execSync(`pnpm add -g ${PACKAGE_NAME}@latest`, {
+    execSync(`pnpm install -g ${PACKAGE_NAME}@latest`, {
       stdio: "pipe",
       timeout: 60000,
     });

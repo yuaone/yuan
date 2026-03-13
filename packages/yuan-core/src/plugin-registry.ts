@@ -143,6 +143,12 @@ export class PluginRegistry {
   }
 
   /**
+   * Enabled skill definitions only, flattened.
+   */
+  getEnabledSkillDefinitions(): SkillDefinition[] {
+    return this.getAllSkills().map((entry) => entry.skill);
+  }
+  /**
    * Get compact summary of all skills (names only, for system prompt).
    * Use this instead of getAllSkills() when you only need identifiers
    * to minimize token usage in prompts.

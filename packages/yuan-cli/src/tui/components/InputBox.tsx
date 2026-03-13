@@ -6,7 +6,7 @@
  * Esc → close slash menu or interrupt agent.
  */
 
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect, useRef } from "react";
 import { Box, Text, useInput } from "ink";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
 import { useInputHistory } from "../hooks/useInputHistory.js";
@@ -44,6 +44,41 @@ export function InputBox({
   const history = useInputHistory();
   const [value, setValue] = useState("");
 
+  const [pasteBadge, setPasteBadge] = useState<string | null>(null);
+  const pasteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearPasteBadge = useCallback(() => {
+    if (pasteTimerRef.current) {
+      clearTimeout(pasteTimerRef.current);
+      pasteTimerRef.current = null;
+    }
+    setPasteBadge(null);
+  }, []);
+
+  const showPasteBadge = useCallback((rawLength: number) => {
+    if (pasteTimerRef.current) {
+      clearTimeout(pasteTimerRef.current);
+    }
+
+    const formatted =
+      rawLength >= 1000
+        ? `${(rawLength / 1000).toFixed(rawLength >= 10000 ? 0 : 1)}k`
+        : String(rawLength);
+
+    setPasteBadge(`[paste ${formatted}]`);
+    pasteTimerRef.current = setTimeout(() => {
+      setPasteBadge(null);
+      pasteTimerRef.current = null;
+    }, 1800);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (pasteTimerRef.current) {
+        clearTimeout(pasteTimerRef.current);
+      }
+    };
+  }, []);
   const updateValue = useCallback(
     (newValue: string) => {
       setValue(newValue);
@@ -151,7 +186,17 @@ export function InputBox({
         // eslint-disable-next-line no-control-regex
         const cleaned = input.replace(/[\x00-\x1f\x7f]|\x1b\[[^a-zA-Z]*[a-zA-Z]/g, "");
         if (cleaned.length > 0) {
-          updateValue(value + cleaned);
+          const isPaste = cleaned.length > 10 || cleaned.includes("\n") || cleaned.includes("\t");
+          const normalized = cleaned
+            .replace(/\r/g, "")
+            .replace(/\n+/g, " ")
+            .replace(/\t/g, " ");
+
+          if (isPaste) {
+            showPasteBadge(cleaned.length);
+          }
+
+          updateValue(value + normalized);
         }
       }
     },
@@ -167,20 +212,27 @@ export function InputBox({
   const cmdRecognized = isSlash && isKnownCommand(cmdToken);
 
   return (
-    <Box width={columns} height={1} flexDirection="column" flexShrink={0}>
-      <Box>
-        <Text dimColor>{prompt} </Text>
-        {isSlash ? (
-          <>
-            <Text dimColor={cmdRecognized} color={cmdRecognized ? undefined : "red"}>
-              {cmdToken}
-            </Text>
-            <Text>{cmdRest}</Text>
-          </>
-        ) : (
-          <Text>{displayValue}</Text>
-        )}
-        {!isRunning && <Text dimColor>█</Text>}
+    <Box width={columns} flexDirection="column" flexShrink={0}>
+      <Text dimColor>{TOKENS.box.horizontal.repeat(Math.max(0, columns - 1))}</Text>
+      <Box justifyContent="space-between">
+        <Box>
+          <Text dimColor>{prompt} </Text>
+          {isSlash ? (
+            <>
+              <Text color={cmdRecognized ? "cyan" : "red"}>
+                {cmdToken}
+              </Text>
+              <Text>{cmdRest}</Text>
+            </>
+          ) : (
+            <Text>{displayValue}</Text>
+          )}
+          {!isRunning && !slashMenuOpen && <Text dimColor>█</Text>}
+        </Box>
+
+        <Box>
+          {pasteBadge ? <Text dimColor>{pasteBadge}</Text> : null}
+        </Box>
       </Box>
     </Box>
   );

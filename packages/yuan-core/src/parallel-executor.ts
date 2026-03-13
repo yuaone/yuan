@@ -21,7 +21,7 @@ import {
   type SubAgentResult,
   type DAGContextLike,
 } from "./sub-agent.js";
-
+import type { HybridEventBus } from "./event-bus.js";
 // ─── Types ───
 
 /** Configuration for the ParallelExecutor */
@@ -37,6 +37,9 @@ export interface ParallelExecutorConfig {
     workDir: string,
     enabledTools?: string[],
   ) => ToolExecutor;
+ eventBus?: HybridEventBus
+  sessionId?: string
+
   /**
    * Optional callback to resolve a per-task BYOK configuration.
    * Called for each task before execution. If it returns a config, that config
@@ -74,6 +77,7 @@ export interface ParallelExecutorEvents {
   "parallel:start": (taskIds: string[], maxParallel: number) => void;
   "parallel:task_start": (taskId: string) => void;
   "parallel:task_complete": (result: SubAgentResult) => void;
+  "parallel:task_error": (data: { taskId: string; error: unknown }) => void;
   "parallel:all_complete": (results: SubAgentResult[]) => void;
 }
 
@@ -110,6 +114,9 @@ export class ParallelExecutor extends EventEmitter {
   constructor(config: ParallelExecutorConfig) {
     super();
     this.config = config;
+ if (config.maxParallel <= 0) {
+   throw new Error("maxParallel must be > 0");
+ }
   }
 
   /**
@@ -197,9 +204,27 @@ export class ParallelExecutor extends EventEmitter {
           results.push(result);
           this.runningAgents.delete(task.id);
           this.emit("parallel:task_complete", result);
+  if (this.config.eventBus && this.config.sessionId) {
+    this.config.eventBus.emit(this.config.sessionId, {
+      kind: "agent:subagent_done",
+      taskId: result.taskId,
+      success: result.success,
+    });
+  }
         }).catch((err) => {
           inFlight.delete(promise);
           this.runningAgents.delete(task.id);
+
+ results.push({
+   taskId: task.id,
+   success: false,
+   summary: "Task crashed",
+   changedFiles: [],
+   tokensUsed: { input: 0, output: 0 },
+   iterations: 0,
+   phase: "cleanup",
+   error: err instanceof Error ? err.message : String(err),
+ });
           this.emit("parallel:task_error", { taskId: task.id, error: err });
         });
       }
@@ -231,6 +256,7 @@ export class ParallelExecutor extends EventEmitter {
     for (const [, agent] of this.runningAgents) {
       agent.abort();
     }
+    this.runningAgents.clear();
   }
 
   // ─── Private ───
@@ -277,6 +303,13 @@ export class ParallelExecutor extends EventEmitter {
     // Forward sub-agent events
     agent.on("subagent:phase", (taskId: string, phase) => {
       this.emit("subagent:phase", taskId, phase);
+  if (this.config.eventBus && this.config.sessionId) {
+    this.config.eventBus.emit(this.config.sessionId, {
+      kind: "agent:subagent_phase",
+      taskId,
+      phase,
+    });
+  }
     });
     agent.on("subagent:iteration", (taskId: string, index: number, tokens: number) => {
       this.emit("subagent:iteration", taskId, index, tokens);

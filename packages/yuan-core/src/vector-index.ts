@@ -86,7 +86,14 @@ export interface EmbeddingProvider {
   /** 임베딩 차원 수 (1536 for OpenAI text-embedding-3-small, 768 for others) */
   dimension: number;
 }
-
+/**
+ * Optional embedding cache
+ * (Redis, memory, etc)
+ */
+export interface EmbeddingCache {
+  get(key: string): Promise<number[] | null>;
+  set(key: string, embedding: number[]): Promise<void>;
+}
 /**
  * SQL 실행기 — 외부에서 주입 (yua-backend의 PostgreSQL pool).
  * 이 모듈은 직접 DB 연결을 하지 않는다.
@@ -111,6 +118,11 @@ export interface VectorIndexConfig {
   batchSize?: number;
   /** 임베딩 차원 (default: 1536) */
   dimension?: number;
+  /** optional embedding cache */
+  embeddingCache?: EmbeddingCache;
+
+  /** enable HNSW tuning */
+  hnswSearchEf?: number;
 }
 
 /** 인덱스 통계 */
@@ -154,7 +166,10 @@ const DEFAULT_SIMILARITY_THRESHOLD = 0.7;
  * ```
  */
 export class VectorIndex {
-  private config: Required<VectorIndexConfig>;
+  private config: VectorIndexConfig & {
+    batchSize: number;
+    dimension: number;
+  };
 
   constructor(config: VectorIndexConfig) {
     this.config = {
@@ -163,6 +178,8 @@ export class VectorIndex {
       sqlExecutor: config.sqlExecutor,
       batchSize: config.batchSize ?? DEFAULT_BATCH_SIZE,
       dimension: config.dimension ?? DEFAULT_DIMENSION,
+     embeddingCache: config.embeddingCache,
+      hnswSearchEf: config.hnswSearchEf,
     };
   }
 
@@ -217,8 +234,10 @@ CREATE INDEX IF NOT EXISTS idx_code_embedding_type
 -- IVFFlat vector index (cosine distance)
 -- Note: requires at least 100 rows for lists=100 to be effective.
 -- For small datasets, pgvector falls back to sequential scan automatically.
-CREATE INDEX IF NOT EXISTS idx_code_embedding_vector
-  ON ${TABLE_NAME} USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+ CREATE INDEX IF NOT EXISTS idx_code_embedding_vector
+  ON ${TABLE_NAME}
+  USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64);
 `.trim();
   }
 
@@ -284,16 +303,13 @@ CREATE INDEX IF NOT EXISTS idx_code_embedding_vector
       const embeddings = await this.generateEmbeddings(texts);
 
       // Upsert each symbol
-      for (let j = 0; j < batch.length; j++) {
-        const symbol = batch[j];
-        const fullSymbol: CodeEmbedding = {
-          ...symbol,
-          embedding: embeddings[j],
-        };
-        const { sql, params } = this.buildUpsertSQL(fullSymbol);
-        await this.config.sqlExecutor.query(sql, params);
-        indexed++;
-      }
+      const rows: CodeEmbedding[] = batch.map((symbol, idx) => ({
+        ...symbol,
+        embedding: embeddings[idx],
+      }));
+
+      await this.bulkUpsert(rows);
+      indexed += rows.length;
     }
 
     return indexed;
@@ -333,7 +349,9 @@ CREATE INDEX IF NOT EXISTS idx_code_embedding_vector
     ]);
     // PostgreSQL returns rowCount, but our interface uses rows.
     // Convention: the executor can return affected count via rows length or a special field.
-    return (result as unknown as { rowCount?: number }).rowCount ?? 0;
+    const rowCount = (result as any).rowCount;
+    if (typeof rowCount === "number") return rowCount;
+    return 0;
   }
 
   /**
@@ -346,7 +364,9 @@ CREATE INDEX IF NOT EXISTS idx_code_embedding_vector
     const result = await this.config.sqlExecutor.query(sql, [
       this.config.projectId,
     ]);
-    return (result as unknown as { rowCount?: number }).rowCount ?? 0;
+    const rowCount = (result as any).rowCount;
+    if (typeof rowCount === "number") return rowCount;
+    return 0;
   }
 
   // ─── Search ────────────────────────────────────────────────────
@@ -362,6 +382,11 @@ CREATE INDEX IF NOT EXISTS idx_code_embedding_vector
     query: string,
     limit: number = DEFAULT_SEARCH_LIMIT,
   ): Promise<VectorSearchResult[]> {
+  if (this.config.hnswSearchEf) {
+    await this.config.sqlExecutor.query(
+      `SET LOCAL hnsw.ef_search = ${this.config.hnswSearchEf}`
+    );
+  }
     const [embedding] = await this.generateEmbeddings([query]);
     const { sql, params } = this.buildSearchSQL(embedding, limit);
     const result = await this.config.sqlExecutor.query(sql, params);
@@ -561,7 +586,38 @@ CREATE INDEX IF NOT EXISTS idx_code_embedding_vector
    */
   private async generateEmbeddings(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
-    return this.config.embeddingProvider.embed(texts);
+
+    const chunk = 32;
+    const results: number[][] = [];
+
+    for (let i = 0; i < texts.length; i += chunk) {
+      const slice = texts.slice(i, i + chunk);
+    const embBatch: number[][] = [];
+
+    for (const text of slice) {
+      const key = this.hash(text);
+
+      if (this.config.embeddingCache) {
+        const cached = await this.config.embeddingCache.get(key);
+        if (cached) {
+          embBatch.push(cached);
+          continue;
+        }
+      }
+
+    const emb = (await this.config.embeddingProvider.embed([text]))[0];
+
+      if (this.config.embeddingCache) {
+        await this.config.embeddingCache.set(key, emb);
+      }
+
+      embBatch.push(emb);
+    }
+
+    results.push(...embBatch);
+    }
+
+    return results;
   }
 
   /**
@@ -571,7 +627,12 @@ CREATE INDEX IF NOT EXISTS idx_code_embedding_vector
    * @returns "[0.1,0.2,...]" 형식의 문자열
    */
   private formatVector(embedding: number[]): string {
-    return `[${embedding.join(",")}]`;
+  let s = "[";
+  for (let i = 0; i < embedding.length; i++) {
+    if (i) s += ",";
+    s += embedding[i];
+  }
+  return s + "]";
   }
 
   /**
@@ -607,6 +668,44 @@ CREATE INDEX IF NOT EXISTS idx_code_embedding_vector
     return { sql: sql.trim(), params };
   }
 
+    private async bulkUpsert(rows: CodeEmbedding[]): Promise<void> {
+    if (rows.length === 0) return;
+
+    const values: string[] = [];
+    const params: unknown[] = [];
+
+    let p = 1;
+
+    for (const row of rows) {
+      values.push(
+        `($${p++},$${p++},$${p++},$${p++},$${p++},$${p++}::vector,$${p++}::jsonb,NOW())`
+      );
+
+      params.push(
+        row.projectId,
+        row.filePath,
+        row.symbolName,
+        row.symbolType,
+        row.codeSnippet,
+        this.formatVector(row.embedding),
+        JSON.stringify(row.metadata)
+      );
+    }
+
+    const sql = `
+      INSERT INTO ${TABLE_NAME}
+      (project_id,file_path,symbol_name,symbol_type,code_snippet,embedding,metadata,updated_at)
+      VALUES ${values.join(",")}
+      ON CONFLICT ON CONSTRAINT uq_code_embedding_symbol
+      DO UPDATE SET
+        code_snippet = EXCLUDED.code_snippet,
+        embedding = EXCLUDED.embedding,
+        metadata = EXCLUDED.metadata,
+        updated_at = NOW()
+    `;
+
+    await this.config.sqlExecutor.query(sql, params);
+  }
   /**
    * 벡터 검색 SQL을 생성한다.
    * 코사인 거리(<=>)를 사용하여 유사도 순으로 정렬한다.
@@ -767,7 +866,14 @@ CREATE INDEX IF NOT EXISTS idx_code_embedding_vector
     );
     return match ? match[0].trim() : firstLine;
   }
-
+private hash(text: string): string {
+  let h = 0;
+  for (let i = 0; i < text.length; i++) {
+    h = (h << 5) - h + text.charCodeAt(i);
+    h |= 0;
+  }
+  return h.toString();
+}
   /**
    * SQL 문자열을 개별 statement로 분리한다.
    * DO $$ ... $$ 블록을 올바르게 처리한다.

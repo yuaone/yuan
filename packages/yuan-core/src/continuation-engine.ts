@@ -151,7 +151,7 @@ export class ContinuationEngine {
       // Date 객체를 ISO 문자열로 직렬화
       const serialized: SerializedCheckpoint = {
         ...safeCheckpoint,
-        createdAt: safeCheckpoint.createdAt.toISOString(),
+       createdAt: (safeCheckpoint.createdAt ?? new Date()).toISOString(),
       };
 
       const json = JSON.stringify(serialized, null, 2);
@@ -246,16 +246,19 @@ export class ContinuationEngine {
       let lastId = chain.length > 0 ? chain[chain.length - 1].sessionId : sessionId;
       const childVisited = new Set(visited);
 
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        const child = allCheckpoints.find(
-          (cp) => cp.parentSessionId === lastId && !childVisited.has(cp.sessionId),
-        );
-        if (!child) break;
-        childVisited.add(child.sessionId);
-        chain.push(child);
-        lastId = child.sessionId;
-      }
+while (true) {
+  const children = allCheckpoints.filter(
+    (cp) => cp.parentSessionId === lastId && !childVisited.has(cp.sessionId),
+  );
+
+  if (children.length === 0) break;
+
+  for (const child of children) {
+    childVisited.add(child.sessionId);
+    chain.push(child);
+    lastId = child.sessionId;
+  }
+}
 
       // 시간순 정렬
       chain.sort(

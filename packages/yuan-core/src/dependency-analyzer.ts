@@ -73,9 +73,9 @@ const IMPORT_RE =
 
 // import "Z" (side-effect)
 const IMPORT_SIDE_EFFECT_RE = /import\s+["']([^"']+)["']/g;
-
-// export { X } from "Z" (re-exports)
 const RE_EXPORT_RE = /export\s+(?:type\s+)?\{([^}]*)\}\s+from\s+["']([^"']+)["']/g;
+// export { X } from "Z" (re-exports)
+const RE_EXPORT_ALL_RE = /export\s+\*\s+from\s+["']([^"']+)["']/g;
 
 // require("Z")
 const REQUIRE_RE = /require\s*\(\s*["']([^"']+)["']\s*\)/g;
@@ -405,7 +405,16 @@ export class DependencyAnalyzer {
 
       refs.push({ source, symbols, isTypeOnly });
     }
-
+ 
+    // Side-effect imports: import "Z"
+    const sideEffectRe = new RegExp(IMPORT_SIDE_EFFECT_RE.source, "g");
+    while ((match = sideEffectRe.exec(content)) !== null) {
+      refs.push({
+        source: match[1],
+        symbols: [],
+        isTypeOnly: false,
+      });
+    }
     // Re-exports: export { X } from "Y"
     const reExportRe = new RegExp(RE_EXPORT_RE.source, "g");
     while ((match = reExportRe.exec(content)) !== null) {
@@ -418,7 +427,14 @@ export class DependencyAnalyzer {
       const isTypeOnly = /export\s+type\s+\{/.test(match[0]);
       refs.push({ source, symbols, isTypeOnly });
     }
-
+    const reExportAllRe = new RegExp(RE_EXPORT_ALL_RE.source, "g");
+    while ((match = reExportAllRe.exec(content)) !== null) {
+      refs.push({
+        source: match[1],
+        symbols: ["*"],
+        isTypeOnly: false,
+      });
+    }
     // CJS require
     const requireRe = new RegExp(REQUIRE_RE.source, "g");
     while ((match = requireRe.exec(content)) !== null) {

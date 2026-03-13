@@ -13,6 +13,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import * as os from "node:os";
 import { PluginRegistry } from "./plugin-registry.js";
 import type { PluginManifest, PluginDetectConfig, PluginLifecycle } from "./plugin-types.js";
@@ -485,7 +486,9 @@ export class PluginAutoLoader {
     const searchPaths: string[] = [];
 
     // 1. Built-in plugins: relative to this source file's package
-    const builtinDir = path.resolve(__dirname, "..", "plugins");
+const __filename = fileURLToPath(import.meta.url);
+const __dirnameLocal = path.dirname(__filename);
+const builtinDir = path.resolve(__dirnameLocal, "..", "plugins");
     searchPaths.push(builtinDir);
 
     // 2. Project-local plugins

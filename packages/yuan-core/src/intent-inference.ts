@@ -7,7 +7,10 @@
  * 한국어 슬랭/축약어도 이해한다.
  */
 
-import { execSync, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 import { readFile, readdir } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { BYOKClient } from "./llm-client.js";
@@ -369,12 +372,12 @@ export class IntentInferenceEngine {
     const cwd = this.config.projectPath;
 
     try {
-      // Uncommitted changes
-      const status = execSync("git status --porcelain", {
-        cwd,
-        encoding: "utf-8",
-        timeout: 5_000,
-      }).trim();
+const { stdout } = await execFileAsync(
+  "git",
+  ["status", "--porcelain"],
+  { cwd, timeout: 5000 }
+);
+const status = stdout.trim()
 
       if (status) {
         const changedFiles = status
@@ -390,11 +393,12 @@ export class IntentInferenceEngine {
       }
 
       // Recent commits
-      const log = execSync("git log --oneline -5", {
-        cwd,
-        encoding: "utf-8",
-        timeout: 5_000,
-      }).trim();
+      const { stdout: logStdout } = await execFileAsync(
+        "git",
+        ["log", "--oneline", "-5"],
+        { cwd, timeout: 5_000 },
+      );
+      const log = logStdout.trim();
 
       if (log) {
         signals.push({
@@ -476,12 +480,12 @@ export class IntentInferenceEngine {
     const cwd = this.config.projectPath;
 
     try {
-      // Check recent git diff for error-related changes
-      const diff = execSync("git diff HEAD --stat", {
-        cwd,
-        encoding: "utf-8",
-        timeout: 5_000,
-      }).trim();
+      const { stdout: diffStdout } = await execFileAsync(
+        "git",
+        ["diff", "HEAD", "--stat"],
+        { cwd, timeout: 5_000 },
+      );
+      const diff = diffStdout.trim();
 
       if (diff) {
         signals.push({
@@ -599,7 +603,12 @@ export class IntentInferenceEngine {
         { role: "user", content: prompt },
       ]);
 
-      return response.content?.trim() ?? input;
+const text =
+  (response as any)?.content ??
+  (response as any)?.message?.content ??
+  "";
+
+return text.trim() || input;
     } catch {
       // LLM call failed — fall back to original input with category prefix
       return `[${category}] ${input}`;
@@ -649,19 +658,25 @@ export class IntentInferenceEngine {
           continue;
         }
         // Sanitize: strip any characters that are not alphanumeric, dash, underscore, or dot
-        const safeId = id.replace(/[^a-zA-Z0-9._-]/g, "");
+       const safeId = id.replace(/[^a-zA-Z0-9_-]/g, "");
         if (safeId.length < 3) continue;
         try {
-          const found = execFileSync("find", [
-            ".", "-name", `*${safeId}*`, "-type", "f",
-            "-not", "-path", "*/node_modules/*",
-            "-not", "-path", "*/.git/*",
-          ], {
-            cwd,
-            encoding: "utf-8",
-            timeout: 3_000,
-            maxBuffer: 4096,
-          }).trim();
+          const { stdout: foundStdout } = await execFileAsync(
+            "find",
+            [
+              ".",
+              "-name", `*${safeId}*`,
+              "-type", "f",
+              "-not", "-path", "*/node_modules/*",
+              "-not", "-path", "*/.git/*",
+            ],
+            {
+              cwd,
+              timeout: 3_000,
+              maxBuffer: 4096,
+            },
+          );
+          const found = foundStdout.trim();
 
           // Take only first 3 results
           const lines = found.split("\n").filter(Boolean).slice(0, 3);

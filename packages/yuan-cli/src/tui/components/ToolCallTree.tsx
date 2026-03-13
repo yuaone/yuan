@@ -10,7 +10,7 @@ import { Spinner } from "./Spinner.js";
 import { CollapsibleSection } from "./CollapsibleSection.js";
 import { DiffView } from "./DiffView.js";
 import { BashOutput } from "./BashOutput.js";
-import type { TUIToolCall } from "../types.js";
+import type { TUIToolCall, ReasoningNode } from "../types.js";
 import { truncate } from "../lib/truncate.js";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
 
@@ -47,7 +47,10 @@ function ToolCallNode({
   }
 
   // Duration
-  const durationStr = tc.duration != null ? ` ${tc.duration.toFixed(1)}s` : "";
+  let durationStr = "";
+  if (tc.duration != null) {
+    durationStr = ` ${tc.duration.toFixed(2)}s`;
+  }
 
   // Truncate args summary based on available width
   const { tier } = useTerminalSize();
@@ -62,8 +65,11 @@ function ToolCallNode({
       <Box>
         <Text dimColor>{connector} </Text>
         <Text bold>{tc.toolName}</Text>
-        {args && <Text dimColor>  {args}</Text>}
-        <Text>  </Text>
+        {args && <Text dimColor>({args})</Text>}
+      </Box>
+
+      <Box paddingLeft={2}>
+        <Text dimColor>{continuation} </Text>
         {statusEl}
         <Text dimColor>{durationStr}</Text>
       </Box>
@@ -115,15 +121,85 @@ export function ToolCallTree({
   toolCalls,
   width,
 }: ToolCallTreeProps): React.JSX.Element {
+  const batches = groupBatches(toolCalls);
+
   return (
     <Box flexDirection="column">
-      {toolCalls.map((tc, i) => (
-        <ToolCallNode
-          key={tc.id}
-          tc={tc}
-          isLast={i === toolCalls.length - 1}
-          width={width}
-        />
+      {batches.map((batch, batchIndex) => {
+        const isParallel = batch.length > 1;
+
+        if (isParallel) {
+          const batchRunning = batch.some((tc) => tc.status === "running");
+          return (
+            <Box key={`batch-${batchIndex}`} flexDirection="column">
+              <Box>
+                <Text dimColor>{batchRunning ? "running tools..." : "tool batch."}</Text>
+                <Text> </Text>
+                {batchRunning ? <Spinner /> : <Text dimColor>done.</Text>}
+              </Box>
+              {batch.map((tc, i) => (
+                <ToolCallNode
+                  key={tc.id}
+                  tc={tc}
+                  isLast={i === batch.length - 1}
+                  width={width}
+                />
+              ))}
+            </Box>
+          );
+        }
+
+        const tc = batch[0];
+        if (!tc) return null;
+        return (
+          <ToolCallNode
+            key={tc.id}
+            tc={tc}
+            isLast={batchIndex === batches.length - 1}
+            width={width}
+          />
+        );
+      })}
+    </Box>
+  );
+}
+function groupBatches(toolCalls: TUIToolCall[]): TUIToolCall[][] {
+  const map = new Map<string, TUIToolCall[]>();
+
+  for (const tc of toolCalls) {
+    const key = tc.batchId ?? tc.id;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key)!.push(tc);
+  }
+
+  return Array.from(map.values()).sort((a, b) => {
+    const aStart = a[0]?.startedAt ?? 0;
+    const bStart = b[0]?.startedAt ?? 0;
+    return aStart - bStart;
+  });
+}
+
+export function ReasoningTreeView({
+  node,
+  depth = 0,
+}: {
+  node: ReasoningNode;
+  depth?: number;
+}): React.JSX.Element {
+  const prefix = depth === 0 ? "" : "  ".repeat(depth - 1) + "├─ ";
+
+  return (
+    <Box flexDirection="column">
+      {depth > 0 && (
+        <Text>
+          {prefix}
+          <Text bold>{node.label}</Text>
+          {node.text && <Text dimColor> {node.text}</Text>}
+        </Text>
+      )}
+
+      {node.children.map((child) => (
+        <ReasoningTreeView key={child.id} node={child} depth={depth + 1} />
       ))}
     </Box>
   );

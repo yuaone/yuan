@@ -27,6 +27,7 @@ export type LogLevel = "trace" | "debug" | "info" | "warn" | "error" | "fatal";
 /** Log category — classifies the nature of the log entry */
 export type LogCategory =
   | "input"
+   | "output"
   | "layer"
   | "reasoning"
   | "decision"
@@ -359,9 +360,9 @@ export class AgentLogger {
     return () => {
       const durationMs = Date.now() - startTime;
 
-      // Pop the layer from stack
-      const idx = this.layerStack.lastIndexOf(layer);
-      if (idx !== -1) this.layerStack.splice(idx, 1);
+ if (this.layerStack[this.layerStack.length - 1] === layer) {
+   this.layerStack.pop();
+ }
 
       const exitEntry = this.createEntry(
         "info",
@@ -546,6 +547,10 @@ export class AgentLogger {
     entry.agentId = agentId;
     if (tokens) entry.tokens = tokens;
     this.emit(entry);
+ const child = this.children.get(agentId);
+ if (child) {
+   this.children.delete(agentId);
+ }
   }
 
   /**
@@ -607,7 +612,7 @@ export class AgentLogger {
     const status = success ? "Success" : "Failed";
     const msg = `Output: ${status} (${totalTokens.toLocaleString()} tokens)`;
 
-    const entry = this.createEntry("info", "input", msg);
+   const entry = this.createEntry("info", "output", msg);
     entry.data = { result, success };
     if (tokens) entry.tokens = tokens;
     this.emit(entry);
@@ -766,7 +771,10 @@ export class AgentLogger {
           existing.entriesCount++;
           if (entry.durationMs != null) {
             existing.exitedAt = entry.timestamp;
-            existing.duration = entry.durationMs;
+            existing.duration = 
+  existing.exitedAt && existing.enteredAt
+    ? existing.exitedAt - existing.enteredAt
+    : undefined;
           }
         }
       }
@@ -1023,17 +1031,14 @@ export class AgentLogger {
           // Already handled above
           break;
         case "file":
-          try {
-            this.ensureDir(dirname(output.path));
-            appendFileSync(output.path, JSON.stringify(entry) + "\n", "utf-8");
-          } catch {
-            // Silently fail file writes to avoid crashing the agent
-          }
-          break;
+  // defer file writes to flush()
+  break;
         case "console":
-          process.stderr.write(
-            (output.colorize ? this.formatEntryColor(entry) : this.formatEntry(entry)) + "\n",
-          );
+ setImmediate(() => {
+   process.stderr.write(
+     (output.colorize ? this.formatEntryColor(entry) : this.formatEntry(entry)) + "\n"
+   );
+ });
           break;
         case "callback":
           try {
@@ -1099,9 +1104,9 @@ export class AgentLogger {
       return lines.join("\n");
     } else {
       // Inside a layer — use pipe prefix
-      if (this.layerStack.length > 0 || entry.layer) {
-        prefix = "\u2502 ";
-      }
+ if ((entry.layerDepth ?? -1) >= 0) {
+   prefix = "\u2502 ";
+ }
     }
 
     return `[${time}] [${level}] [${cat}] ${prefix}${body}`;

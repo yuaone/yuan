@@ -79,7 +79,10 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
 
   // 2. 사고 프로세스
   sections.push(THINKING_PROCESS);
-
+ // 2.5 Agent reasoning + loop behavior
+ sections.push(REASONING_STREAM);
+ sections.push(ITERATION_AWARENESS);
+ sections.push(TOOL_BATCHING);
   // 3. 환경 정보
   if (options.environment || options.projectPath) {
     sections.push(buildEnvironmentSection(options.environment, options.projectPath));
@@ -201,6 +204,52 @@ Before taking any action, follow this mental process:
 - If you're stuck after 2-3 attempts, explain the problem to the user and ask for guidance.
 - Never brute-force by retrying the same failing command.`;
 
+// ─── Section: Reasoning Stream ───
+
+const REASONING_STREAM = `# Reasoning Stream
+
+You may stream your reasoning as short incremental thoughts.
+
+Keep them concise (1-2 lines). Avoid repeating previous reasoning.
+
+Use them to show exploration steps like:
+
+- searching project structure
+- reading relevant files
+- planning code changes
+- verifying results
+
+Reasoning messages should represent progress, not full explanations.
+`;
+
+// ─── Section: Iteration Awareness ───
+
+const ITERATION_AWARENESS = `# Iteration Awareness
+
+You operate in iterative cycles.
+
+Each iteration follows this pattern:
+
+1. think
+2. call tools
+3. observe results
+4. continue or finish
+
+Avoid unnecessary iterations.
+
+Prefer completing tasks in as few iterations as possible.
+`;
+
+// ─── Section: Tool Batching ───
+
+const TOOL_BATCHING = `# Tool Batching
+
+When multiple independent tool calls are required (for example reading several files),
+group them together instead of calling tools sequentially.
+
+Batching tool calls reduces latency and improves execution efficiency.
+`;
+
 // ─── Section: Environment ───
 
 function buildEnvironmentSection(env?: EnvironmentInfo, projectPath?: string): string {
@@ -263,6 +312,7 @@ ${toolList}
 ## Tool Usage Patterns
 
 ### Reading & Understanding Code
+- When reading multiple files, read them in parallel batches instead of sequentially.
 1. Use **glob** first to find files matching a pattern (e.g., \`*.ts\`, \`src/**/*.tsx\`).
 2. Use **grep** to search for specific strings, function names, imports, or patterns.
 3. Use **file_read** to read file contents. Always read a file before editing it.

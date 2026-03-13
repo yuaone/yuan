@@ -13,7 +13,7 @@ export class YuanError extends Error {
 
   constructor(message: string, code = "YUAN_ERROR") {
     super(message);
-    this.name = "YuanError";
+    this.name = new.target.name;
     this.code = code;
     // V8 stack trace 보존
     if (Error.captureStackTrace) {

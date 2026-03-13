@@ -428,7 +428,15 @@ export class InteractiveSession {
       approvalHandler: (request) => this.promptApproval(request),
       autoFixConfig: { maxRetries: 3, autoLint: true, autoBuild: true, autoTest: false },
     });
-
+    process.once("SIGINT", () => loop.abort());
+    // Restore agent session state if available (yuan resume)
+    try {
+      await loop.restoreSession(
+        this.sessionManager.toPersistent(this.session)
+      );
+    } catch {
+      // ignore restore errors
+    }
     // Listen to events for rendering
     const spinner = this.renderer.thinking();
     this.isStreaming = false;
@@ -474,6 +482,9 @@ export class InteractiveSession {
           // Track changed files for /undo and /diff
           if (!this.changedFiles.includes(event.path)) {
             this.changedFiles.push(event.path);
+            // keep session persistence in sync
+            this.session.changedFiles = this.changedFiles;
+            this.sessionManager.save(this.session);
           }
           break;
 
@@ -514,7 +525,12 @@ export class InteractiveSession {
           break;
 
         case "agent:token_usage":
-          // Silent tracking — could display in /session later
+          this.session.tokenUsage = {
+            input: event.input,
+            output: event.output,
+          };
+          this.sessionManager.save(this.session);
+
           break;
 
         default:
@@ -524,7 +540,6 @@ export class InteractiveSession {
 
     try {
       const result = await loop.run(message);
-
       // Ensure spinner/stream is stopped
       if (this.isStreaming) {
         this.renderer.endStream();
@@ -536,19 +551,19 @@ export class InteractiveSession {
       if (result.reason !== "GOAL_ACHIEVED") {
         switch (result.reason) {
           case "MAX_ITERATIONS":
-            this.renderer.warn(`Reached iteration limit: ${result.lastState}`);
+            this.renderer.warn(`Reached iteration limit`);
             break;
           case "BUDGET_EXHAUSTED":
-            this.renderer.warn(`Token budget exhausted: ${result.tokensUsed} tokens used`);
+            this.renderer.warn(`Token budget exhausted`);
             break;
           case "USER_CANCELLED":
             this.renderer.info("Cancelled.");
             break;
           case "ERROR":
-            this.renderer.error(`Agent error: ${result.error}`);
+           this.renderer.error(`Agent error`);
             break;
           case "NEEDS_APPROVAL":
-            this.renderer.warn(`Approval needed: ${result.action.description}`);
+           this.renderer.warn(`Approval needed`);
             break;
         }
       }

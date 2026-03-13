@@ -25,6 +25,7 @@
 export class AsyncCompletionQueue<T> {
   private buffer: T[] = [];
   private waiters: Array<(item: T) => void> = [];
+  private closed = false;
 
   /**
    * 아이템을 큐에 추가한다.
@@ -33,6 +34,9 @@ export class AsyncCompletionQueue<T> {
    * @param item - 큐에 추가할 아이템
    */
   push(item: T): void {
+    if (this.closed) {
+      throw new Error("AsyncCompletionQueue is closed");
+    }
     const waiter = this.waiters.shift();
     if (waiter) {
       waiter(item);
@@ -48,6 +52,11 @@ export class AsyncCompletionQueue<T> {
    * @returns 큐에서 꺼낸 아이템
    */
   async shift(): Promise<T> {
+   if (this.closed && this.buffer.length === 0) {
+      throw new Error("AsyncCompletionQueue closed");
+    }
+
+
     const item = this.buffer.shift();
     if (item !== undefined) {
       return item;
@@ -56,7 +65,15 @@ export class AsyncCompletionQueue<T> {
       this.waiters.push(resolve);
     });
   }
+  close(): void {
+    this.closed = true;
 
+    for (const waiter of this.waiters) {
+      waiter(undefined as unknown as T);
+    }
+
+    this.waiters.length = 0;
+  }
   /**
    * 현재 버퍼에 있는 모든 아이템을 즉시 반환한다 (논블로킹, 동기).
    * 반환 후 버퍼는 비워진다.

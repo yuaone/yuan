@@ -369,7 +369,9 @@ export class AgentStateMachine extends EventEmitter {
         });
       }
 
-      this.state.iterationCount++;
+ if (!this.isTerminal(this.state.phase)) {
+   this.state.iterationCount++;
+ }
     }
 
     this.emit("done", this.state);
@@ -701,8 +703,9 @@ export class AgentStateMachine extends EventEmitter {
 
     for (const pr of parallelResults) {
       if (pr.stepResult) {
-        results.push(pr.stepResult);
-        this.emit("step:complete", pr.stepResult);
+ results.push(pr.stepResult);
+ state.stepResults.push(pr.stepResult);
+ this.emit("step:complete", pr.stepResult);
         state.tokenUsage.input += pr.stepResult.tokensUsed;
         state.toolCalls++;
       }
@@ -744,7 +747,6 @@ export class AgentStateMachine extends EventEmitter {
     return {
       nextPhase: "verify",
       updates: {
-        stepResults: [...state.stepResults, ...results],
         errors: [...state.errors, ...errors],
         currentStepIndex: steps.length,
       },

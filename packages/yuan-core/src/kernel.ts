@@ -11,7 +11,7 @@
  */
 
 import type { ExecutionPlan, ToolDefinition } from "./types.js";
-
+import { randomUUID } from "node:crypto";
 // ══════════════════════════════════════════════════════════════════════
 // 1. AGENT SESSION — 에이전트 실행의 단일 진실 원본
 // ══════════════════════════════════════════════════════════════════════
@@ -276,7 +276,7 @@ export class PlanGraphManager {
 
   constructor(sessionId: string, goal: string) {
     this.state = {
-      id: crypto.randomUUID(),
+      id: randomUUID(),
       sessionId,
       goal,
       nodes: new Map(),
@@ -447,6 +447,7 @@ export class PlanGraphManager {
       return false;
     }
     // 상태를 ready로 되돌림 (markRunning에서 attempts 증가)
+    node.attempts += 1;
     node.status = "ready";
     node.error = null;
     node.completedAt = null;
@@ -1754,7 +1755,7 @@ export class EventLog {
   ): KernelEvent {
     const fullEvent: KernelEvent = {
       ...event,
-      id: crypto.randomUUID(),
+      id: randomUUID(),
       seq: this.seqCounter++,
       timestamp: Date.now(),
     };
@@ -1982,7 +1983,7 @@ export class EventLog {
     fromSeq: number,
     speed = 0,
   ): AsyncGenerator<KernelEvent> {
-    const events = this.getRange(fromSeq);
+    const events = this.getRange(fromSeq).slice(0, 10000);
     let prevTimestamp: number | null = null;
 
     for (const event of events) {

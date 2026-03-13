@@ -73,6 +73,7 @@ export const MODEL_DEFAULTS: Record<LLMProvider, string> = {
   openai: "gpt-4o-mini",
   anthropic: "claude-sonnet-4-20250514",
   yua: "yua-normal",
+  google: "gemini-2.5-flash",
 };
 
 /**
@@ -82,6 +83,7 @@ export const PROVIDER_BASE_URLS: Record<LLMProvider, string> = {
   openai: "https://api.openai.com/v1",
   anthropic: "https://api.anthropic.com",
   yua: "https://yuaone.com/api/v1",
+  google: "https://generativelanguage.googleapis.com/v1beta/openai/",
 };
 
 /**
@@ -104,6 +106,21 @@ export const HISTORY_COMPACTION = {
   /** 도구 결과만 요약으로 교체하는 범위 */
   summaryWindow: 10,
 } as const;
+
+
+/**
+ * Workspace-local YUAN storage
+ * 오픈소스 배포 기준으로 repo 내부 숨김 폴더를 SSOT로 사용한다.
+ */
+export const YUAN_DIRNAME = ".yuan";
+export const YUAN_MEMORY_JSON = "memory.json";
+export const YUAN_SESSIONS_DIRNAME = "sessions";
+export const YUAN_LAST_SESSION_FILENAME = "last-session";
+export const YUAN_GITIGNORE_ENTRY = ".yuan/";
+
+/**
+ * Human-readable summary file
+ */
 
 /**
  * YUAN.md 탐색 경로 (우선순위 순)

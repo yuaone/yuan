@@ -194,7 +194,7 @@ export class SkillLearner {
     filePath?: string;
     language?: string;
   }): LearnedSkill[] {
-    const results: LearnedSkill[] = [];
+ const results: Array<{ skill: LearnedSkill; score: number }> = [];
 
     for (const skill of this.skills.values()) {
       // Skip deprecated skills
@@ -243,12 +243,14 @@ export class SkillLearner {
       }
 
       if (score > 0) {
-        results.push(skill);
+   results.push({ skill, score: score * skill.confidence });
       }
     }
 
     // Sort by relevance (confidence * usage pattern)
-    return results.sort((a, b) => b.confidence - a.confidence);
+    return results
+      .sort((a, b) => b.score - a.score)
+      .map((entry) => entry.skill);
   }
 
   /**

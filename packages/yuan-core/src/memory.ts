@@ -6,7 +6,7 @@
 
 import { readFile, writeFile, access, readdir, stat } from "node:fs/promises";
 import { join, basename, extname } from "node:path";
-import { YUAN_MD_SEARCH_PATHS } from "./constants.js";
+import { YUAN_MD_SEARCH_PATHS, YUAN_DIRNAME, YUAN_MEMORY_JSON } from "./constants.js";
 
 /** YUAN.md 파싱 결과 */
 export interface YuanMemoryData {
@@ -52,8 +52,12 @@ export class YuanMemory {
   }
 
   /**
-   * YUAN.md를 탐색하고 읽는다.
-   * 우선순위: YUAN.md > .yuan/config.md > .yuan/YUAN.md > docs/YUAN.md
+   * 메모리 요약 문서를 탐색하고 읽는다.
+   * 우선순위:
+   * 1) root YUAN.md
+   * 2) legacy markdown paths
+   * 3) 없으면 .yuan/memory.json을 요약 문자열로 노출
+   *
    * @returns 파싱된 메모리 데이터 (없으면 null)
    */
   async load(): Promise<YuanMemoryData | null> {
@@ -72,6 +76,31 @@ export class YuanMemory {
         // 파일 없으면 다음 경로 시도
         continue;
       }
+    }
+
+   // 2) Fallback: .yuan/memory.json exists but YUAN.md summary not generated yet
+    const jsonPath = join(this.projectPath, YUAN_DIRNAME, YUAN_MEMORY_JSON);
+    try {
+      await access(jsonPath);
+      const rawJson = await readFile(jsonPath, "utf-8");
+      const summary = [
+        "# YUAN Project Memory",
+        "",
+        "> Loaded from .yuan/memory.json",
+        "",
+        "```json",
+        rawJson,
+        "```",
+      ].join("\n");
+
+      this.memoryData = {
+        raw: summary,
+        filePath: jsonPath,
+        sections: this.parseSections(summary),
+      };
+      return this.memoryData;
+    } catch {
+      // continue
     }
 
     return null;
@@ -303,7 +332,7 @@ export class YuanMemory {
     prefix = "",
     currentDepth = 0,
   ): Promise<string> {
-    if (currentDepth >= maxDepth) return "";
+    if (currentDepth >= maxDepth) return `${prefix}└── ...`;
 
     const SKIP = new Set([
       "node_modules",
