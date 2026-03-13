@@ -6,10 +6,10 @@
  * System: dimmed text
  */
 
-import React from "react";
+import React, { useState, useEffect } from "react";
 import { Box, Text } from "ink";
+import stringWidth from "string-width";
 import { TOKENS } from "../lib/tokens.js";
-import { Spinner } from "./Spinner.js";
 import { MarkdownRenderer } from "./MarkdownRenderer.js";
 import { DiffView } from "./DiffView.js";
 import type { TUIMessage, TUIToolCall, ParsedDiff, ParsedDiffHunk } from "../types.js";
@@ -159,26 +159,22 @@ function PixelFoxSprite(): React.JSX.Element {
     </Box>
   );
 }
+/** White↔gray blinking dot for running tool calls */
+function BlinkingDot(): React.JSX.Element {
+  const [bright, setBright] = useState(true);
+  useEffect(() => {
+    const timer = setInterval(() => setBright((b) => !b), 500);
+    return () => clearInterval(timer);
+  }, []);
+  return <Text color={bright ? "white" : "#555555"}>●</Text>;
+}
+
 function ToolCallLine({ tc, isLast, width }: { tc: TUIToolCall; isLast: boolean; width: number }): React.JSX.Element {
-  const connector = isLast ? TOKENS.tree.last : TOKENS.tree.branch;
-  const icon =
-    tc.status === "running" ? null :
-    tc.status === "success" ? "✓" :
-    "✗";
-  const iconColor =
-    tc.status === "success" ? "green" :
-    tc.status === "error" ? "red" :
-    undefined;
-  const duration = tc.duration != null ? ` (${tc.duration.toFixed(1)}s)` : "";
   const argsTruncated = truncateArgs(tc.argsSummary, 40);
 
-  // Resolve diff to show: from result.diff (pre-parsed) or parse result.content if it's a unified diff
+  // Resolve diff
   let resolvedDiff: ParsedDiff | null = null;
-  if (
-    tc.status === "success" &&
-    DIFF_TOOL_NAMES.has(tc.toolName) &&
-    tc.result
-  ) {
+  if (tc.status === "success" && DIFF_TOOL_NAMES.has(tc.toolName) && tc.result) {
     if (tc.result.diff) {
       resolvedDiff = tc.result.diff;
     } else if (tc.result.content && tc.result.content.includes("@@")) {
@@ -198,20 +194,29 @@ function ToolCallLine({ tc, isLast, width }: { tc: TUIToolCall; isLast: boolean;
     <Box flexDirection="column" paddingLeft={2}>
       <Box>
         {tc.status === "running" ? (
+          // Running: blinking white/gray dot + bold tool name + args
           <>
-            <Text color="#f59e0b">{TOKENS.brand.prefix} </Text>
-            <Text bold color="white">{tc.toolName}</Text>
+            <BlinkingDot />
+            <Text bold color="white"> {tc.toolName}</Text>
             {argsTruncated ? <Text dimColor>({argsTruncated})</Text> : null}
-            <Text> </Text>
-            <Spinner />
+          </>
+        ) : tc.status === "error" ? (
+          // Error: red dot + dim tool name
+          <>
+            <Text color="red">●</Text>
+            <Text dimColor> {tc.toolName}</Text>
+            {argsTruncated ? <Text dimColor>  {argsTruncated}</Text> : null}
+            <Text color="red"> ✗</Text>
           </>
         ) : (
+          // Success: gray dot + dim tool name + duration
           <>
-            <Text dimColor>{connector} </Text>
-            <Text color={iconColor}>{icon}</Text>
-            <Text color="white"> {tc.toolName}</Text>
+            <Text color="#555555">●</Text>
+            <Text dimColor> {tc.toolName}</Text>
             {argsTruncated ? <Text dimColor>  {argsTruncated}</Text> : null}
-            <Text dimColor>{duration}</Text>
+            {tc.duration != null ? (
+              <Text dimColor>  {tc.duration.toFixed(1)}s</Text>
+            ) : null}
           </>
         )}
       </Box>
@@ -241,6 +246,7 @@ export function MessageBubble({
   switch (msg.role) {
     case "user": {
       // Claude Code style: left-aligned, solid dark bg bar, ▶ prefix
+      // Use stringWidth for CJK-safe wrapping (Korean/Chinese chars = 2 terminal columns each)
       const maxContentWidth = width - 5; // "▶ " (2) + right pad (3)
       const lines: string[] = [];
       const rawLines = msg.content.split("\n");
@@ -248,25 +254,32 @@ export function MessageBubble({
         if (!rawLine) { lines.push(""); continue; }
         const words = rawLine.split(" ");
         let currentLine = "";
+        let currentWidth = 0;
         for (const word of words) {
-          if (currentLine.length + word.length + 1 > maxContentWidth) {
-            if (currentLine) lines.push(currentLine);
+          const wordW = stringWidth(word);
+          if (currentWidth > 0 && currentWidth + 1 + wordW > maxContentWidth) {
+            lines.push(currentLine);
             currentLine = word;
+            currentWidth = wordW;
           } else {
-            currentLine = currentLine ? `${currentLine} ${word}` : word;
+            currentLine = currentWidth > 0 ? `${currentLine} ${word}` : word;
+            currentWidth = currentWidth > 0 ? currentWidth + 1 + wordW : wordW;
           }
         }
         if (currentLine) lines.push(currentLine);
       }
       if (lines.length === 0) lines.push("");
-      const fillWidth = width - 1;
+      const fillWidth = width - 2; // leave 2-col right margin
       return (
         <Box flexDirection="column" marginBottom={1}>
           {lines.map((line, i) => {
             const prefix = i === 0 ? "▶ " : "  ";
-            const full = `${prefix}${line}`.padEnd(fillWidth);
+            const full = `${prefix}${line}`;
+            // Pad with spaces to fillWidth using display width (handles CJK)
+            const dispW = stringWidth(full);
+            const pad = Math.max(0, fillWidth - dispW);
             return (
-              <Text key={i} backgroundColor="#2a2a2a" color="white">{full}</Text>
+              <Text key={i} backgroundColor="#2a2a2a" color="white">{full}{" ".repeat(pad)}</Text>
             );
           })}
         </Box>
@@ -276,28 +289,26 @@ export function MessageBubble({
     case "assistant":
       return (
         <Box flexDirection="column" marginBottom={1}>
+          {/* ● dot indicator — dim when idle, blinking when streaming */}
           <Box>
-            {msg.isStreaming ? (
-              <Spinner label={TOKENS.brand.name} />
+            {msg.isStreaming && isLatest ? (
+              <BlinkingDot />
             ) : (
-              <>
-                <Text dimColor>{TOKENS.brand.prefix}</Text>
-                <Text bold color="white"> {TOKENS.brand.name}</Text>
-              </>
+              <Text dimColor>●</Text>
             )}
           </Box>
           {msg.content && (
-            <Box paddingLeft={3} marginTop={0}>
-              <MarkdownRenderer content={msg.content} width={width - 6} />
+            <Box paddingLeft={2}>
+              <MarkdownRenderer content={msg.content} width={width - 4} />
             </Box>
           )}
           {msg.isStreaming && isLatest && (
-            <Box paddingLeft={3}>
+            <Box paddingLeft={2}>
               <Text dimColor>█</Text>
             </Box>
           )}
           {msg.toolCalls && msg.toolCalls.length > 0 && (
-            <Box flexDirection="column" marginTop={0}>
+            <Box flexDirection="column">
               {msg.toolCalls.map((tc, i) => (
                 <ToolCallLine
                   key={tc.id}

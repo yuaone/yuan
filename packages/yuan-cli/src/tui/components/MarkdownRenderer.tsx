@@ -136,7 +136,25 @@ function parseBlocks(content: string): RenderedBlock[] {
     blocks.push({ type: "paragraph", content: paraLines.join("\n") });
   }
 
-  return blocks;
+  // Post-process: insert blank line before top-level ordered list items (section headers)
+  // so sections like "1. foo ... 2. bar ... 3. baz" get breathing room
+  const processed: RenderedBlock[] = [];
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i];
+    const prev = processed[processed.length - 1];
+    if (
+      block.type === "list" &&
+      block.listOrdered &&
+      (block.listDepth ?? 0) === 0 &&
+      i > 0 &&
+      prev &&
+      prev.type !== "blank"
+    ) {
+      processed.push({ type: "blank", content: "" });
+    }
+    processed.push(block);
+  }
+  return processed;
 }
 
 /** Parse markdown table lines into rows and alignments */
@@ -281,7 +299,7 @@ function renderBlock(block: RenderedBlock, idx: number, width: number): React.JS
         );
       } else if (level === 2) {
         return (
-          <Box key={idx} marginBottom={0}>
+          <Box key={idx} marginTop={1} marginBottom={0}>
             <Text bold color="white">
               {block.content}
             </Text>
@@ -289,7 +307,7 @@ function renderBlock(block: RenderedBlock, idx: number, width: number): React.JS
         );
       } else {
         return (
-          <Box key={idx} marginBottom={0}>
+          <Box key={idx} marginTop={1} marginBottom={0}>
             <Text bold dimColor>
               {block.content}
             </Text>
@@ -356,7 +374,7 @@ function renderBlock(block: RenderedBlock, idx: number, width: number): React.JS
     case "paragraph":
     default:
       return (
-        <Box key={idx}>
+        <Box key={idx} marginBottom={1}>
           <InlineText text={block.content} />
         </Box>
       );

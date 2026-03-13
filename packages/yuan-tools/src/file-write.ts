@@ -107,8 +107,16 @@ export class FileWriteTool extends BaseTool {
       }
     }
 
-    // Write file using O_NOFOLLOW to atomically prevent symlink TOCTOU attacks.
-    // This eliminates the race window between symlink check and write.
+    // Read old content for diff (before writing)
+    let oldContent = '';
+    if (existed) {
+      try {
+        oldContent = await readFile(resolvedPath, 'utf-8');
+      } catch {
+        // Could not read old content — diff will show all lines as additions
+      }
+    }
+
     try {
       const flags = existed
         ? fsConstants.O_WRONLY | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW
@@ -121,23 +129,14 @@ export class FileWriteTool extends BaseTool {
       }
       const bytesWritten = Buffer.byteLength(contentStr, 'utf-8');
 
-      let output = existed
+      // Generate unified diff
+      const diff = generateUnifiedDiff(oldContent, contentStr, path, existed);
+
+      const header = existed
         ? `File overwritten: ${path} (${bytesWritten} bytes, backup created)`
         : `File created: ${path} (${bytesWritten} bytes)`;
 
-      // If the file existed, show a brief diff hint
-      if (existed) {
-        try {
-          const originalContent = await readFile(resolvedPath + '.yuan-backup', 'utf-8');
-          const origLines = originalContent.split('\n').length;
-          const newLines = contentStr.split('\n').length;
-          output += `\nPrevious: ${origLines} lines → New: ${newLines} lines`;
-        } catch {
-          // Backup read failed — skip diff info
-        }
-      }
-
-      return this.ok(toolCallId, output, {
+      return this.ok(toolCallId, `${header}\n\n${diff}`, {
         bytesWritten,
         created: !existed,
       });
@@ -148,4 +147,263 @@ export class FileWriteTool extends BaseTool {
       return this.fail(toolCallId, msg);
     }
   }
+}
+
+/**
+ * Generate a unified diff string between oldContent and newContent.
+ * If the file is new (existed=false), all lines are shown as additions.
+ * Truncates if more than 500 lines changed to avoid huge output.
+ */
+function generateUnifiedDiff(
+  oldContent: string,
+  newContent: string,
+  filePath: string,
+  existed: boolean
+): string {
+  const oldLines = oldContent ? oldContent.split('\n') : [];
+  const newLines = newContent.split('\n');
+
+  // New file: all additions
+  if (!existed || oldLines.length === 0) {
+    const header = [`--- /dev/null`, `+++ b/${filePath}`, `@@ -0,0 +1,${newLines.length} @@`];
+    const MAX_NEW_LINES = 500;
+    if (newLines.length > MAX_NEW_LINES) {
+      const shown = newLines.slice(0, MAX_NEW_LINES).map(l => `+${l}`);
+      return [
+        ...header,
+        ...shown,
+        `... (${newLines.length - MAX_NEW_LINES} more lines)`,
+      ].join('\n');
+    }
+    return [...header, ...newLines.map(l => `+${l}`)].join('\n');
+  }
+
+  // Existing file: compute diff hunks
+  const hunks = computeHunks(oldLines, newLines);
+  if (hunks.length === 0) return 'No changes detected.';
+
+  const result = [
+    `--- a/${filePath}`,
+    `+++ b/${filePath}`,
+    ...hunks,
+  ].join('\n');
+
+  // Truncate if result is very large
+  const MAX_DIFF_CHARS = 8000;
+  if (result.length > MAX_DIFF_CHARS) {
+    return result.slice(0, MAX_DIFF_CHARS) + '\n... (diff truncated)';
+  }
+  return result;
+}
+
+/**
+ * Compute unified diff hunks between oldLines and newLines.
+ * Uses a simple O(n) greedy approach: compare line-by-line with context.
+ */
+function computeHunks(oldLines: string[], newLines: string[]): string[] {
+  const CONTEXT = 3;
+  const MAX_CHANGED = 500;
+
+  // Build edit script: for each position mark as equal, delete, or insert
+  // We use a simple patience-like approach: find equal regions greedily
+  const ops = diffLines(oldLines, newLines);
+
+  // Count total changes
+  const totalChanged = ops.filter(op => op.type !== 'equal').length;
+  if (totalChanged === 0) return [];
+  if (totalChanged > MAX_CHANGED) {
+    // Just show summary line
+    const addCount = ops.filter(op => op.type === 'insert').length;
+    const delCount = ops.filter(op => op.type === 'delete').length;
+    return [`@@ (large diff) @@\n... ${delCount} lines removed, ${addCount} lines added ...`];
+  }
+
+  // Group ops into hunks (continuous regions with context)
+  const hunks: string[] = [];
+  let i = 0;
+
+  while (i < ops.length) {
+    // Skip equal regions before next change
+    if (ops[i]!.type === 'equal') {
+      i++;
+      continue;
+    }
+
+    // Found a change — find the hunk range
+    const hunkStart = i;
+    let hunkEnd = i;
+    // Extend to include all changes within CONTEXT distance of each other
+    while (hunkEnd < ops.length) {
+      if (ops[hunkEnd]!.type !== 'equal') {
+        hunkEnd++;
+      } else {
+        // Check if next change is within CONTEXT*2 equal lines
+        let equalCount = 0;
+        let j = hunkEnd;
+        while (j < ops.length && ops[j]!.type === 'equal') {
+          equalCount++;
+          j++;
+        }
+        if (equalCount <= CONTEXT * 2 && j < ops.length && ops[j]!.type !== 'equal') {
+          hunkEnd = j;
+        } else {
+          break;
+        }
+      }
+    }
+
+    // Build context around hunk
+    const contextBefore = Math.max(0, hunkStart - CONTEXT);
+    const contextAfter = Math.min(ops.length, hunkEnd + CONTEXT);
+
+    // Compute old/new line numbers for hunk header
+    let oldLine = 1;
+    let newLine = 1;
+    for (let k = 0; k < contextBefore; k++) {
+      const op = ops[k]!;
+      if (op.type === 'equal' || op.type === 'delete') oldLine++;
+      if (op.type === 'equal' || op.type === 'insert') newLine++;
+    }
+
+    let oldCount = 0;
+    let newCount = 0;
+    const hunkLines: string[] = [];
+
+    for (let k = contextBefore; k < contextAfter; k++) {
+      const op = ops[k]!;
+      if (op.type === 'equal') {
+        hunkLines.push(` ${op.line}`);
+        oldCount++;
+        newCount++;
+      } else if (op.type === 'delete') {
+        hunkLines.push(`-${op.line}`);
+        oldCount++;
+      } else {
+        hunkLines.push(`+${op.line}`);
+        newCount++;
+      }
+    }
+
+    hunks.push(`@@ -${oldLine},${oldCount} +${newLine},${newCount} @@`);
+    hunks.push(...hunkLines);
+
+    i = hunkEnd;
+  }
+
+  return hunks;
+}
+
+type DiffOp =
+  | { type: 'equal'; line: string }
+  | { type: 'delete'; line: string }
+  | { type: 'insert'; line: string };
+
+/**
+ * Simple line diff using LCS via dynamic programming (capped at 200 lines each for performance).
+ * Falls back to full delete+insert for larger inputs.
+ */
+function diffLines(oldLines: string[], newLines: string[]): DiffOp[] {
+  const MAX_LCS = 200;
+
+  if (oldLines.length > MAX_LCS || newLines.length > MAX_LCS) {
+    // Large file: use greedy block diff
+    return greedyDiff(oldLines, newLines);
+  }
+
+  // LCS-based diff
+  const m = oldLines.length;
+  const n = newLines.length;
+
+  // Build LCS table
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array<number>(n + 1).fill(0));
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      if (oldLines[i] === newLines[j]) {
+        dp[i]![j] = (dp[i + 1]![j + 1] ?? 0) + 1;
+      } else {
+        dp[i]![j] = Math.max(dp[i + 1]![j] ?? 0, dp[i]![j + 1] ?? 0);
+      }
+    }
+  }
+
+  // Trace back
+  const ops: DiffOp[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < m || j < n) {
+    if (i < m && j < n && oldLines[i] === newLines[j]) {
+      ops.push({ type: 'equal', line: oldLines[i]! });
+      i++;
+      j++;
+    } else if (j < n && (i >= m || (dp[i]![j + 1] ?? 0) >= (dp[i + 1]![j] ?? 0))) {
+      ops.push({ type: 'insert', line: newLines[j]! });
+      j++;
+    } else {
+      ops.push({ type: 'delete', line: oldLines[i]! });
+      i++;
+    }
+  }
+  return ops;
+}
+
+/**
+ * Greedy diff for large files: find matching blocks and emit deletes/inserts for gaps.
+ */
+function greedyDiff(oldLines: string[], newLines: string[]): DiffOp[] {
+  const ops: DiffOp[] = [];
+  let oi = 0;
+  let ni = 0;
+
+  // Build index of new lines for quick lookup
+  const newIndex = new Map<string, number[]>();
+  for (let i = 0; i < newLines.length; i++) {
+    const line = newLines[i]!;
+    const arr = newIndex.get(line);
+    if (arr) arr.push(i);
+    else newIndex.set(line, [i]);
+  }
+
+  while (oi < oldLines.length || ni < newLines.length) {
+    if (oi < oldLines.length && ni < newLines.length && oldLines[oi] === newLines[ni]) {
+      ops.push({ type: 'equal', line: oldLines[oi]! });
+      oi++;
+      ni++;
+    } else {
+      // Find next match
+      let bestOld = -1;
+      let bestNew = -1;
+      let bestScore = Infinity;
+
+      for (let lookAhead = 0; lookAhead < 20; lookAhead++) {
+        const checkOld = oi + lookAhead;
+        if (checkOld < oldLines.length) {
+          const candidates = newIndex.get(oldLines[checkOld]!) ?? [];
+          for (const cn of candidates) {
+            if (cn >= ni) {
+              const score = lookAhead + (cn - ni);
+              if (score < bestScore) {
+                bestScore = score;
+                bestOld = checkOld;
+                bestNew = cn;
+              }
+              break;
+            }
+          }
+        }
+      }
+
+      if (bestOld === -1) {
+        // No match found in lookahead — emit remaining as delete/insert
+        while (oi < oldLines.length) ops.push({ type: 'delete', line: oldLines[oi++]! });
+        while (ni < newLines.length) ops.push({ type: 'insert', line: newLines[ni++]! });
+        break;
+      }
+
+      // Emit deletions and insertions up to the match
+      while (oi < bestOld) ops.push({ type: 'delete', line: oldLines[oi++]! });
+      while (ni < bestNew) ops.push({ type: 'insert', line: newLines[ni++]! });
+    }
+  }
+
+  return ops;
 }

@@ -98,7 +98,6 @@ export type AgentStatus =
 /** Agent stream state */
 export interface AgentStreamState {
   status: AgentStatus;
-  streamBuffer: string;
   messages: TUIMessage[];
   tokensPerSecond: number;
   totalTokensUsed: number;

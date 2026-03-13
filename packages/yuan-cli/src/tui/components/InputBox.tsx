@@ -275,11 +275,54 @@ export function InputBox({
   const cmdRest = isSlash ? displayValue.slice(cmdToken.length) : "";
   const cmdRecognized = isSlash && isKnownCommand(cmdToken);
 
-  // Cursor rendering: chars before cursor | cursor block (inverted) | chars after
   const showCursor = !isRunning && !slashMenuOpen;
-  const beforeCursor = displayValue.slice(0, clampedCursor);
-  const cursorChar = displayValue[clampedCursor] ?? " ";
-  const afterCursor = displayValue.slice(clampedCursor + 1);
+
+  /**
+   * Build the input line as a SINGLE string with embedded ANSI codes for:
+   * - cursor inverse highlight  (\x1b[7m ... \x1b[27m)
+   * - slash command coloring    (\x1b[36m cyan / \x1b[31m red)
+   *
+   * Reason: Ink/Yoga calculates box widths by character count, not display
+   * width. Splitting the line into multiple <Text> spans causes the cursor
+   * block to be placed at the wrong column for CJK (Korean/Chinese/Japanese)
+   * double-width characters. A single string lets the terminal handle layout.
+   */
+  const CURSOR_ON  = "\x1b[7m";
+  const CURSOR_OFF = "\x1b[27m";
+  const FG_CYAN    = "\x1b[36m";
+  const FG_RED     = "\x1b[31m";
+  const FG_RESET   = "\x1b[39m";
+
+  let inputLine: string;
+  if (showCursor) {
+    const before = displayValue.slice(0, clampedCursor);
+    const ch     = displayValue[clampedCursor] ?? " ";
+    const after  = displayValue.slice(clampedCursor + 1);
+
+    if (isSlash) {
+      const color = cmdRecognized ? FG_CYAN : FG_RED;
+      if (clampedCursor <= cmdToken.length) {
+        // Cursor is inside the slash command token
+        const tb = cmdToken.slice(0, clampedCursor);
+        const ta = cmdToken.slice(clampedCursor + 1) + cmdRest.slice(1);
+        inputLine = `${color}${tb}${CURSOR_ON}${ch}${CURSOR_OFF}${ta}${FG_RESET}`;
+      } else {
+        // Cursor is past the command token, in the args
+        const restBefore = before.slice(cmdToken.length);
+        inputLine = `${color}${cmdToken}${FG_RESET}${restBefore}${CURSOR_ON}${ch}${CURSOR_OFF}${after}`;
+      }
+    } else {
+      inputLine = `${before}${CURSOR_ON}${ch}${CURSOR_OFF}${after}`;
+    }
+  } else {
+    // No cursor (running or slash menu open)
+    if (isSlash) {
+      const color = cmdRecognized ? FG_CYAN : FG_RED;
+      inputLine = `${color}${cmdToken}${FG_RESET}${cmdRest}`;
+    } else {
+      inputLine = displayValue;
+    }
+  }
 
   return (
     <Box width={columns} flexDirection="column" flexShrink={0}>
@@ -287,32 +330,7 @@ export function InputBox({
       <Box justifyContent="space-between">
         <Box flexShrink={1} overflow="hidden">
           <Text dimColor>{prompt} </Text>
-          {showCursor ? (
-            // Cursor-aware rendering
-            isSlash ? (
-              <>
-                <Text color={cmdRecognized ? "cyan" : "red"}>{cmdToken}</Text>
-                <Text>{beforeCursor.slice(cmdToken.length)}</Text>
-                <Text inverse>{cursorChar}</Text>
-                <Text>{afterCursor}</Text>
-              </>
-            ) : (
-              <>
-                <Text>{beforeCursor}</Text>
-                <Text inverse>{cursorChar}</Text>
-                <Text>{afterCursor}</Text>
-              </>
-            )
-          ) : (
-            isSlash ? (
-              <>
-                <Text color={cmdRecognized ? "cyan" : "red"}>{cmdToken}</Text>
-                <Text>{cmdRest}</Text>
-              </>
-            ) : (
-              <Text>{displayValue}</Text>
-            )
-          )}
+          <Text>{inputLine}</Text>
         </Box>
 
         <Box flexShrink={0}>

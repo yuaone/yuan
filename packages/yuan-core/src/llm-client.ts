@@ -149,10 +149,11 @@ export class BYOKClient {
   async *chatStream(
     messages: Message[],
     tools?: ToolDefinition[],
+    abortSignal?: AbortSignal,
   ): AsyncGenerator<LLMStreamChunk> {
     try {
       if (this.config.provider === "anthropic") {
-        yield* this.chatStreamAnthropic(messages, tools);
+        yield* this.chatStreamAnthropic(messages, tools, abortSignal);
         return;
       }
 
@@ -164,13 +165,14 @@ export class BYOKClient {
         model: this.model,
         messages: messages.map((m) => this.toOpenAIMessage(m)),
         stream: true,
+        stream_options: { include_usage: true },
         ...(tools && tools.length > 0
           ? { tools: tools.map((t) => this.toOpenAITool(t)) }
           : {}),
       };
 
       const stream =
-        await this.openaiClient.chat.completions.create(params);
+        await this.openaiClient.chat.completions.create(params, { signal: abortSignal });
 
       const toolCallAccumulators = new Map<
         number,
@@ -335,6 +337,7 @@ export class BYOKClient {
   private async *chatStreamAnthropic(
     messages: Message[],
     tools?: ToolDefinition[],
+    abortSignal?: AbortSignal,
   ): AsyncGenerator<LLMStreamChunk> {
     const systemMessages = messages.filter((m) => m.role === "system");
     const systemTexts = systemMessages
@@ -376,6 +379,7 @@ export class BYOKClient {
           "anthropic-beta": "prompt-caching-2024-07-31",
         },
         body: JSON.stringify(body),
+        signal: abortSignal,
       },
     );
 
@@ -670,27 +674,41 @@ export class BYOKClient {
 
   /**
    * Build system payload with cache_control markers for Anthropic prompt caching.
-   * Caches the first block (stable base prompt) to maximize token savings.
+   *
+   * CAG (Cache-Augmented Generation) strategy:
+   * - "Cold" data (stable across tasks): system prompt, YUAN.md, project conventions, memory
+   *   → mark with cache_control (Anthropic caches up to 4 checkpoints)
+   * - "Hot" data (per-task dynamic): RAG hits, task memory, reflexion guidance
+   *   → no cache_control (always fresh retrieval)
+   *
+   * Heuristic: cache the first ceil(N/2) blocks (injected first = more stable),
+   * leave the later half uncached (injected later = task-specific hot data).
+   * Max 4 cache checkpoints per Anthropic API constraint.
    */
   private buildAnthropicSystemPayload(
     systemTexts: string[],
   ): Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }> | undefined {
     if (systemTexts.length === 0) return undefined;
 
+    // Single block: always cache (it's the base system prompt)
     if (systemTexts.length === 1) {
       return [
         { type: "text" as const, text: systemTexts[0], cache_control: { type: "ephemeral" as const } },
       ];
     }
 
-    // Multiple system messages: cache the first block (stable base prompt)
-    // Anthropic caches everything up to the cache_control marker
+    // Multiple blocks: cache stable cold-data blocks, leave hot-data blocks uncached.
+    // Cold = first ceil(N/2) blocks (base prompt + YUAN.md + memory learnings)
+    // Hot  = remaining blocks (per-task RAG, getRelevant, reflexion guidance)
+    // Anthropic supports max 4 cache_control checkpoints.
+    const coldCount = Math.min(Math.ceil(systemTexts.length / 2), 4);
+
     return systemTexts.map((text, i) => {
       const block: { type: "text"; text: string; cache_control?: { type: "ephemeral" } } = {
         type: "text" as const,
         text,
       };
-      if (i === 0) {
+      if (i < coldCount) {
         block.cache_control = { type: "ephemeral" as const };
       }
       return block;
