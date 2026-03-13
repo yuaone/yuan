@@ -111,6 +111,15 @@ export {
 export { BYOKClient } from "./llm-client.js";
 export type { LLMResponse, LLMStreamChunk } from "./llm-client.js";
 
+// ─── LLM Orchestrator ───
+export { LLMOrchestrator, getModelCapabilities } from "./llm-orchestrator.js";
+export type {
+  ProviderCapabilities,
+  NormalizedLLMEvent,
+  NormalizedLLMEventKind,
+  OrchestratorConfig,
+} from "./llm-orchestrator.js";
+
 // ─── Agent Loop ───
 export { AgentLoop } from "./agent-loop.js";
 export type { AgentLoopOptions } from "./agent-loop.js";
