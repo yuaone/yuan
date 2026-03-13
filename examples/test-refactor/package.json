@@ -1,0 +1,14 @@
+{
+  "name": "test-refactor",
+  "version": "1.0.0",
+  "description": "Multi-file refactoring test project",
+  "scripts": {
+    "build": "tsc",
+    "test": "ts-node src/index.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "ts-node": "^10.9.0",
+    "@types/node": "^20.0.0"
+  }
+}

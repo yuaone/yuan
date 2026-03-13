@@ -1,0 +1,14 @@
+{
+  "name": "test-basic",
+  "version": "1.0.0",
+  "description": "Basic test project with a bug",
+  "scripts": {
+    "test": "ts-node src/index.ts",
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "ts-node": "^10.9.0",
+    "@types/node": "^20.0.0"
+  }
+}

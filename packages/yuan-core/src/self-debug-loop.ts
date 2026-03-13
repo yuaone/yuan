@@ -964,16 +964,24 @@ export class SelfDebugLoop {
 
   /**
    * Run the test/verify command and return result.
+   *
+   * Bug 3 fix: shell_exec requires `executable` + `args` array, not a `command` string.
+   * Parse the testCommand string into executable + args before calling shell_exec.
    */
   private async runTest(
     testCommand: string,
     toolExecutor: ToolExecutorLike,
   ): Promise<{ passed: boolean; output: string; timedOut: boolean }> {
     try {
+      // Parse command string into executable + args array for shell_exec tool
+      const parts = testCommand.trim().split(/\s+/);
+      const executable = parts[0] ?? "pnpm";
+      const execArgs = parts.slice(1);
+
       const result = await toolExecutor.execute({
         id: `self-debug-test-${Date.now()}`,
         name: "shell_exec",
-        arguments: { command: testCommand },
+        arguments: { executable, args: execArgs, timeout: 120_000 },
       });
 
       return {

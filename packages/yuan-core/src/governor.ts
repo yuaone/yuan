@@ -10,6 +10,7 @@ import { PLAN_LIMITS } from "./constants.js";
 import {
   DANGEROUS_PATTERNS,
   SENSITIVE_FILE_PATTERNS,
+  isSafeVerifyCommand,
 } from "./security.js";
 import { PlanLimitError, ApprovalRequiredError } from "./errors.js";
 
@@ -203,6 +204,17 @@ export class Governor extends EventEmitter {
     // Include args array in the full command string for pattern matching
     const argsArr = Array.isArray(args.args) ? (args.args as string[]).join(" ") : "";
     const fullCmd = `${executable} ${argsArr} ${command}`.trim();
+
+    // Safe verification commands are never blocked by the governor.
+    // These are read-only typecheck/lint/test tools with no destructive side effects.
+    if (isSafeVerifyCommand(fullCmd)) {
+      this.emit("warning", {
+        type: "safe_verify_command",
+        command: fullCmd,
+        note: "Allowed: safe verification command (tsc, eslint, jest, vitest, etc.)",
+      });
+      return;
+    }
 
     for (const pattern of DANGEROUS_PATTERNS) {
       if (pattern.test(fullCmd)) {

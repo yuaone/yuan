@@ -94,6 +94,17 @@ export class FileEditTool extends BaseTool {
     const occurrences = countOccurrences(content, oldString);
 
     if (occurrences === 0) {
+      // Idempotency check: if replace_all is true and new_string is already present,
+      // the operation was likely already applied in a previous attempt. Treat as success
+      // to prevent infinite recovery loops on retry.
+      if (replaceAll && newString !== '' && content.includes(newString)) {
+        return this.ok(
+          toolCallId,
+          `already applied (idempotent): new_string already present in ${path}, old_string not found — skipping replacement`,
+          { replacements: 0, preview: 'No changes needed (already applied)' }
+        );
+      }
+
       // Try fuzzy match suggestion
       const suggestion = findFuzzyMatch(content, oldString);
       const msg = suggestion

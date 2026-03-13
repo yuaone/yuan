@@ -141,6 +141,23 @@ export const DEFAULT_LOOP_CONFIG = {
   totalTokenBudget: 200_000,
 } as const;
 
+/**
+ * Timeout constants — configurable via AgentConfig.timeouts.
+ *
+ * Bug 4 fix: shell_exec default increased from 30s → 60s.
+ * Agent session minimum is 300s for all plan tiers.
+ */
+export const TIMEOUT_DEFAULTS = {
+  /** Default shell_exec timeout (ms). Configurable per-call via `timeout` arg. */
+  shellExecMs: 60_000,
+  /** Hard cap on shell_exec timeout. Prevents runaway processes. */
+  shellExecMaxMs: 600_000,
+  /** Minimum agent session TTL (ms) — enforced across all plan tiers. */
+  agentSessionMinMs: 300_000,
+  /** Default agent session TTL for LOCAL/MAX plans (ms). */
+  agentSessionDefaultMs: 24 * 60 * 60 * 1000,
+} as const;
+
 /** Design Mode: allowed edit paths (Governor enforced) */
 export const DESIGN_ALLOWED_PATHS = [
   "src/",

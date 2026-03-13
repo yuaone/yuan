@@ -88,6 +88,8 @@ import { BackgroundAgentManager, type BackgroundEvent } from "./background-agent
 import { ReasoningAggregator } from "./reasoning-aggregator.js";
 import { ReasoningTree } from "./reasoning-tree.js";
 import { ContextCompressor } from "./context-compressor.js";
+import { DependencyAnalyzer } from "./dependency-analyzer.js";
+import { CrossFileRefactor } from "./cross-file-refactor.js";
 /** AgentLoop 설정 */
 export interface AgentLoopOptions {
   abortSignal?: AbortSignal
@@ -898,6 +900,63 @@ this.checkpointSaved = false;
             role: "system",
             content: planHint,
           });
+        }
+      }
+
+      // CrossFileRefactor: detect rename/move intent and inject preview hint
+      if (this.config.loop.projectPath) {
+        try {
+          const renameMatch = userMessage.match(
+            /\brename\s+[`'"]?(\w[\w.]*)[`'"]?\s+to\s+[`'"]?(\w[\w.]*)[`'"]/i,
+          );
+          const moveMatch = userMessage.match(
+            /\bmove\s+[`'"]?([\w./\\-]+)[`'"]?\s+to\s+[`'"]?([\w./\\-]+)[`'"]/i,
+          );
+
+          if (renameMatch) {
+            const [, symbolName, newName] = renameMatch;
+            const refactor = new CrossFileRefactor(this.config.loop.projectPath);
+            const preview = await refactor.renameSymbol(symbolName, newName);
+            if (preview.totalChanges > 0) {
+              const affectedList = preview.affectedFiles
+                .map((f) => `  - ${f.file} (${f.changes.length} change(s))`)
+                .join("\n");
+              this.contextManager.addMessage({
+                role: "system",
+                content:
+                  `[CrossFileRefactor] Rename "${symbolName}" → "${newName}" preview:\n` +
+                  `Risk: ${preview.riskLevel}, Files affected: ${preview.affectedFiles.length}\n` +
+                  affectedList +
+                  (preview.warnings.length > 0
+                    ? `\nWarnings: ${preview.warnings.join("; ")}`
+                    : ""),
+              });
+              this.iterationSystemMsgCount++;
+            }
+          } else if (moveMatch) {
+            const [, symbolOrFile, destination] = moveMatch;
+            const refactor = new CrossFileRefactor(this.config.loop.projectPath);
+            // Try move as symbol move (source heuristic: look for a file with that name)
+            const preview = await refactor.moveSymbol(symbolOrFile, symbolOrFile, destination);
+            if (preview.totalChanges > 0) {
+              const affectedList = preview.affectedFiles
+                .map((f) => `  - ${f.file} (${f.changes.length} change(s))`)
+                .join("\n");
+              this.contextManager.addMessage({
+                role: "system",
+                content:
+                  `[CrossFileRefactor] Move "${symbolOrFile}" → "${destination}" preview:\n` +
+                  `Risk: ${preview.riskLevel}, Files affected: ${preview.affectedFiles.length}\n` +
+                  affectedList +
+                  (preview.warnings.length > 0
+                    ? `\nWarnings: ${preview.warnings.join("; ")}`
+                    : ""),
+              });
+              this.iterationSystemMsgCount++;
+            }
+          }
+        } catch {
+          // CrossFileRefactor preview failure is non-fatal
         }
       }
 
@@ -2635,6 +2694,60 @@ if (this.sessionPersistence && this.sessionId) {
   private async executeTools(
     toolCalls: ToolCall[],
   ): Promise<{ results: ToolResult[]; deferredFixPrompts: string[] }> {
+    // Reorder write tool calls using DependencyAnalyzer so files with no deps run first
+    const writeToolNames = new Set(['file_write', 'file_edit']);
+    const writeToolCalls = toolCalls.filter((tc) => writeToolNames.has(tc.name));
+    if (writeToolCalls.length > 1 && this.config.loop.projectPath) {
+      try {
+        const depAnalyzer = new DependencyAnalyzer();
+        const depGraph = await depAnalyzer.analyze(this.config.loop.projectPath);
+        const writeFilePaths = writeToolCalls
+          .map((tc) => {
+            const args = this.parseToolArgs(tc.arguments);
+            return typeof args.path === "string" ? args.path : null;
+          })
+          .filter((p): p is string => p !== null);
+
+        if (writeFilePaths.length > 1) {
+          const groups = depAnalyzer.groupIndependentFiles(depGraph, writeFilePaths);
+          // Build ordered list of file paths: independent groups first, dependent files after
+          const orderedPaths: string[] = [];
+          for (const group of groups) {
+            for (const f of group.files) {
+              if (!orderedPaths.includes(f)) orderedPaths.push(f);
+            }
+          }
+          // Reorder writeToolCalls according to orderedPaths
+          const reordered: ToolCall[] = [];
+          for (const filePath of orderedPaths) {
+            const tc = writeToolCalls.find((c) => {
+              const args = this.parseToolArgs(c.arguments);
+              return args.path === filePath;
+            });
+            if (tc) reordered.push(tc);
+          }
+          // Add any write calls that didn't match a path (shouldn't happen, but be safe)
+          for (const tc of writeToolCalls) {
+            if (!reordered.includes(tc)) reordered.push(tc);
+          }
+          // Rebuild toolCalls preserving non-write tools in their original positions,
+          // replacing write tools with dependency-ordered sequence
+          const reorderedAll: ToolCall[] = [];
+          let writeIdx = 0;
+          for (const tc of toolCalls) {
+            if (writeToolNames.has(tc.name)) {
+              reorderedAll.push(reordered[writeIdx++] ?? tc);
+            } else {
+              reorderedAll.push(tc);
+            }
+          }
+          toolCalls = reorderedAll;
+        }
+      } catch {
+        // DependencyAnalyzer failure is non-fatal — fall through to original ordering
+      }
+    }
+
     // Group tool calls: read-only can run in parallel, write tools run sequentially
     const readOnlyTools = new Set(['file_read', 'grep', 'glob', 'code_search']);
     const batches: ToolCall[][] = [];

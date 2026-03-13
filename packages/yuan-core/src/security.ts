@@ -284,6 +284,34 @@ import { resolve, relative } from "node:path";
 
 // ─── Unified Validation Functions ─────────────────────────────────
 
+// ─── Verification / Check Command Allowlist ────────────────────────
+
+/**
+ * Safe verification commands that should never be blocked.
+ * These are read-only check/lint/typecheck tools with no side effects.
+ * Risk level: "low" (verify only, cannot modify system state).
+ */
+const SAFE_VERIFY_EXECUTABLES: ReadonlySet<string> = new Set([
+  "tsc",          // TypeScript type checker
+  "ts-node",      // TypeScript runner
+  "eslint",       // JavaScript/TypeScript linter
+  "prettier",     // Code formatter (check mode)
+  "jest",         // Test runner
+  "vitest",       // Test runner
+  "mocha",        // Test runner
+  "mypy",         // Python type checker
+]);
+
+/**
+ * Safe verification args patterns — these subcommands/flags make a command read-only.
+ * Keyed by executable base name.
+ */
+const SAFE_VERIFY_ARGS_PATTERNS: ReadonlyArray<{ executable: string; argsPattern: RegExp }> = [
+  { executable: "npx", argsPattern: /^(tsc|eslint|prettier|jest|vitest|mocha)\b/ },
+  { executable: "pnpm", argsPattern: /^(build|test|lint|run\s+(build|test|lint|typecheck|type-check))\b/ },
+  { executable: "npm", argsPattern: /^run\s+(build|test|lint|typecheck|type-check)\b/ },
+];
+
 /**
  * 명령어 + 인자 조합의 보안 검증.
  * Governor와 shell_exec 도구 모두 이 함수를 사용.
@@ -297,6 +325,19 @@ export function validateCommand(
   args: string[],
 ): SecurityValidation {
   const base = executable.split("/").pop() ?? executable;
+  const argsStr = args.join(" ");
+
+  // 0. Safe verification commands — always allowed, never blocked
+  //    These are read-only check/typecheck/lint/test tools.
+  if (SAFE_VERIFY_EXECUTABLES.has(base)) {
+    return { allowed: true, risk: "low" };
+  }
+  // Also check npx/pnpm/npm invocations of verify tools
+  for (const safe of SAFE_VERIFY_ARGS_PATTERNS) {
+    if (base === safe.executable && safe.argsPattern.test(argsStr)) {
+      return { allowed: true, risk: "low" };
+    }
+  }
 
   // 1. 완전 차단 명령어 검사
   if (BLOCKED_EXECUTABLES.has(base)) {
@@ -317,7 +358,6 @@ export function validateCommand(
   }
 
   // 3. 위험 인자 패턴 검사
-  const argsStr = args.join(" ");
   for (const pattern of DANGEROUS_ARG_PATTERNS) {
     if (base === pattern.executable && pattern.argsPattern.test(argsStr)) {
       return {
@@ -434,6 +474,31 @@ export function isDangerousCommand(command: string): boolean {
 export function isInteractiveCommand(executable: string): boolean {
   const base = executable.split("/").pop() ?? executable;
   return INTERACTIVE_COMMANDS.has(base);
+}
+
+/**
+ * Safe verification command check (full command string version).
+ * Used by Governor when checking full command strings (legacy path).
+ *
+ * @param fullCmd Full command string (e.g. "npx tsc --noEmit", "pnpm build")
+ * @returns true if the command is a safe read-only verification tool
+ */
+export function isSafeVerifyCommand(fullCmd: string): boolean {
+  // Extract the leading executable from the command string
+  const parts = fullCmd.trim().split(/\s+/);
+  const firstPart = parts[0] ?? "";
+  const base = firstPart.split("/").pop() ?? firstPart;
+
+  // Direct safe verify executables
+  if (SAFE_VERIFY_EXECUTABLES.has(base)) return true;
+
+  // npx/pnpm/npm invocations of safe verify tools
+  const rest = parts.slice(1).join(" ");
+  for (const safe of SAFE_VERIFY_ARGS_PATTERNS) {
+    if (base === safe.executable && safe.argsPattern.test(rest)) return true;
+  }
+
+  return false;
 }
 
 /**
