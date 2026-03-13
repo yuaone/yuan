@@ -169,8 +169,21 @@ function BlinkingDot(): React.JSX.Element {
   return <Text color={bright ? "white" : "#555555"}>●</Text>;
 }
 
+/** Get a short "verb" label for the tool call header */
+function toolVerb(toolName: string): string {
+  const n = toolName.toLowerCase();
+  if (n.includes("read")) return "read";
+  if (n.includes("write")) return "write";
+  if (n.includes("edit")) return "edit";
+  if (n.includes("bash") || n.includes("shell") || n.includes("exec")) return "bash";
+  if (n.includes("grep") || n.includes("search")) return "search";
+  if (n.includes("glob") || n.includes("find")) return "find";
+  if (n.includes("git")) return "git";
+  return toolName;
+}
+
 function ToolCallLine({ tc, isLast, width }: { tc: TUIToolCall; isLast: boolean; width: number }): React.JSX.Element {
-  const argsTruncated = truncateArgs(tc.argsSummary, 40);
+  const argsTruncated = truncateArgs(tc.argsSummary, 38);
 
   // Resolve diff
   let resolvedDiff: ParsedDiff | null = null;
@@ -190,39 +203,45 @@ function ToolCallLine({ tc, isLast, width }: { tc: TUIToolCall; isLast: boolean;
     truncatedLines = limited.truncated;
   }
 
+  // Tree connector: ├─ for non-last, └─ for last tool
+  const connector = isLast ? TOKENS.tree.last : TOKENS.tree.branch;
+  // Left continuation gutter for diff (aligns under tool args)
+  const diffGutter = isLast ? "   " : `${TOKENS.tree.pipe} `;
+
   return (
-    <Box flexDirection="column" paddingLeft={2}>
+    <Box flexDirection="column">
       <Box>
+        <Text dimColor>{connector}</Text>
         {tc.status === "running" ? (
-          // Running: blinking white/gray dot + bold tool name + args
+          // Running: blinking dot + bold tool verb + args
           <>
+            <Text> </Text>
             <BlinkingDot />
-            <Text bold color="white"> {tc.toolName}</Text>
-            {argsTruncated ? <Text dimColor>({argsTruncated})</Text> : null}
+            <Text bold color="white"> {toolVerb(tc.toolName)}</Text>
+            {argsTruncated ? <Text dimColor> {argsTruncated}</Text> : null}
           </>
         ) : tc.status === "error" ? (
-          // Error: red dot + dim tool name
+          // Error: red ✗ + dim tool verb + args
           <>
-            <Text color="red">●</Text>
-            <Text dimColor> {tc.toolName}</Text>
-            {argsTruncated ? <Text dimColor>  {argsTruncated}</Text> : null}
             <Text color="red"> ✗</Text>
+            <Text dimColor> {toolVerb(tc.toolName)}</Text>
+            {argsTruncated ? <Text dimColor> {argsTruncated}</Text> : null}
           </>
         ) : (
-          // Success: gray dot + dim tool name + duration
+          // Success: dim ✓ + dim verb + args + duration
           <>
-            <Text color="#555555">●</Text>
-            <Text dimColor> {tc.toolName}</Text>
-            {argsTruncated ? <Text dimColor>  {argsTruncated}</Text> : null}
+            <Text color="#3a7d44"> ✓</Text>
+            <Text dimColor> {toolVerb(tc.toolName)}</Text>
+            {argsTruncated ? <Text dimColor> {argsTruncated}</Text> : null}
             {tc.duration != null ? (
-              <Text dimColor>  {tc.duration.toFixed(1)}s</Text>
+              <Text color="#555555">  {tc.duration.toFixed(1)}s</Text>
             ) : null}
           </>
         )}
       </Box>
       {displayDiff && (
-        <Box flexDirection="column" marginTop={0} paddingLeft={2}>
-          <DiffView diff={displayDiff} width={width - 4} />
+        <Box flexDirection="column" paddingLeft={4}>
+          <DiffView diff={displayDiff} width={width - 6} />
           {truncatedLines > 0 && (
             <Text dimColor>  … {truncatedLines} more line{truncatedLines === 1 ? "" : "s"}</Text>
           )}
@@ -286,41 +305,51 @@ export function MessageBubble({
       );
     }
 
-    case "assistant":
+    case "assistant": {
+      const toolCalls = msg.toolCalls ?? [];
+      const hasTools = toolCalls.length > 0;
+      const hasText = !!msg.content;
       return (
         <Box flexDirection="column" marginBottom={1}>
-          {/* ● dot indicator — dim when idle, blinking when streaming */}
+          {/* ● yuan — header row (always visible) */}
           <Box>
             {msg.isStreaming && isLatest ? (
-              <BlinkingDot />
+              <>
+                <BlinkingDot />
+                <Text dimColor> yuan</Text>
+              </>
             ) : (
-              <Text dimColor>●</Text>
+              <Text dimColor>● yuan</Text>
             )}
           </Box>
-          {msg.content && (
+          {/* Streamed/completed assistant text — white, readable */}
+          {hasText && (
             <Box paddingLeft={2}>
               <MarkdownRenderer content={msg.content} width={width - 4} />
             </Box>
           )}
-          {msg.isStreaming && isLatest && (
+          {/* Cursor block while streaming with no text yet */}
+          {msg.isStreaming && isLatest && !hasText && (
             <Box paddingLeft={2}>
               <Text dimColor>█</Text>
             </Box>
           )}
-          {msg.toolCalls && msg.toolCalls.length > 0 && (
-            <Box flexDirection="column">
-              {msg.toolCalls.map((tc, i) => (
+          {/* Tool call tree — dimmer, smaller visual weight than text */}
+          {hasTools && (
+            <Box flexDirection="column" paddingLeft={2} marginTop={hasText ? 1 : 0}>
+              {toolCalls.map((tc, i) => (
                 <ToolCallLine
                   key={tc.id}
                   tc={tc}
-                  isLast={i === msg.toolCalls!.length - 1}
-                  width={width}
+                  isLast={i === toolCalls.length - 1}
+                  width={width - 2}
                 />
               ))}
             </Box>
           )}
         </Box>
       );
+    }
 
     case "tool": {
       const icon = msg.toolSuccess ? "✓" : "✗";

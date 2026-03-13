@@ -218,6 +218,9 @@ export function InputBox({
       if (key.upArrow) {
         if (slashMenuOpen && onSlashNavigate) {
           onSlashNavigate("up");
+        } else if (isRunning && pendingMessage && !value) {
+          // While agent is running: ↑ with empty input loads pending message for editing
+          updateValue(pendingMessage);
         } else {
           const prev = history.up(value);
           if (prev !== null) {
