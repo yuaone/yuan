@@ -1,0 +1,15 @@
+{
+  "name": "test-complex",
+  "version": "1.0.0",
+  "description": "Complex project with multiple TypeScript errors",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "ts-node src/auth/login.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "ts-node": "^10.9.0",
+    "@types/node": "^20.0.0"
+  }
+}

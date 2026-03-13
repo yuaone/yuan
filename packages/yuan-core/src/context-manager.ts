@@ -7,6 +7,7 @@
 import { type Message, contentToString } from "./types.js";
 import { TOOL_RESULT_LIMITS, HISTORY_COMPACTION } from "./constants.js";
 import { ContextOverflowError } from "./errors.js";
+import { ContextCompressor } from "./context-compressor.js";
 
 /** ContextManager 설정 */
 export interface ContextManagerConfig {
@@ -103,7 +104,29 @@ export class ContextManager {
       return [...this.messages];
     }
 
-    // 압축 필요
+    // 우선순위 기반 압축 먼저 시도 (ContextCompressor)
+    try {
+      const compressor = new ContextCompressor({
+        maxTokens: this.maxTokens,
+        reserveTokens: this.outputReserve,
+      });
+      const compressed = compressor.compress(this.messages, currentTokens);
+      const compressedTokens = this.estimateTokens(compressed.messages);
+      if (compressedTokens <= availableTokens) {
+        return compressed.messages;
+      }
+      // ContextCompressor가 충분히 줄이지 못한 경우 compactHistory로 추가 압축
+      const compacted = this.compactHistory(availableTokens);
+      const compactedTokens = this.estimateTokens(compacted);
+      if (compactedTokens > availableTokens) {
+        return this.emergencyTrim(compacted, availableTokens);
+      }
+      return compacted;
+    } catch {
+      // ContextCompressor 실패 시 기존 방식으로 fallback
+    }
+
+    // fallback: 기존 compactHistory
     const compacted = this.compactHistory(availableTokens);
     currentTokens = this.estimateTokens(compacted);
 

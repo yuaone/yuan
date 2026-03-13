@@ -14,7 +14,8 @@ import type { ParameterDef, RiskLevel, ToolResult } from './types.js';
 import { BaseTool } from './base-tool.js';
 import { validateNoShellMeta, validateCommand, validatePath } from './validators.js';
 
-const DEFAULT_TIMEOUT = 30_000;
+const DEFAULT_TIMEOUT = 60_000; // 60s (increased from 30s for multi-step tasks)
+const MAX_TIMEOUT = 600_000;   // 10m hard cap — prevents runaway processes
 const MAX_STDOUT = 100_000; // 100KB
 const MAX_STDERR = 50_000;  // 50KB
 
@@ -44,7 +45,7 @@ export class ShellExecTool extends BaseTool {
     },
     timeout: {
       type: 'number',
-      description: 'Timeout in milliseconds (default: 30000)',
+      description: `Timeout in milliseconds (default: ${DEFAULT_TIMEOUT}, max: ${MAX_TIMEOUT}). Increase for long-running builds or test suites.`,
       required: false,
       default: DEFAULT_TIMEOUT,
     },
@@ -60,7 +61,7 @@ export class ShellExecTool extends BaseTool {
     const executable = args.executable as string | undefined;
     const execArgs = args.args as string[] | undefined;
     const cwd = args.cwd as string | undefined;
-    const timeout = (args.timeout as number) ?? DEFAULT_TIMEOUT;
+    const timeout = Math.min((args.timeout as number) ?? DEFAULT_TIMEOUT, MAX_TIMEOUT);
     const env = args.env as Record<string, string> | undefined;
 
     if (!executable) {
