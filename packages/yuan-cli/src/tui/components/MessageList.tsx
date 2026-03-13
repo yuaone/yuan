@@ -141,8 +141,13 @@ export const MessageList = memo(function MessageList({
   const hasAbove = startIdx > 0;
   const hasBelow = scrollBack > 0;
 
+  // Claude Code–style layout: start from top when messages are few,
+  // pin to bottom once they fill the viewport (feels natural, not floating in center)
+  const totalVisibleLines = visibleMessages.reduce((sum, m) => sum + estimateLines(m, columns), 0);
+  const justifyContent = totalVisibleLines >= height - reservedLines ? "flex-end" : "flex-start";
+
   return (
-    <Box flexDirection="column" height={height} overflow="hidden" justifyContent="flex-end">
+    <Box flexDirection="column" height={height} overflow="hidden" justifyContent={justifyContent}>
       {/* Scroll-up indicator */}
       {hasAbove && (
         <Box justifyContent="center" flexShrink={0}>

@@ -21,6 +21,7 @@ export interface MessageBubbleProps {
 }
 const BANNER_TITLE_PREFIX = "YUAN v";
 const BANNER_SUBTITLE = "Autonomous Coding Agent";
+const BANNER_META_SEP = "---META---";
 
 const FOX_PIXEL_PALETTE: Record<string, string | null> = {
   ".": null,
@@ -371,38 +372,91 @@ export function MessageBubble({
 
     case "system":
       if (isBannerMessage) {
-        const lines = msg.content.split("\n");
-        const title =
-          lines.find((line) => line.startsWith(BANNER_TITLE_PREFIX)) ?? "";
-        const subtitle =
-          lines.find((line) => line.includes(BANNER_SUBTITLE)) ?? "";
-        const help =
-          lines.find((line) => line.includes("Type /help")) ?? "";
-        const site =
-          lines.find((line) => line.includes("yuaone.com")) ?? "";
+        // Parse metadata embedded in banner content
+        const metaIdx = msg.content.indexOf(BANNER_META_SEP);
+        let meta: { model?: string; provider?: string; cwd?: string; version?: string } = {};
+        let baseContent = msg.content;
+        if (metaIdx >= 0) {
+          try {
+            meta = JSON.parse(msg.content.slice(metaIdx + BANNER_META_SEP.length + 1).trim()) as typeof meta;
+          } catch { /* ignore */ }
+          baseContent = msg.content.slice(0, metaIdx);
+        }
+        const lines = baseContent.split("\n");
+        const title = lines.find((l) => l.startsWith(BANNER_TITLE_PREFIX)) ?? `YUAN v${meta.version ?? ""}`;
+        const help = lines.find((l) => l.includes("/help")) ?? "Type /help for commands";
+        const site = lines.find((l) => l.includes("yuaone.com")) ?? "yuaone.com";
+
+        // What's new items for current version
+        const WHATS_NEW = [
+          "Native Gemini reasoning stream",
+          "Tool tree UI  ├─✓/└─●",
+          "LLM Orchestrator (retry + telemetry)",
+          "Non-blocking ctx summarization",
+          "Pending queue bubble + ↑ edit",
+        ];
+
+        const borderColor = "#5c3a1a";
+        const B = TOKENS.box;
 
         return (
-          <Box
-            flexDirection="row"
-            alignItems="flex-start"
-            marginBottom={1}
-            paddingLeft={1}
-          >
-            <Box marginRight={2}>
-              <PixelFoxSprite />
+          <Box flexDirection="column" marginBottom={1} paddingLeft={0}>
+            {/* Top border */}
+            <Text color={borderColor}>{B.topLeft}{B.horizontal.repeat(2)} {title} {B.horizontal.repeat(Math.max(0, width - title.length - 6))}{B.topRight}</Text>
+
+            {/* Content row: left (fox + info) | right (what's new) */}
+            <Box flexDirection="row">
+              {/* Left column */}
+              <Box flexDirection="column" paddingLeft={2} flexGrow={0} minWidth={30}>
+                <PixelFoxSprite />
+                <Box height={1} />
+                {meta.model && <Text dimColor>{meta.model}</Text>}
+                {meta.provider && <Text dimColor>{meta.provider}</Text>}
+                {meta.cwd && <Text dimColor>{meta.cwd}</Text>}
+                <Box height={1} />
+                <Text dimColor>{help}</Text>
+                <Text dimColor>{site}</Text>
+              </Box>
+
+              {/* Vertical divider */}
+              <Box flexDirection="column" paddingLeft={1} paddingRight={1}>
+                {Array.from({ length: FOX_PIXEL_SPRITE.length + 7 }).map((_, i) => (
+                  <Text key={i} color={borderColor}>{B.vertical}</Text>
+                ))}
+              </Box>
+
+              {/* Right column — Model info + What's new */}
+              <Box flexDirection="column" flexGrow={1} paddingRight={2}>
+                {/* Model / Provider (dynamic — from actual runtime config) */}
+                {(meta.model || meta.provider) && (
+                  <Box flexDirection="column" marginBottom={1}>
+                    {meta.model && (
+                      <Box>
+                        <Text dimColor>model  </Text>
+                        <Text color="white">{meta.model}</Text>
+                      </Box>
+                    )}
+                    {meta.provider && (
+                      <Box>
+                        <Text dimColor>via    </Text>
+                        <Text dimColor>{meta.provider}</Text>
+                      </Box>
+                    )}
+                  </Box>
+                )}
+                <Text bold color="white">What's new</Text>
+                <Box height={1} />
+                {WHATS_NEW.map((item, i) => (
+                  <Box key={i}>
+                    <Text color="#3a7d44">·</Text>
+                    <Text dimColor> {item}</Text>
+                  </Box>
+                ))}
+              </Box>
             </Box>
 
-            <Box flexDirection="column">
-              <Text bold color="white">
-                {title}
-              </Text>
-              <Text color="#cbd5e1">{subtitle}</Text>
-
-              <Box height={1} />
-
-              <Text dimColor>{help}</Text>
-              <Text dimColor>{site}</Text>
-            </Box>
+            {/* Bottom border */}
+            <Text color={borderColor}>{B.bottomLeft}{B.horizontal.repeat(Math.max(0, width - 2))}{B.bottomRight}</Text>
           </Box>
         );
       }

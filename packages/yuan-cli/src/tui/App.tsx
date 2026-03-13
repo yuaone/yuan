@@ -11,6 +11,7 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import os from "node:os";
 import { render, Box, useApp, useInput } from "ink";
 import { enterTUI, exitTUI } from "./lib/ansi.js";
 import { useTerminalSize } from "./hooks/useTerminalSize.js";
@@ -329,15 +330,9 @@ function App({
   // Insert welcome banner as system message (scrollable like chat)
   useEffect(() => {
     if (agentStream.state.messages.length === 0) {
-      agentStream.addSystemMessage(
-
-
-`YUAN v${version}
-Autonomous Coding Agent
-
-Type /help for commands
-yuaone.com`
-      );
+      const cwd = process.cwd().replace(os.homedir(), "~");
+      const meta = JSON.stringify({ model: currentModel, provider, cwd, version });
+      agentStream.addSystemMessage(`YUAN v${version}\nAutonomous Coding Agent\nType /help for commands\nyuaone.com\n---META---\n${meta}`);
     }
   }, []);
   // Input change → open/close slash menu
