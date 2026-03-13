@@ -395,6 +395,14 @@ export type {
   CallChainEntry,
 } from "./codebase-context.js";
 
+// ─── AST Analyzer ───
+export { AstAnalyzer } from "./ast-analyzer.js";
+export type {
+  AstSymbol,
+  AstImport,
+  AstReference,
+} from "./ast-analyzer.js";
+
 // ─── Hierarchical Planner ───
 export { HierarchicalPlanner } from "./hierarchical-planner.js";
 export type {
@@ -558,6 +566,15 @@ export type {
   IndexStats,
   SymbolType,
 } from "./vector-index.js";
+
+// ─── In-memory Vector Store + Ollama ───
+export { InMemoryVectorStore, OllamaEmbeddingProvider } from "./vector-store.js";
+export type {
+  StoredDocument,
+  MemorySearchResult,
+  VectorEmbeddingProvider,
+  VectorStoreMode,
+} from "./vector-store.js";
 
 // ─── Persona ───
 export { PersonaManager } from "./persona.js";
