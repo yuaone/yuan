@@ -29,43 +29,45 @@ On first run, YUAN will prompt you to set up an API key if none is configured.
 ## Features
 
 - **Agent Loop** -- Autonomous tool-use loop that plans, executes, and self-corrects
-- **9 Built-in Tools** -- file_read, file_write, file_edit, shell_exec, grep, glob, git_ops, test_run, code_search
-- **BYOK** -- Works with YUA, OpenAI, and Anthropic API keys
-- **Streaming Output** -- Real-time streaming of agent reasoning and tool results
-- **Approval Flow** -- Dangerous operations require explicit user approval before execution
-- **Interactive REPL** -- Persistent conversation with the agent in your terminal
+- **10 Built-in Tools** -- file_read, file_write, file_edit, shell_exec, grep, glob, git_ops, test_run, code_search, web_search
+- **BYOK** -- Works with YUA, OpenAI, Anthropic, and Google Gemini API keys
+- **Multi-provider** -- Store keys for all providers, switch model at runtime with `/model`
+- **Full TUI** -- Full-screen terminal UI with slash menu, approval prompts, live token counters
+- **Persistent Conversation** -- History preserved across messages within a session
+- **Approval Flow** -- Interactive `[Allow] [Always Allow] [Deny]` for destructive operations
 - **One-shot Mode** -- Run a single task and exit (`yuan code "add error handling to auth.ts"`)
 - **Session Persistence** -- Pause, resume, and recover agent sessions
-- **MCP Server** -- Expose YUAN tools via Model Context Protocol
+- **Design Mode** -- AI-powered real-time UI collaboration via Playwright
+- **Advanced AI Engine** -- HierarchicalPlanner, ReflexionEngine, ContinuationEngine, PolicyEngine
 - **Security** -- Blocked commands, shell injection prevention, sensitive file detection
 
 ---
 
 ## Supported Providers
 
-| Provider  | Default Model            | Notes                           |
-|-----------|--------------------------|----------------------------------|
-| YUA       | yua-normal               | Self-hosted, OpenAI-compatible   |
-| OpenAI    | gpt-4o-mini              | BYOK                             |
-| Anthropic | claude-sonnet-4-20250514 | BYOK                             |
+| Provider  | Default Model         | Notes                            |
+|-----------|-----------------------|----------------------------------|
+| YUA       | yua-normal            | Self-hosted, OpenAI-compatible   |
+| OpenAI    | gpt-4o-mini           | BYOK                             |
+| Anthropic | claude-sonnet-4-6     | BYOK, 1M context                 |
+| Google    | gemini-2.5-flash      | BYOK                             |
 
-### YUA Model Tiers
+### Model Catalog (2026)
 
-When using the YUA provider, model names map to internal tiers:
+**OpenAI:** `gpt-4o`, `gpt-4o-mini`, `gpt-4.1`, `gpt-4.1-mini`, `o3`, `o3-mini`, `o4-mini`, `gpt-5`, `gpt-5-mini`
 
-| Model       | Tier     | Backend Engine          | Use Case                  |
-|-------------|----------|-------------------------|---------------------------|
-| yua-basic    | FAST     | gpt-5-mini          | Low-cost, fast responses  |
-| yua-normal   | NORMAL   | gpt-5.2-chat-latest | General-purpose (default) |
-| yua-pro      | DEEP     | gpt-5.2             | High-quality, reasoning   |
-| yua-research | RESEARCH | gpt-5.2-chat-latest | Deep research pipeline    |
+**Anthropic:** `claude-opus-4-6` (1M ctx), `claude-sonnet-4-6`, `claude-haiku-4-5`
+
+**Google:** `gemini-2.5-pro` (2M ctx), `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-3.1-pro`, `gemini-3.1-flash`
 
 You can override the model per-session:
 
 ```bash
-yuan code "refactor the auth module" --model yua-pro
-yuan code "quick fix" --model yua-basic
+yuan code "refactor the auth module" --model anthropic/claude-opus-4-6
+yuan code "quick fix" --model openai/gpt-4o-mini
 ```
+
+Or switch at runtime with `/model` slash command.
 
 ---
 
@@ -174,7 +176,7 @@ yuan/
 
 ### @yuaone/core
 
-The agent runtime. Contains the main Agent Loop that orchestrates LLM calls and tool execution, the Governor that enforces safety limits, the Planner for task decomposition, and the Context Manager for token-aware history compaction.
+The agent runtime. Contains the main Agent Loop that orchestrates LLM calls and tool execution, the Governor that enforces safety limits, the HierarchicalPlanner for task decomposition, ReflexionEngine for per-iteration self-improvement, ContinuationEngine for checkpointing, ExecutionPolicyEngine for cost control, and the Context Manager for token-aware history compaction.
 
 ### @yuaone/tools
 

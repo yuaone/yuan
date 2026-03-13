@@ -280,9 +280,7 @@ function App({
             });
           } else if (settings.autoUpdate === "prompt") {
             agentStream.addSystemMessage(
-              `Update available: ${info.currentVersion} → ${info.latestVersion}\n` +
-              `  Run: pnpm install -g @yuaone/cli@latest\n` +
-              `  Or: /settings to enable auto-update`,
+              `Update available: ${info.currentVersion} → ${info.latestVersion}  Press U to install`,
             );
           }
         })
@@ -359,6 +357,37 @@ yuaone.com`
   const st = agentStream.state.status;
   const isRunning = st !== "idle" && st !== "completed" && st !== "error" && st !== "interrupted";
   const isAwaitingApproval = st === "awaiting_approval";
+
+  // U key — one-key update when a new version is available
+  const isUpdatingRef = useRef(false);
+  useInput((input, key) => {
+    if (key.ctrl || key.meta) return;
+    if (input !== "u" && input !== "U") return;
+    if (isRunning || isAwaitingApproval) return;
+    if (!updateInfo) return;
+    if (isUpdatingRef.current) return;
+
+    isUpdatingRef.current = true;
+    const target = updateInfo.latest;
+    agentStream.addSystemMessage(`Updating YUAN → ${target}...`);
+
+    import("./lib/update-checker.js")
+      .then(({ performUpdate }) => {
+        performUpdate().then((ok) => {
+          isUpdatingRef.current = false;
+          setUpdateInfo(null);
+          agentStream.addSystemMessage(
+            ok
+              ? `✓ Updated to ${target}. Restart yuan to apply.`
+              : `✗ Update failed. Run: pnpm install -g @yuaone/cli@latest`,
+          );
+        });
+      })
+      .catch(() => {
+        isUpdatingRef.current = false;
+        agentStream.addSystemMessage(`✗ Update failed. Run: pnpm install -g @yuaone/cli@latest`);
+      });
+  });
 
   // Calculate how many rows the slash menu takes
   // items (max 8) + top/bottom border (2) + up/down "more" indicators (0-2)

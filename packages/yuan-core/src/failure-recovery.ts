@@ -19,6 +19,7 @@
  */
 
 import { rename, writeFile, unlink } from "node:fs/promises";
+import { execSync } from "node:child_process";
 import path from "node:path";
 
 // ─── Error Classification ───
@@ -106,6 +107,10 @@ export interface FailureRecoveryConfig {
   enableScopeReduce: boolean;
   /** Escalate after this many failed strategies (default 2) */
   escalateThreshold: number;
+  /** Last known good git commit hash (captured at agent init). Used for git-level rollback. */
+  lastGoodCommit?: string;
+  /** Working directory for git operations (default: process.cwd()) */
+  gitWorkDir?: string;
 }
 
 /** Record of a strategy attempt and its outcome. */
@@ -259,6 +264,17 @@ export class FailureRecovery {
 
   constructor(config?: Partial<FailureRecoveryConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config };
+  }
+
+  /**
+   * Update the last known good commit hash.
+   * Called by AgentLoop after capturing `git rev-parse HEAD` on init.
+   */
+  setLastGoodCommit(commitHash: string, workDir?: string): void {
+    (this.config as FailureRecoveryConfig).lastGoodCommit = commitHash;
+    if (workDir) {
+      (this.config as FailureRecoveryConfig).gitWorkDir = workDir;
+    }
   }
 
   // ─── Root Cause Analysis ───
@@ -438,8 +454,12 @@ export class FailureRecovery {
   /**
    * Execute a rollback by restoring original file contents.
    *
-   * Uses atomic writes: writes to a .tmp file first, then renames.
-   * This prevents partial writes from corrupting files.
+   * Strategy (in order):
+   *   1. Git-level rollback: if `lastGoodCommit` is set, attempt
+   *      `git stash` to discard uncommitted changes. If that fails,
+   *      fall back to `git reset --hard <lastGoodCommit>`.
+   *   2. File-level rollback: restore from in-memory `originalSnapshots`
+   *      using atomic writes (.tmp → rename).
    *
    * @param changedFiles List of file paths to restore
    * @param originalSnapshots Map of file path → original content
@@ -449,6 +469,45 @@ export class FailureRecovery {
     changedFiles: string[],
     originalSnapshots: Map<string, string>,
   ): Promise<boolean> {
+    const workDir = this.config.gitWorkDir ?? process.cwd();
+
+    // ── Git-level rollback (preferred when lastGoodCommit is available) ──
+    if (this.config.lastGoodCommit) {
+      let gitRollbackDone = false;
+
+      // 1a. Try `git stash` first (non-destructive: preserves history)
+      try {
+        execSync("git stash", {
+          cwd: workDir,
+          stdio: "pipe",
+          timeout: 10_000,
+        });
+        gitRollbackDone = true;
+      } catch {
+        // stash failed (e.g. no git repo, nothing to stash) — try hard reset
+      }
+
+      // 1b. Fallback: `git reset --hard <lastGoodCommit>`
+      if (!gitRollbackDone) {
+        try {
+          execSync(`git reset --hard ${this.config.lastGoodCommit}`, {
+            cwd: workDir,
+            stdio: "pipe",
+            timeout: 10_000,
+          });
+          gitRollbackDone = true;
+        } catch {
+          // git reset failed — fall through to file-level rollback
+        }
+      }
+
+      // If git rollback succeeded, no need for file-level restore
+      if (gitRollbackDone) {
+        return true;
+      }
+    }
+
+    // ── File-level rollback (fallback when no git or git rollback failed) ──
     let allSuccess = true;
 
     for (const filePath of changedFiles) {
@@ -462,17 +521,17 @@ export class FailureRecovery {
         // Atomic write: write to .tmp then rename
         const tmpPath = filePath + ".recovery.tmp";
         await writeFile(tmpPath, originalContent, "utf-8");
-  try {
-    try {
-      await rename(tmpPath, filePath);
-    } catch {
-      await writeFile(filePath, originalContent, "utf-8");
-      await unlink(tmpPath).catch(() => {});
-    }
-  } catch {
-    await writeFile(filePath, originalContent, "utf-8");
-    await unlink(tmpPath).catch(() => {});
-  }
+        try {
+          try {
+            await rename(tmpPath, filePath);
+          } catch {
+            await writeFile(filePath, originalContent, "utf-8");
+            await unlink(tmpPath).catch(() => {});
+          }
+        } catch {
+          await writeFile(filePath, originalContent, "utf-8");
+          await unlink(tmpPath).catch(() => {});
+        }
       } catch (err) {
         allSuccess = false;
         // Continue restoring other files even if one fails

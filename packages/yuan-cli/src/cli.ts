@@ -241,6 +241,91 @@ program
     await interactive.start();
   });
 
+// ─── yuan benchmark ───
+program
+  .command("benchmark")
+  .description("Run YUAN agent benchmarks against a task suite")
+  .argument("[config]", "Path to benchmark config JSON, or 'sample' to run built-in sample tasks")
+  .option("--results-dir <dir>", "Directory to save results", ".yuan/benchmarks")
+  .option("--no-save", "Do not save results to disk")
+  .option("--no-baseline", "Skip baseline comparison")
+  .option("--report", "Print Markdown report to stdout after run")
+  .option("--concurrent <n>", "Max concurrent tasks (default 1)", parseInt)
+  .action(async (configArg: string | undefined, options: {
+    resultsDir: string;
+    save: boolean;
+    baseline: boolean;
+    report: boolean;
+    concurrent?: number;
+  }) => {
+    const { BenchmarkRunner } = await import("@yuaone/core");
+
+    const runner = new BenchmarkRunner({
+      resultsDir: options.resultsDir,
+      maxConcurrent: options.concurrent ?? 1,
+      saveResults: options.save,
+      compareBaseline: options.baseline,
+    });
+
+    // Load tasks: 'sample' or path to JSON file
+    let tasks: import("@yuaone/core").BenchmarkTask[] = [];
+
+    if (!configArg || configArg === "sample") {
+      tasks = BenchmarkRunner.getSampleTasks();
+      console.log(`\nRunning ${tasks.length} built-in sample tasks...\n`);
+    } else {
+      const { readFile } = await import("node:fs/promises");
+      try {
+        const raw = await readFile(configArg, "utf-8");
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          tasks = parsed;
+        } else if (parsed.tasks && Array.isArray(parsed.tasks)) {
+          tasks = parsed.tasks;
+        } else {
+          console.error(`Error: config must be a JSON array of tasks or { tasks: [...] }`);
+          process.exit(1);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`Error loading benchmark config: ${msg}`);
+        process.exit(1);
+      }
+      console.log(`\nLoaded ${tasks.length} benchmark tasks from ${configArg}\n`);
+    }
+
+    // Note: BenchmarkRunner does not call AgentLoop directly (no circular dep).
+    // Without an agent result map, tasks will report 'no_execution'.
+    // For a full run, integrate AgentLoop externally and pass taskResults map.
+    const summary = await runner.runSuite(tasks);
+
+    // Print summary
+    console.log(`\nBenchmark Results:`);
+    console.log(`  Total:    ${summary.totalTasks}`);
+    console.log(`  Passed:   ${summary.passed}`);
+    console.log(`  Failed:   ${summary.failed}`);
+    console.log(`  Rate:     ${(summary.successRate * 100).toFixed(1)}%`);
+    console.log(`  Est Cost: $${summary.totalCostEstimateUSD.toFixed(4)}`);
+
+    if (summary.regressions.length > 0) {
+      console.log(`\n  Regressions: ${summary.regressions.join(", ")}`);
+    }
+    if (summary.improvements.length > 0) {
+      console.log(`  Improvements: ${summary.improvements.join(", ")}`);
+    }
+
+    if (options.report) {
+      console.log("\n" + runner.generateReport(summary));
+    }
+
+    if (options.save) {
+      const savedPath = await runner.saveResults(summary);
+      console.log(`\nResults saved to: ${savedPath}`);
+    }
+
+    process.exit(summary.failed > 0 ? 1 : 0);
+  });
+
 // ─── yuan design ───
 program
   .command("design")

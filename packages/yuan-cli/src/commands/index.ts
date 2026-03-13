@@ -1163,6 +1163,93 @@ const skills: CommandHandler = (ctx, args) => {
 };
 
 /* ──────────────────────────────────────────
+   Benchmark
+────────────────────────────────────────── */
+
+const benchmark: CommandHandler = (ctx, args) => {
+  const subCommand = args[0]?.toLowerCase();
+
+  if (!subCommand || subCommand === "sample") {
+    return {
+      output: [
+        "Benchmark Mode",
+        "",
+        "  /benchmark sample      — Run built-in sample tasks (no agent execution)",
+        "  /benchmark report      — Show last saved benchmark report",
+        "",
+        "For a full benchmark run with agent execution, use the CLI:",
+        "  yuan benchmark [config.json]   — Run tasks from a config file",
+        "  yuan benchmark sample          — Run built-in sample tasks",
+        "  yuan benchmark --report        — Print Markdown report",
+        "",
+        "Results are saved to .yuan/benchmarks/",
+      ].join("\n"),
+    };
+  }
+
+  if (subCommand === "report") {
+    // Load and display last benchmark report
+    const benchmarkDir = path.join(ctx.workDir, ".yuan", "benchmarks");
+    try {
+      const files = fs
+        .readdirSync(benchmarkDir)
+        .filter((f) => f.startsWith("benchmark-") && f.endsWith(".json"))
+        .sort()
+        .reverse();
+
+      if (files.length === 0) {
+        return { output: "No benchmark results found. Run: yuan benchmark sample" };
+      }
+
+      const latestPath = path.join(benchmarkDir, files[0]);
+      const raw = fs.readFileSync(latestPath, "utf-8");
+      const summary = JSON.parse(raw) as {
+        totalTasks: number;
+        passed: number;
+        failed: number;
+        successRate: number;
+        avgTokensPerTask: number;
+        avgDurationMs: number;
+        totalCostEstimateUSD: number;
+        regressions: string[];
+        improvements: string[];
+        timestamp: string;
+      };
+
+      const lines = [
+        `Last Benchmark: ${summary.timestamp}`,
+        `  Total:    ${summary.totalTasks}`,
+        `  Passed:   ${summary.passed}`,
+        `  Failed:   ${summary.failed}`,
+        `  Rate:     ${(summary.successRate * 100).toFixed(1)}%`,
+        `  Avg Tokens/Task: ${Math.round(summary.avgTokensPerTask).toLocaleString()}`,
+        `  Avg Duration:    ${(summary.avgDurationMs / 1000).toFixed(1)}s`,
+        `  Est. Cost:       $${summary.totalCostEstimateUSD.toFixed(4)}`,
+      ];
+      if (summary.regressions.length > 0) {
+        lines.push(`  Regressions: ${summary.regressions.join(", ")}`);
+      }
+      if (summary.improvements.length > 0) {
+        lines.push(`  Improvements: ${summary.improvements.join(", ")}`);
+      }
+      lines.push(`\nFull report: ${latestPath}`);
+
+      return { output: lines.join("\n") };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { output: `Could not read benchmark results: ${msg}` };
+    }
+  }
+
+  return {
+    output: [
+      `Unknown subcommand: ${subCommand}`,
+      "Usage: /benchmark [sample|report]",
+    ].join("\n"),
+  };
+};
+
+/* ──────────────────────────────────────────
    Registry
 ────────────────────────────────────────── */
 
@@ -1192,6 +1279,8 @@ export const COMMAND_DEFS: CommandDef[] = [
   // Plugin System (P4)
   { name: "/plugins", description: "Plugin management (install/remove/search)", handler: plugins },
   { name: "/skills", description: "Available skills (tree view)", aliases: ["/skill"], handler: skills },
+  // Benchmark (P5)
+  { name: "/benchmark", description: "Show benchmark info or last report", handler: benchmark },
 ];
 
 /** Flat handler map for quick lookup */

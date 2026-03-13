@@ -32,7 +32,7 @@ export interface AgentEventLike {
 export function useAgentStream(): UseAgentStreamReturn {
   const [messages, setMessages] = useState<TUIMessage[]>([]);
   const [status, setStatus] = useState<AgentStatus>("idle");
-  const [streamBuffer, setStreamBuffer] = useState("");
+  const isStreamingRef = useRef(false);
   const [tokensPerSecond, setTokensPerSecond] = useState(0);
   const [totalTokensUsed, setTotalTokensUsed] = useState(0);
 
@@ -179,7 +179,7 @@ export function useAgentStream(): UseAgentStreamReturn {
 
   const startAgent = useCallback(() => {
     setStatus("thinking");
-    setStreamBuffer("");
+    isStreamingRef.current = false;
     setCurrentToolName(null);
     setCurrentToolArgs(null);
     setLastError(null);
@@ -221,10 +221,16 @@ export function useAgentStream(): UseAgentStreamReturn {
 
         case "agent:text_delta": {
           const text = event.text as string;
-          setStreamBuffer((prev) => prev + text);
-          setStatus("streaming");
-          setCurrentToolName(null);
-          setCurrentToolArgs(null);
+          // Only update status/tool state on the FIRST token of a stream — not every token
+          if (!isStreamingRef.current) {
+            isStreamingRef.current = true;
+            // Reset thinking message ID so post-stream thinking events create a NEW message
+            // rather than appending to the old thinking block (prevents reasoning overlap)
+            currentThinkingMsgIdRef.current = null;
+            setStatus("streaming");
+            setCurrentToolName(null);
+            setCurrentToolArgs(null);
+          }
           pendingTextRef.current += text;
           if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
           flushTimerRef.current = setTimeout(flushPendingText, FLUSH_INTERVAL);
@@ -235,6 +241,7 @@ export function useAgentStream(): UseAgentStreamReturn {
   break;
  }
         case "agent:tool_call": {
+          isStreamingRef.current = false;
           setStatus("tool_running");
           const toolName = event.tool as string;
           const args = summarizeArgs(event.input as Record<string, unknown>);
@@ -370,7 +377,7 @@ export function useAgentStream(): UseAgentStreamReturn {
             isStreaming: false,
           }));
 
-          setStreamBuffer("");
+          isStreamingRef.current = false;
           currentMsgIdRef.current = null;
           currentThinkingMsgIdRef.current = null;
           activeToolBatchIdRef.current = null;
@@ -478,7 +485,7 @@ export function useAgentStream(): UseAgentStreamReturn {
     pendingTextRef.current = "";
     startTimeRef.current = null;
     setMessages([]);
-    setStreamBuffer("");
+    isStreamingRef.current = false;
     setStatus("idle");
     setElapsedMs(0);
     setLastElapsedMs(null);
@@ -494,7 +501,6 @@ export function useAgentStream(): UseAgentStreamReturn {
 
   const state: AgentStreamState = {
     status,
-    streamBuffer,
     messages,
     tokensPerSecond,
     totalTokensUsed,

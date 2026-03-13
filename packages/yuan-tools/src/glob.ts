@@ -8,6 +8,7 @@
  */
 
 import fg from 'fast-glob';
+import { resolve, dirname } from 'node:path';
 import type { ParameterDef, RiskLevel, ToolResult } from './types.js';
 import { BaseTool } from './base-tool.js';
 
@@ -23,12 +24,16 @@ export class GlobTool extends BaseTool {
   readonly parameters: Record<string, ParameterDef> = {
     pattern: {
       type: 'string',
-      description: 'Glob pattern (e.g., "src/**/*.tsx", "**/*.test.ts")',
+      description:
+        'Glob pattern (e.g., "src/**/*.tsx", "**/*.test.ts"). ' +
+        'For directories outside the project use the `path` parameter instead of putting "../" in the pattern.',
       required: true,
     },
     path: {
       type: 'string',
-      description: 'Base directory relative to project root (default: project root)',
+      description:
+        'Base directory to search from (default: project root). ' +
+        'Can be an absolute path or relative path including "../" to reach sibling directories.',
       required: false,
     },
     maxResults: {
@@ -51,16 +56,43 @@ export class GlobTool extends BaseTool {
 
     // Resolve base directory
     let cwd = workDir;
+    let resolvedPattern = pattern;
+
     if (basePath) {
       try {
         cwd = this.validatePath(basePath, workDir, true);
       } catch (err) {
         return this.fail(toolCallId, (err as Error).message);
       }
+    } else if (/^\.\.[\\/]|^\//.test(pattern)) {
+      // Pattern starts with ../ or ../../ etc — auto-split into cwd + pattern.
+      // fast-glob does not support ".." traversal in patterns, so we extract
+      // any leading path segments (up to the first glob character) as cwd.
+      const firstGlob = pattern.search(/[*?{[]/);
+      if (firstGlob > 0) {
+        const pathPrefix = pattern.slice(0, firstGlob);
+        // Strip trailing separator
+        const cleanPrefix = pathPrefix.replace(/[\\/]+$/, '');
+        resolvedPattern = pattern.slice(firstGlob);
+        try {
+          cwd = this.validatePath(cleanPrefix, workDir, true);
+        } catch (err) {
+          return this.fail(toolCallId, (err as Error).message);
+        }
+      } else if (firstGlob === -1) {
+        // No glob chars at all — treat the whole pattern as a path to list
+        const cleanPrefix = pattern.replace(/[\\/]+$/, '');
+        resolvedPattern = '**';
+        try {
+          cwd = this.validatePath(cleanPrefix, workDir, true);
+        } catch (err) {
+          return this.fail(toolCallId, (err as Error).message);
+        }
+      }
     }
 
     try {
-      const allFiles = await fg(pattern, {
+      const allFiles = await fg(resolvedPattern, {
         cwd,
         ignore: [
           '**/node_modules/**',

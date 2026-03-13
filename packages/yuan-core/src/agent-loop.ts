@@ -9,6 +9,8 @@
 
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
+import { execSync } from "node:child_process";
+import { basename, join as pathJoin } from "node:path";
 import type {
   AgentConfig,
   AgentEvent,
@@ -92,6 +94,22 @@ import { DependencyAnalyzer } from "./dependency-analyzer.js";
 import { CrossFileRefactor } from "./cross-file-refactor.js";
 import { ContextBudgetManager } from "./context-budget.js";
 import { QAPipeline, type QAPipelineResult } from "./qa-pipeline.js";
+import { PersonaManager } from "./persona.js";
+import { InMemoryVectorStore, OllamaEmbeddingProvider } from "./vector-store.js";
+import {
+  StateStore,
+  TransitionModel,
+  SimulationEngine,
+  StateUpdater,
+} from "./world-model/index.js";
+import type { WorldState, StatePatch } from "./world-model/index.js";
+import {
+  MilestoneChecker,
+  RiskEstimator,
+  PlanEvaluator,
+  ReplanningEngine,
+} from "./planner/index.js";
+import type { Milestone, MilestoneStatus, RiskScore, PlanHealth, ProactiveReplanResult } from "./planner/index.js";
 /** AgentLoop 설정 */
 export interface AgentLoopOptions {
   abortSignal?: AbortSignal
@@ -191,6 +209,7 @@ export class AgentLoop extends EventEmitter {
   private tokenBudgetManager: TokenBudgetManager;
   private allToolResults: ToolResult[] = [];
   private currentTaskIndex = 0;
+  private _lastInjectedTaskIndex = -1; // track when plan progress was last injected
   private changedFiles: string[] = [];
   private aborted = false;
   private initialized = false;
@@ -246,6 +265,25 @@ export class AgentLoop extends EventEmitter {
   private iterationTsFilesModified: string[] = [];
   /** Task 3: Whether tsc was run in the previous iteration (skip cooldown) */
   private tscRanLastIteration = false;
+  /** PersonaManager — learns user communication style, injects persona into system prompt */
+  private personaManager: PersonaManager | null = null;
+  /** InMemoryVectorStore — RAG: semantic code context retrieval for relevant snippets */
+  private vectorStore: InMemoryVectorStore | null = null;
+  /** Last user message — used for task-specific memory retrieval */
+  private lastUserMessage = "";
+  // World Model
+  private worldModel: StateStore | null = null;
+  private transitionModel: TransitionModel | null = null;
+  private simulationEngine: SimulationEngine | null = null;
+  private stateUpdater: StateUpdater | null = null;
+  // Proactive Replanning
+  private planEvaluator: PlanEvaluator | null = null;
+  private riskEstimator: RiskEstimator | null = null;
+  private replanningEngine: ReplanningEngine | null = null;
+  private milestoneChecker: MilestoneChecker | null = null;
+  private activeMilestones: Milestone[] = [];
+  private completedPlanTaskIds: Set<string> = new Set();
+  private allToolResultsSinceLastReplan: ToolResult[] = [];
   private tokenUsage: TokenUsage = {
     input: 0,
     output: 0,
@@ -433,6 +471,30 @@ async restoreSession(data: SessionData): Promise<void> {
         this.memoryManager = new MemoryManager(projectPath);
         await this.memoryManager.load();
 
+        // PersonaManager — user communication style learning + persona injection
+        const personaUserId = basename(projectPath) || "default";
+        this.personaManager = new PersonaManager({
+          userId: personaUserId,
+          profilePath: pathJoin(projectPath, ".yuan", `persona-${personaUserId}.json`),
+          enableLearning: true,
+        });
+        await this.personaManager.loadProfile().catch(() => {});
+
+        // InMemoryVectorStore — RAG semantic code context (TF-IDF fallback if Ollama unavailable)
+        this.vectorStore = new InMemoryVectorStore({
+          projectId: personaUserId,
+          projectPath,
+          embeddingProvider: new OllamaEmbeddingProvider(),
+        });
+        await this.vectorStore.load().catch(() => {});
+
+        // Background indexing — non-blocking, fires and forgets
+        const vectorStoreRef = this.vectorStore;
+        import("./code-indexer.js").then(({ CodeIndexer }) => {
+          const indexer = new CodeIndexer({});
+          indexer.indexProject(projectPath, vectorStoreRef).catch(() => {});
+        }).catch(() => {});
+
         // 프로젝트 구조 분석
         projectStructure = await this.yuanMemory.analyzeProject();
       } catch (memErr) {
@@ -474,6 +536,32 @@ async restoreSession(data: SessionData): Promise<void> {
       this.worldState = await worldStateCollector.collect();
     } catch {
       // WorldState 수집 실패는 치명적이지 않음
+    }
+
+    // Initialize World Model
+    if (this.worldState && projectPath) {
+      try {
+        this.transitionModel = new TransitionModel();
+        this.worldModel = StateStore.fromSnapshot(this.worldState, projectPath);
+        this.simulationEngine = new SimulationEngine(this.transitionModel, this.worldModel);
+        this.stateUpdater = new StateUpdater(this.worldModel, projectPath);
+      } catch {
+        // World Model initialization failure is non-fatal
+      }
+    }
+
+    // Capture last known good git commit for FailureRecovery rollback
+    try {
+      const headHash = execSync("git rev-parse HEAD", {
+        cwd: projectPath,
+        stdio: "pipe",
+        timeout: 5_000,
+      }).toString().trim();
+      if (headHash) {
+        this.failureRecovery.setLastGoodCommit(headHash, projectPath);
+      }
+    } catch {
+      // Not a git repo or git unavailable — FailureRecovery will use file-level rollback only
     }
 
     // ImpactAnalyzer 생성
@@ -602,6 +690,29 @@ async restoreSession(data: SessionData): Promise<void> {
 
     if (this.skillLearner) {
       this.planner.setSkillLearner(this.skillLearner);
+    }
+
+    // Initialize Proactive Replanning (requires planner + impactAnalyzer + worldModel)
+    try {
+      if (this.impactAnalyzer && this.worldModel && this.simulationEngine && this.transitionModel) {
+        this.milestoneChecker = new MilestoneChecker();
+        this.riskEstimator = new RiskEstimator(
+          this.transitionModel,
+          this.impactAnalyzer,
+        );
+        this.planEvaluator = new PlanEvaluator(
+          this.worldModel,
+          this.simulationEngine,
+        );
+        this.replanningEngine = new ReplanningEngine(
+          this.planner,
+          this.planEvaluator,
+          this.riskEstimator,
+          this.milestoneChecker,
+        );
+      }
+    } catch {
+      // Proactive replanning initialization failure is non-fatal
     }
 
     if (this.skillLearner) {
@@ -864,9 +975,62 @@ this.checkpointSaved = false;
       content: userMessage,
     });
 
+    // PersonaManager — 유저 메시지로 커뮤니케이션 스타일 학습
+    this.lastUserMessage = userMessage;
+    if (this.personaManager) {
+      this.personaManager.analyzeUserMessage(userMessage);
+    }
+
     this.emitEvent({ kind: "agent:start", goal: userMessage });
 
     try {
+      // Persona injection — 유저 선호도/언어/스타일 어댑테이션을 시스템 메시지로 주입
+      if (this.personaManager) {
+        const personaSection = this.personaManager.buildPersonaPrompt();
+        if (personaSection) {
+          this.contextManager.addMessage({ role: "system", content: personaSection });
+        }
+      }
+
+      // MemoryManager.getRelevant() — 현재 태스크와 관련된 conventions/patterns/warnings 주입
+      if (this.memoryManager) {
+        const relevant = this.memoryManager.getRelevant(userMessage);
+        const parts: string[] = [];
+        if (relevant.conventions.length > 0) {
+          parts.push(`## Project Conventions\n${relevant.conventions.slice(0, 5).map((c) => `- ${c}`).join("\n")}`);
+        }
+        if (relevant.warnings.length > 0) {
+          parts.push(`## Relevant Warnings\n${relevant.warnings.slice(0, 3).map((w) => `⚠ ${w}`).join("\n")}`);
+        }
+        if (relevant.patterns.length > 0) {
+          parts.push(`## Relevant Code Patterns\n${relevant.patterns.slice(0, 3).map((p) => `- **${p.name}**: ${p.description}`).join("\n")}`);
+        }
+        if (parts.length > 0) {
+          this.contextManager.addMessage({
+            role: "system",
+            content: `[Task Memory]\n${parts.join("\n\n")}`,
+          });
+        }
+      }
+
+      // VectorStore RAG — 태스크와 의미적으로 유사한 코드 컨텍스트 검색·주입
+      if (this.vectorStore) {
+        try {
+          const hits = await this.vectorStore.search(userMessage, 3, 0.2);
+          if (hits.length > 0) {
+            const ragCtx = hits
+              .map((h) => `**${h.id}** (relevance: ${(h.similarity * 100).toFixed(0)}%)\n${h.text.slice(0, 400)}`)
+              .join("\n\n---\n\n");
+            this.contextManager.addMessage({
+              role: "system",
+              content: `[RAG Context — semantically relevant code snippets]\n${ragCtx}`,
+            });
+          }
+        } catch {
+          // VectorStore search failure is non-fatal
+        }
+      }
+
       // Reflexion: 과거 실행에서 배운 가이던스 주입
       if (this.reflexionEngine) {
         try {
@@ -1170,6 +1334,11 @@ this.checkpointSaved = false;
 
       // 메모리 저장
       await this.memoryManager.save();
+
+      // PersonaManager — 유저 프로필 저장 (학습된 커뮤니케이션 스타일 유지)
+      if (this.personaManager) {
+        await this.personaManager.saveProfile().catch(() => {});
+      }
     } catch {
       // 메모리 저장 실패는 치명적이지 않음
     }
@@ -1360,7 +1529,7 @@ this.checkpointSaved = false;
   private async maybeCreatePlan(userMessage: string): Promise<void> {
     if (!this.planner || !this.enablePlanning) return;
 
-    const complexity = this.detectComplexity(userMessage);
+    const complexity = await this.detectComplexity(userMessage);
     this.currentComplexity = complexity;
 
     // 임계값 미만이면 플래닝 스킵
@@ -1387,6 +1556,22 @@ try {
 
   this.activePlan = plan;
   this.currentTaskIndex = 0;
+
+  // Run plan simulation + extract milestones
+  if (this.simulationEngine && this.milestoneChecker && this.activePlan) {
+    const capturedPlan = this.activePlan;
+    this.simulationEngine.simulate(capturedPlan).then((simResult) => {
+      if (simResult.criticalSteps.length > 0 || simResult.overallSuccessProbability < 0.6) {
+        this.contextManager.addMessage({
+          role: "system",
+          content: this.simulationEngine!.formatForPrompt(simResult),
+        });
+      }
+    }).catch(() => {/* non-blocking */});
+
+    this.activeMilestones = this.milestoneChecker.extractMilestones(this.activePlan);
+    this.completedPlanTaskIds.clear();
+  }
 
   const planTokenEstimate = plan.tactical.length * 500;
   this.tokenBudgetManager.recordUsage("planner", planTokenEstimate, planTokenEstimate);
@@ -1450,7 +1635,7 @@ try {
     return "pnpm build";
   }
 
-  private detectComplexity(
+  private _detectComplexityHeuristic(
     message: string,
   ): "trivial" | "simple" | "moderate" | "complex" | "massive" {
     const lower = message.toLowerCase();
@@ -1486,6 +1671,42 @@ try {
     if (filePaths && filePaths.length >= 5) score += 2;
     else if (filePaths && filePaths.length >= 2) score += 1;
 
+    // 야망형 태스크 키워드 — 짧아도 대형 작업 (score +4 → 즉시 "complex" 이상)
+    // "OS 만들어", "설계해줘", "컴파일러 구현" 같은 짧지만 massive한 요청을 잡기 위함
+    const ambitiousSystemKeywords = [
+      "운영체제", "os ", " os", "kernel", "커널",
+      "compiler", "컴파일러", "인터프리터", "interpreter",
+      "database", "데이터베이스", "dbms",
+      "framework", "프레임워크",
+      "vm ", "virtual machine", "가상머신", "hypervisor",
+      "distributed", "분산 시스템", "분산시스템",
+      "blockchain", "블록체인",
+      "게임 엔진", "game engine",
+    ];
+    for (const kw of ambitiousSystemKeywords) {
+      if (lower.includes(kw)) { score += 4; break; }
+    }
+
+    // 설계/아키텍처 요청 키워드 (score +3)
+    const designKeywords = [
+      "설계", "디자인해", "아키텍처 만들", "구조 설계",
+      "design the", "architect the", "design a ", "design an ",
+      "from scratch", "처음부터", "새로 만들", "전부 만들",
+    ];
+    for (const kw of designKeywords) {
+      if (lower.includes(kw)) { score += 3; break; }
+    }
+
+    // 전체 구현 요청 키워드 (score +2)
+    const buildKeywords = [
+      "만들어줘", "만들어 줘", "만들어봐", "구현해줘", "개발해줘",
+      "build me", "create a full", "implement a full", "make me a",
+      "전체 구현", "full implementation", "complete implementation",
+    ];
+    for (const kw of buildKeywords) {
+      if (lower.includes(kw)) { score += 2; break; }
+    }
+
     // 간단한 작업 키워드 (감점)
     const simpleKeywords = [
       "fix", "고쳐", "수정해",
@@ -1503,6 +1724,44 @@ try {
     if (score <= 3) return "moderate";
     if (score <= 5) return "complex";
     return "massive";
+  }
+
+  /**
+   * Hybrid complexity detection: keyword heuristic for clear cases,
+   * LLM single-word classification for ambiguous borderline cases (score 1-3).
+   * This prevents both over-planning (trivial tasks) and under-planning
+   * (ambitious short requests that keywords miss across any language).
+   */
+  private async detectComplexity(
+    message: string,
+  ): Promise<"trivial" | "simple" | "moderate" | "complex" | "massive"> {
+    const heuristic = this._detectComplexityHeuristic(message);
+
+    // Clear extremes — trust heuristic, skip LLM call cost
+    if (heuristic === "trivial" || heuristic === "massive") return heuristic;
+
+    // Borderline ambiguous range: ask LLM for one-word verdict
+    // Short cheap call: no tools, 1-word response, ~50 tokens total
+    try {
+      const resp = await this.llmClient.chat(
+        [
+          {
+            role: "user",
+            content: `Rate this software task complexity in ONE word only (trivial/simple/moderate/complex/massive). Task: "${message.slice(0, 300)}"`,
+          },
+        ],
+        [], // no tools
+      );
+      const word = (resp.content ?? "").trim().toLowerCase().replace(/[^a-z]/g, "");
+      const valid = ["trivial", "simple", "moderate", "complex", "massive"] as const;
+      if ((valid as readonly string[]).includes(word)) {
+        return word as typeof valid[number];
+      }
+    } catch {
+      // LLM classification failure — fall back to heuristic
+    }
+
+    return heuristic;
   }
 
   /**
@@ -1667,6 +1926,64 @@ let iteration = this.iterationCount;
       const iterationStart = Date.now();
       this.emitReasoning(`iteration ${iteration}: preparing context`);
       this.iterationSystemMsgCount = 0; // Reset per-iteration (prevents accumulation across iterations)
+
+      // Proactive replanning check (every 5 iterations when plan is active)
+      if (
+        this.replanningEngine &&
+        this.activePlan &&
+        this.activeMilestones.length > 0 &&
+        iteration > 0 &&
+        iteration % 5 === 0
+      ) {
+        try {
+          const tokenBudget = this.config?.loop?.totalTokenBudget ?? 200_000;
+          const tokensUsed = this.tokenUsage.total;
+
+          const replanResult = await this.replanningEngine.evaluate(
+            this.activePlan,
+            this.worldModel?.getState() ?? ({} as WorldState),
+            [...this.completedPlanTaskIds],
+            this.allToolResultsSinceLastReplan,
+            tokensUsed,
+            tokenBudget,
+            [...this.changedFiles],
+            iteration,
+            this.activeMilestones,
+            this.llmClient,
+          );
+
+          if (replanResult.triggered) {
+            this.emitEvent({ kind: "agent:thinking", content: `[Proactive Replan] ${replanResult.message}` });
+
+            if (replanResult.newPlan) {
+              this.activePlan = replanResult.newPlan;
+              this.activeMilestones = this.milestoneChecker!.extractMilestones(this.activePlan);
+              this.completedPlanTaskIds.clear();
+            } else if (replanResult.modifiedTasks && replanResult.modifiedTasks.length > 0) {
+              for (const modified of replanResult.modifiedTasks) {
+                const idx = this.activePlan.tactical.findIndex(t => t.id === modified.id);
+                if (idx >= 0) this.activePlan.tactical[idx] = modified;
+              }
+            }
+
+            // Reset tool results accumulator after replan
+            this.allToolResultsSinceLastReplan = [];
+
+            // Inject replan notice into context
+            this.contextManager.addMessage({
+              role: "system",
+              content: `[Proactive Replan] ${replanResult.message}\nScope: ${replanResult.decision.scope}, Risk: ${replanResult.decision.urgency}`,
+            });
+          }
+        } catch {
+          // Non-blocking — proactive replanning failures should not crash the agent
+        }
+      }
+
+      // Plan progress injection — every 3 iterations or when task advances
+      if (this.activePlan) {
+        this.injectPlanProgress(iteration);
+      }
 
       // Policy validation — check cost limits from ExecutionPolicyEngine
       if (this.policyEngine) {
@@ -2077,6 +2394,9 @@ this.emitEvent({
       // Reflexion: 도구 결과 수집
       this.allToolResults.push(...toolResults);
 
+      // Accumulate tool results for proactive replanning evaluation
+      this.allToolResultsSinceLastReplan.push(...toolResults);
+
       // Tool plan tracking: 실행된 도구 이름 기록
       for (const result of toolResults) {
         this.executedToolNames.push(result.name);
@@ -2222,6 +2542,11 @@ this.emitEvent({
           // Auto-tsc failure is non-fatal
           this.tscRanLastIteration = false;
         }
+      }
+
+      // Plan task advancement — check if current task's target files were modified
+      if (this.activePlan) {
+        this.tryAdvancePlanTask();
       }
 
       // iteration 이벤트
@@ -2595,6 +2920,7 @@ if (this.sessionPersistence && this.sessionId) {
     const stream = this.llmClient.chatStream(
       messages,
       allTools,
+      this.abortSignal ?? undefined,
     );
 
     // 텍스트 버퍼링 — 1토큰씩 emit하지 않고 청크 단위로 모아서 emit
@@ -2927,6 +3253,15 @@ if (this.sessionPersistence && this.sessionId) {
         }
       }
 
+      // StateUpdater: sync world model with actual tool execution result
+      if (this.stateUpdater && result.success) {
+        this.stateUpdater.applyToolResult(
+          toolCall.name,
+          args as Record<string, unknown>,
+          result,
+        ).catch(() => {/* non-blocking */});
+      }
+
       const fixPrompt = await this.validateAndFeedback(toolCall.name, result);
       return { result, deferredFixPrompt: fixPrompt ?? null };
     } catch (err) {
@@ -2987,127 +3322,175 @@ if (this.sessionPersistence && this.sessionId) {
   private async executeTools(
     toolCalls: ToolCall[],
   ): Promise<{ results: ToolResult[]; deferredFixPrompts: string[] }> {
-    // Reorder write tool calls using DependencyAnalyzer so files with no deps run first
-    const writeToolNames = new Set(['file_write', 'file_edit']);
-    const writeToolCalls = toolCalls.filter((tc) => writeToolNames.has(tc.name));
+    if (toolCalls.length === 0) return { results: [], deferredFixPrompts: [] };
+
+    // ─── Step 1: Build execution plan ───────────────────────────────────────
+    // Strategy:
+    //   • Read-only tools (low-risk)      → batch together, run all in parallel
+    //   • Write tools (independent files) → use DependencyAnalyzer to group,
+    //                                       run each independent group in parallel
+    //   • Write tools (dependent files)   → run sequentially after their deps
+    //   • shell_exec / git_ops / etc.     → always sequential (side-effects)
+
+    const READ_ONLY = new Set(['file_read', 'grep', 'glob', 'code_search', 'security_scan']);
+    const WRITE_TOOLS = new Set(['file_write', 'file_edit']);
+
+    // Separate reads, writes, and heavy side-effect tools
+    const writeToolCalls = toolCalls.filter((tc) => WRITE_TOOLS.has(tc.name));
+
+    // ─── Step 2: Dependency-aware write tool batching ────────────────────────
+    // Map each write tool call to a "wave index" (0 = can run first, 1 = needs wave-0 done, etc.)
+    const writeBatchMap = new Map<string, number>(); // tc.id → wave index
+
     if (writeToolCalls.length > 1 && this.config.loop.projectPath) {
       try {
         const depAnalyzer = new DependencyAnalyzer();
         const depGraph = await depAnalyzer.analyze(this.config.loop.projectPath);
-        const writeFilePaths = writeToolCalls
-          .map((tc) => {
-            const args = this.parseToolArgs(tc.arguments);
-            return typeof args.path === "string" ? args.path : null;
-          })
-          .filter((p): p is string => p !== null);
+
+        // Collect target file paths from write tool args
+        const writeFilePaths = writeToolCalls.flatMap((tc) => {
+          const args = this.parseToolArgs(tc.arguments);
+          const p = typeof args.path === "string" ? args.path
+            : typeof args.file_path === "string" ? args.file_path
+            : null;
+          return p ? [p] : [];
+        });
 
         if (writeFilePaths.length > 1) {
           const groups = depAnalyzer.groupIndependentFiles(depGraph, writeFilePaths);
-          // Build ordered list of file paths: independent groups first, dependent files after
-          const orderedPaths: string[] = [];
+
+          // Assign wave indices: independent groups get wave 0,
+          // dependent groups get wave = max(their dep waves) + 1
+          // For simplicity: canParallelize=true → wave 0, else sequential waves
+          let wave = 0;
           for (const group of groups) {
-            for (const f of group.files) {
-              if (!orderedPaths.includes(f)) orderedPaths.push(f);
+            if (!group.canParallelize) wave++;
+            for (const filePath of group.files) {
+              const tc = writeToolCalls.find((c) => {
+                const args = this.parseToolArgs(c.arguments);
+                const p = args.path ?? args.file_path;
+                return p === filePath;
+              });
+              if (tc) writeBatchMap.set(tc.id, wave);
             }
+            if (group.canParallelize) wave = 0; // reset: next independent group is also wave 0
           }
-          // Reorder writeToolCalls according to orderedPaths
-          const reordered: ToolCall[] = [];
-          for (const filePath of orderedPaths) {
-            const tc = writeToolCalls.find((c) => {
-              const args = this.parseToolArgs(c.arguments);
-              return args.path === filePath;
-            });
-            if (tc) reordered.push(tc);
-          }
-          // Add any write calls that didn't match a path (shouldn't happen, but be safe)
-          for (const tc of writeToolCalls) {
-            if (!reordered.includes(tc)) reordered.push(tc);
-          }
-          // Rebuild toolCalls preserving non-write tools in their original positions,
-          // replacing write tools with dependency-ordered sequence
-          const reorderedAll: ToolCall[] = [];
-          let writeIdx = 0;
-          for (const tc of toolCalls) {
-            if (writeToolNames.has(tc.name)) {
-              reorderedAll.push(reordered[writeIdx++] ?? tc);
-            } else {
-              reorderedAll.push(tc);
-            }
-          }
-          toolCalls = reorderedAll;
         }
       } catch {
-        // DependencyAnalyzer failure is non-fatal — fall through to original ordering
+        // DependencyAnalyzer failure is non-fatal — all writes run sequentially
       }
     }
 
-    // Group tool calls: read-only can run in parallel, write tools run sequentially
-    const readOnlyTools = new Set(['file_read', 'grep', 'glob', 'code_search']);
-    const batches: ToolCall[][] = [];
-    let currentBatch: ToolCall[] = [];
+    // ─── Step 3: Build ordered batch list ────────────────────────────────────
+    // Final structure: array of batches, each batch runs in parallel.
+    // Reads accumulate until interrupted by a non-read tool.
+    // Writes are grouped by wave (same wave → parallel, different wave → sequential).
+    const batches: Array<{ calls: ToolCall[]; label: string }> = [];
+    let readBatch: ToolCall[] = [];
+    const writeBatchGroups = new Map<number, ToolCall[]>(); // wave → calls
 
-    for (const toolCall of toolCalls) {
-      if (readOnlyTools.has(toolCall.name)) {
-        currentBatch.push(toolCall);
+    const flushReadBatch = () => {
+      if (readBatch.length > 0) {
+        batches.push({ calls: [...readBatch], label: `${readBatch.length} read-only` });
+        readBatch = [];
+      }
+    };
+
+    const flushWriteBatches = () => {
+      if (writeBatchGroups.size === 0) return;
+      const waves = [...writeBatchGroups.keys()].sort((a, b) => a - b);
+      for (const w of waves) {
+        const wCalls = writeBatchGroups.get(w)!;
+        batches.push({
+          calls: wCalls,
+          label: wCalls.length > 1
+            ? `${wCalls.length} independent writes (wave ${w})`
+            : `write: ${wCalls[0]!.name}`,
+        });
+      }
+      writeBatchGroups.clear();
+    };
+
+    for (const tc of toolCalls) {
+      if (READ_ONLY.has(tc.name)) {
+        // Reads accumulate; don't flush write batches yet (they don't conflict)
+        readBatch.push(tc);
+      } else if (WRITE_TOOLS.has(tc.name)) {
+        // Flush any pending reads first (reads before writes)
+        flushReadBatch();
+        const wave = writeBatchMap.get(tc.id) ?? 99; // unknown dep → run last
+        if (!writeBatchGroups.has(wave)) writeBatchGroups.set(wave, []);
+        writeBatchGroups.get(wave)!.push(tc);
       } else {
-        if (currentBatch.length > 0) { batches.push(currentBatch); currentBatch = []; }
-        batches.push([toolCall]); // write tools run solo
+        // Heavy tool (shell_exec, git_ops, etc.) → flush everything, run solo
+        flushReadBatch();
+        flushWriteBatches();
+        batches.push({ calls: [tc], label: tc.name });
       }
     }
-    if (currentBatch.length > 0) batches.push(currentBatch);
+    flushReadBatch();
+    flushWriteBatches();
 
-    if (toolCalls.length > 1) this.emitReasoning(`parallel tool batch started (${toolCalls.length} tools)`);
+    // ─── Step 4: Execute batches ─────────────────────────────────────────────
+    if (toolCalls.length > 1) {
+      const parallelCount = batches.filter(b => b.calls.length > 1).length;
+      this.emitReasoning(
+        parallelCount > 0
+          ? `executing ${toolCalls.length} tools in ${batches.length} batches (${parallelCount} parallel)`
+          : `executing ${toolCalls.length} tools sequentially`,
+      );
+    }
+
     const results: ToolResult[] = [];
     const deferredFixPrompts: string[] = [];
+    let interrupted = false;
 
     for (const batch of batches) {
-      if (batch.length === 1) {
-        // Sequential single tool execution
-        const { result, deferredFixPrompt } = await this.executeSingleTool(batch[0], toolCalls);
+      if (interrupted) {
+        // Fill remaining tools with SKIPPED placeholders
+        for (const tc of batch.calls) {
+          results.push({
+            tool_call_id: tc.id,
+            name: tc.name,
+            output: '[SKIPPED] Execution interrupted.',
+            success: false,
+            durationMs: 0,
+          });
+        }
+        continue;
+      }
+
+      if (batch.calls.length === 1) {
+        // Single tool — sequential execution
+        const { result, deferredFixPrompt } = await this.executeSingleTool(batch.calls[0]!, toolCalls);
         if (result) results.push(result);
         if (deferredFixPrompt) deferredFixPrompts.push(deferredFixPrompt);
-
-        // Check for interrupt result — stop processing remaining batches
-        if (result && result.output.startsWith('[INTERRUPTED]')) {
-          // Add placeholder results for remaining unexecuted tool calls
-          const executedIds = new Set(results.map(r => r.tool_call_id));
-          for (const tc of toolCalls) {
-            if (!executedIds.has(tc.id)) {
-              results.push({
-                tool_call_id: tc.id,
-                name: tc.name,
-                output: `[SKIPPED] Previous tool was interrupted.`,
-                success: false,
-                durationMs: 0,
-              });
-            }
-          }
-          break;
-        }
+        if (result?.output.startsWith('[INTERRUPTED]')) interrupted = true;
       } else {
-        // Parallel execution for read-only tools in this batch
-        this.emitReasoning(`running ${batch.length} read-only tools in parallel`);
-        const batchResults = await Promise.allSettled(
-          batch.map(tc => this.executeSingleTool(tc, toolCalls))
+        // Multi-tool — parallel execution
+        this.emitReasoning(`⚡ running ${batch.label} in parallel`);
+        const settled = await Promise.allSettled(
+          batch.calls.map((tc) => this.executeSingleTool(tc, toolCalls)),
         );
-        for (const settled of batchResults) {
-          if (settled.status === 'fulfilled') {
-            if (settled.value.result) results.push(settled.value.result);
-            if (settled.value.deferredFixPrompt) deferredFixPrompts.push(settled.value.deferredFixPrompt);
+        for (let i = 0; i < settled.length; i++) {
+          const s = settled[i]!;
+          const tc = batch.calls[i]!;
+          if (s.status === 'fulfilled') {
+            if (s.value.result) results.push(s.value.result);
+            if (s.value.deferredFixPrompt) deferredFixPrompts.push(s.value.deferredFixPrompt);
+            if (s.value.result?.output.startsWith('[INTERRUPTED]')) interrupted = true;
           } else {
-            // Parallel tool failure — record as error result
-            const tc = batch[batchResults.indexOf(settled)];
             results.push({
-              tool_call_id: tc?.id ?? 'unknown',
-              name: tc?.name ?? 'unknown',
-              output: `Error: ${settled.reason instanceof Error ? settled.reason.message : String(settled.reason)}`,
+              tool_call_id: tc.id,
+              name: tc.name,
+              output: `Error: ${s.reason instanceof Error ? s.reason.message : String(s.reason)}`,
               success: false,
               durationMs: 0,
             });
           }
-        } // end for (const settled of batchResults)
-      } // end else (parallel batch)
-    } // end for (const batch of batches)
+        }
+      }
+    }
 
     return { results, deferredFixPrompts };
   }
@@ -3288,6 +3671,108 @@ if (this.sessionPersistence && this.sessionId) {
       }
     } catch {
       // 체크포인트 저장 실패는 치명적이지 않음
+    }
+  }
+
+  /**
+   * 매 iteration 시작 시 현재 플랜 진행 상황을 컨텍스트에 주입.
+   * 같은 태스크 인덱스라면 3 iteration마다만 주입 (컨텍스트 bloat 방지).
+   */
+  private injectPlanProgress(iteration: number): void {
+    if (!this.activePlan) return;
+    const tasks = this.activePlan.tactical;
+    if (tasks.length === 0) return;
+
+    const idx = this.currentTaskIndex;
+    const total = tasks.length;
+
+    // 같은 태스크면 3iteration마다, 태스크 전진 시 즉시 주입
+    const taskAdvanced = idx !== this._lastInjectedTaskIndex;
+    if (!taskAdvanced && iteration > 1 && iteration % 3 !== 1) return;
+    this._lastInjectedTaskIndex = idx;
+
+    const lines: string[] = [
+      `## Plan Progress [${idx}/${total} done]`,
+    ];
+    for (let i = 0; i < tasks.length; i++) {
+      const task = tasks[i]!;
+      const marker = i < idx ? "✓" : i === idx ? "→" : "○";
+      lines.push(`${marker} Task ${i + 1}: ${task.description}`);
+      if (i === idx && task.targetFiles.length > 0) {
+        lines.push(`   Files: ${task.targetFiles.join(", ")}`);
+      }
+    }
+
+    if (idx < total) {
+      const cur = tasks[idx]!;
+      lines.push(`\nCurrent task: **${cur.description}**`);
+      if (cur.toolStrategy.length > 0) {
+        lines.push(`Suggested tools: ${cur.toolStrategy.join(", ")}`);
+      }
+      if (cur.readFiles.length > 0) {
+        lines.push(`Read first: ${cur.readFiles.join(", ")}`);
+      }
+    } else {
+      lines.push(`\nAll tasks complete — verify and wrap up.`);
+    }
+
+    this.contextManager.addMessage({
+      role: "system",
+      content: lines.join("\n"),
+    });
+    this.iterationSystemMsgCount++;
+  }
+
+  /**
+   * 현재 태스크의 targetFiles가 changedFiles에 포함됐는지 확인해
+   * 완료 감지 시 다음 태스크로 자동 전진.
+   */
+  private tryAdvancePlanTask(): void {
+    if (!this.activePlan) return;
+    const tasks = this.activePlan.tactical;
+    if (this.currentTaskIndex >= tasks.length) return;
+
+    const currentTask = tasks[this.currentTaskIndex];
+    if (!currentTask) return;
+
+    // targetFiles가 없으면 tool call이 있었던 것만으로 완료 간주
+    if (currentTask.targetFiles.length === 0) {
+      if (this.allToolResults.length > 0) {
+        this.completedPlanTaskIds.add(currentTask.id);
+        this.currentTaskIndex++;
+        this._emitPlanAdvance(tasks);
+      }
+      return;
+    }
+
+    // targetFiles 중 하나라도 changedFiles에 있으면 완료
+    const changedBasenames = new Set(
+      this.changedFiles.map((f) => f.split("/").pop()!.toLowerCase()),
+    );
+    const targetBasenames = currentTask.targetFiles.map((f) =>
+      f.split("/").pop()!.toLowerCase(),
+    );
+    const hit = targetBasenames.some((b) => changedBasenames.has(b));
+
+    if (hit) {
+      this.completedPlanTaskIds.add(currentTask.id);
+      this.currentTaskIndex++;
+      this._emitPlanAdvance(tasks);
+    }
+  }
+
+  private _emitPlanAdvance(tasks: import("./hierarchical-planner.js").TacticalTask[]): void {
+    const idx = this.currentTaskIndex;
+    if (idx < tasks.length) {
+      this.emitEvent({
+        kind: "agent:thinking",
+        content: `✓ Task ${idx}/${tasks.length} done. Next: ${tasks[idx]!.description}`,
+      });
+    } else {
+      this.emitEvent({
+        kind: "agent:thinking",
+        content: `✓ All ${tasks.length} tasks completed.`,
+      });
     }
   }
 

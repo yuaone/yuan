@@ -528,6 +528,10 @@ export type {
 
 // ─── In-memory Vector Store + Ollama ───
 export { InMemoryVectorStore, OllamaEmbeddingProvider } from "./vector-store.js";
+
+// ─── Code Indexer (VectorStore Auto-Indexing Pipeline) ───
+export { CodeIndexer } from "./code-indexer.js";
+export type { CodeIndexerOptions } from "./code-indexer.js";
 export type {
   StoredDocument,
   MemorySearchResult,
@@ -835,3 +839,42 @@ export type {
   BackgroundEvent,
   BackgroundAgentEvents,
 } from "./background-agent.js";
+
+// ─── World Model ───
+export { StateStore, TransitionModel, SimulationEngine, StateUpdater } from "./world-model/index.js";
+export type {
+  WorldState,
+  FileState,
+  BuildState,
+  TestState,
+  GitState,
+  DepsState,
+  FilePatch,
+  StatePatch,
+  PatchHistoryEntry,
+  MemoryStats,
+  StateHistoryEntry,
+  StateDelta,
+  StateTransition,
+  SimulationStep,
+  SimulationResult,
+} from "./world-model/index.js";
+
+// ─── Proactive Planner ───
+export {
+  MilestoneChecker,
+  RiskEstimator,
+  PlanEvaluator,
+  ReplanningEngine,
+} from "./planner/index.js";
+export type {
+  // Note: Milestone is already exported from hierarchical-planner.js
+  MilestoneStatus,
+  RiskScore,
+  RiskComponents,
+  PlanHealth,
+  PlanDeviation,
+  DeviantType,
+  ReplanDecision,
+  ProactiveReplanResult,
+} from "./planner/index.js";
