@@ -197,6 +197,13 @@ export class AutoFixLoop {
 
     // shell_exec 결과에서 에러 감지
     if (toolName === "shell_exec" && success) {
+  if (!success) {
+    failures.push({
+      type: "RUNTIME_ERROR",
+      message: "Shell command failed",
+      rawOutput: toolOutput,
+    });
+  }
       const shellErrors = this.detectShellErrors(toolOutput);
       failures.push(...shellErrors);
     }
@@ -466,7 +473,12 @@ export class AutoFixLoop {
           env: { ...process.env, FORCE_COLOR: "0" },
         },
         (error, stdout, stderr) => {
-          const exitCode = error && "code" in error ? (error.code as number) ?? 1 : 0;
+          const exitCode = 
+  typeof (error as any)?.code === "number"
+    ? (error as any).code
+    : error
+    ? 1
+    : 0;
           resolve({
             exitCode: typeof exitCode === "number" ? exitCode : 1,
             output: (stdout + "\n" + stderr).trim(),

@@ -23,8 +23,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import type { Message, ExecutionPlan, TokenUsage } from "./types.js";
-
+import type { Message, TokenUsage } from "./types.js";
+import type { HierarchicalPlan } from "./hierarchical-planner.js";
+import {
+  YUAN_DIRNAME,
+  YUAN_SESSIONS_DIRNAME,
+  YUAN_LAST_SESSION_FILENAME,
+} from "./constants.js";
 // ─── Constants ────────────────────────────────────────────────────
 
 const DEFAULT_BASE_DIR = path.join(os.homedir(), ".yuan", "sessions");
@@ -58,6 +63,7 @@ export interface SessionSnapshot {
   tokenUsage: { input: number; output: number };
   /** 대화 메시지 수 */
   messageCount: number;
+  changedFiles?: string[];
   /** 작업 요약 (자동 생성) */
   summary?: string;
 }
@@ -69,7 +75,7 @@ export interface SessionData {
   /** 대화 히스토리 */
   messages: Message[];
   /** 현재 실행 계획 (있으면) */
-  plan: ExecutionPlan | null;
+plan: HierarchicalPlan | null;
   /** 변경된 파일 목록 */
   changedFiles: string[];
 
@@ -126,13 +132,20 @@ export interface CheckpointData {
  */
 export class SessionPersistence {
   private readonly baseDir: string;
-
+ private readonly lastSessionFile: string;
   /**
-   * @param baseDir 세션 저장 기본 디렉토리 (기본: ~/.yuan/sessions/)
++   * @param baseDir 세션 저장 기본 디렉토리
++   * @param workspaceDir workspace 루트 (미지정 시 process.cwd() 기준)
    */
-  constructor(baseDir?: string) {
-    this.baseDir = baseDir ?? DEFAULT_BASE_DIR;
+  constructor(baseDir?: string, workspaceDir?: string) {
+    const resolvedWorkspaceDir = workspaceDir ?? process.cwd();
+    const yuanDir = path.join(resolvedWorkspaceDir, YUAN_DIRNAME);
+
+    this.baseDir =
+      baseDir ?? path.join(yuanDir, YUAN_SESSIONS_DIRNAME);
+    this.lastSessionFile = path.join(yuanDir, YUAN_LAST_SESSION_FILENAME);
     this.ensureDir(this.baseDir);
+    this.ensureDir(path.dirname(this.lastSessionFile));
   }
 
   // ─── Save ───
@@ -213,30 +226,27 @@ export class SessionPersistence {
 
     try {
       // 기본 데이터 + 런타임 상태를 병렬 로드
-      const [
-        snapshot,
-        messages,
-        plan,
-        checkpoint,
-        planGraphState,
-        runtimeState,
-        contextBudgetState,
-        reflectionLearnings,
-        reflectionMonologue,
-      ] = await Promise.all([
-        this.readJson<SessionSnapshot>(path.join(sessionDir, "state.json")),
-        this.readJson<Message[]>(path.join(sessionDir, "messages.json")),
-        this.readJson<ExecutionPlan | null>(path.join(sessionDir, "plan.json")),
-        this.readJson<CheckpointData>(path.join(sessionDir, "checkpoint.json")),
-        this.readJson<unknown>(path.join(sessionDir, "plan-graph.json")),
-        this.readJson<{ stateMachinePhase?: string; stepIndex?: number }>(
-          path.join(sessionDir, "runtime-state.json"),
-        ),
-        this.readJson<unknown>(path.join(sessionDir, "context-budget.json")),
-        this.readJson<unknown[]>(path.join(sessionDir, "learnings.json")),
-        this.readJson<unknown[]>(path.join(sessionDir, "monologue.json")),
-      ]);
-
+ const [
+   snapshot,
+   messages,
+   plan,
+   checkpoint,
+   planGraphState,
+   runtimeState,
+   contextBudgetState,
+   reflectionLearnings,
+   reflectionMonologue,
+ ] = await Promise.all([
+   this.readJson<SessionSnapshot>(path.join(sessionDir, "state.json")),
+   this.readJson<Message[]>(path.join(sessionDir, "messages.json")),
+   this.readJson<HierarchicalPlan | null>(path.join(sessionDir, "plan.json")),
+   this.readJson<CheckpointData>(path.join(sessionDir, "checkpoint.json")),
+   this.readJson<unknown>(path.join(sessionDir, "plan-graph.json")),
+   this.readJson<{ stateMachinePhase?: string; stepIndex?: number }>(path.join(sessionDir, "runtime-state.json")),
+   this.readJson<unknown>(path.join(sessionDir, "context-budget.json")),
+   this.readJson<unknown[]>(path.join(sessionDir, "learnings.json")),
+   this.readJson<unknown[]>(path.join(sessionDir, "monologue.json")),
+ ]);
       if (!snapshot) return null;
 
       const data: SessionData = {
@@ -245,7 +255,10 @@ export class SessionPersistence {
         plan: plan ?? null,
         changedFiles: checkpoint?.changedFiles ?? [],
       };
-
+// reasoning replay protection
+if ((globalThis as any).__yuan_reasoning_seen) {
+  (globalThis as any).__yuan_reasoning_seen.clear();
+}
       // 런타임 상태 복원 (파일이 없으면 undefined로 남음)
       if (planGraphState !== null) {
         data.planGraphState = planGraphState;
@@ -280,9 +293,9 @@ export class SessionPersistence {
    */
   async getLastSessionId(): Promise<string | null> {
     try {
-      if (fs.existsSync(LAST_SESSION_FILE)) {
+      if (fs.existsSync(this.lastSessionFile)) {
         const content = await fs.promises.readFile(
-          LAST_SESSION_FILE,
+          this.lastSessionFile,
           "utf-8",
         );
         return content.trim() || null;
@@ -364,6 +377,9 @@ export class SessionPersistence {
       snapshot.iteration = checkpoint.iteration;
       snapshot.tokenUsage = checkpoint.tokenUsage;
       snapshot.updatedAt = checkpoint.timestamp;
+if (checkpoint.changedFiles) {
+  snapshot.changedFiles = checkpoint.changedFiles;
+}
       await this.writeJson(stateFile, snapshot);
     }
   }
@@ -560,9 +576,9 @@ export class SessionPersistence {
   }
 
   private async setLastSessionId(sessionId: string): Promise<void> {
-    const dir = path.dirname(LAST_SESSION_FILE);
+    const dir = path.dirname(this.lastSessionFile);
     this.ensureDir(dir);
-    await fs.promises.writeFile(LAST_SESSION_FILE, sessionId, "utf-8");
+   await fs.promises.writeFile(this.lastSessionFile, sessionId, "utf-8");
   }
 
   private async writeJson(filePath: string, data: unknown): Promise<void> {

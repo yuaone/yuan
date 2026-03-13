@@ -218,11 +218,18 @@ export class DynamicRoleGenerator {
       typeof obj.name !== "string" ||
       typeof obj.description !== "string" ||
       typeof obj.systemPrompt !== "string" ||
-      typeof obj.reason !== "string" ||
-      !Array.isArray(obj.allowedTools)
+      typeof obj.reason !== "string"
     ) {
       throw new Error("Dynamic role response has invalid field types");
     }
+
+    if (!Array.isArray(obj.allowedTools)) {
+      throw new Error("Dynamic role allowedTools must be an array");
+    }
+
+    const allowedTools = obj.allowedTools.filter(
+      (t): t is string => typeof t === "string"
+    );
 
     // name 형식 검증 (kebab-case)
     if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(obj.name)) {
@@ -235,7 +242,7 @@ export class DynamicRoleGenerator {
       name: obj.name,
       description: obj.description,
       systemPrompt: obj.systemPrompt,
-      allowedTools: obj.allowedTools as string[],
+      allowedTools,
       reason: obj.reason,
     };
   }

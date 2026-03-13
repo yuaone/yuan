@@ -405,7 +405,7 @@ export class TaskClassifier {
       if (matchCount > 0) {
         const currentScore = scores.get(rule.type) ?? 0;
         // Diminishing returns for multiple matches on same type
-        scores.set(rule.type, currentScore + rule.weight * (1 + Math.log(matchCount)));
+       scores.set(rule.type, currentScore + rule.weight * Math.min(matchCount, 3));
       }
     }
 

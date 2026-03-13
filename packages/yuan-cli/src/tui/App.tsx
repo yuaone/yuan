@@ -17,7 +17,6 @@ import { useTerminalSize } from "./hooks/useTerminalSize.js";
 import { useAgentStream } from "./hooks/useAgentStream.js";
 import { useKeyHandler } from "./hooks/useKeyHandler.js";
 import { StatusBar } from "./components/StatusBar.js";
-import { WelcomeBanner } from "./components/WelcomeBanner.js";
 import { MessageList } from "./components/MessageList.js";
 import { InputBox } from "./components/InputBox.js";
 import { FooterBar } from "./components/FooterBar.js";
@@ -44,6 +43,7 @@ function App({
   bridge,
   onExit,
 }: AppProps): React.JSX.Element {
+  const [currentModel, setCurrentModel] = useState(model);
   const { exit } = useApp();
   const { columns, rows } = useTerminalSize();
   const agentStream = useAgentStream();
@@ -63,7 +63,10 @@ function App({
 
   // Slash command state
   const [slashState, slashActions] = useSlashCommands();
-
+  const [updateInfo, setUpdateInfo] = useState<{
+    current: string;
+    latest: string;
+  } | null>(null);
   // Wire bridge events to useAgentStream — runs once on mount
   useEffect(() => {
     bridge.onEvent((event: AgentEvent) => {
@@ -182,6 +185,7 @@ function App({
           createdAt: Date.now(),
         },
         onModelChange: (newModel) => {
+          setCurrentModel(newModel);
           agentStream.addSystemMessage(`Model changed to: ${newModel} (takes effect on next message)`);
         },
         onModeChange: (newMode) => {
@@ -212,35 +216,62 @@ function App({
 
   // Check for updates on mount (non-blocking)
   useEffect(() => {
-    checkForUpdate(version).then((info) => {
-      if (info?.hasUpdate) {
-        const settings = loadSettings();
-        if (settings.autoUpdate === "auto") {
-          agentStream.addSystemMessage(
-            `Updating YUAN ${info.currentVersion} → ${info.latestVersion}...`,
-          );
-          import("./lib/update-checker.js").then(({ performUpdate }) => {
-            performUpdate().then((ok) => {
-              agentStream.addSystemMessage(
-                ok
-                  ? `Updated to ${info.latestVersion}. Restart to apply.`
-                  : "Update failed. Run: npm i -g @yuaone/cli@latest",
-              );
-            });
-          });
-        } else if (settings.autoUpdate === "prompt") {
-          agentStream.addSystemMessage(
-            `Update available: ${info.currentVersion} → ${info.latestVersion}\n` +
-            `  Run: pnpm add -g @yuaone/cli@latest\n` +
-            `  Or: /settings to enable auto-update`,
-          );
-        }
-      }
-    }).catch(() => {
-      // Non-critical — silently ignore
-    });
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+   const timer = setTimeout(() => {
+      checkForUpdate(version)
+        .then((info) => {
+          if (!info?.hasUpdate) return;
 
+          setUpdateInfo({
+            current: info.currentVersion,
+            latest: info.latestVersion,
+          });
+
+          const settings = loadSettings();
+
+          if (settings.autoUpdate === "auto") {
+            agentStream.addSystemMessage(
+              `Updating YUAN ${info.currentVersion} → ${info.latestVersion}...`,
+            );
+
+            import("./lib/update-checker.js").then(({ performUpdate }) => {
+              performUpdate().then((ok) => {
+                agentStream.addSystemMessage(
+                  ok
+                    ? `Updated to ${info.latestVersion}. Restart to apply.`
+                    : "Update failed. Run: pnpm install -g @yuaone/cli@latest",
+                );
+              });
+            });
+          } else if (settings.autoUpdate === "prompt") {
+            agentStream.addSystemMessage(
+              `Update available: ${info.currentVersion} → ${info.latestVersion}\n` +
+              `  Run: pnpm install -g @yuaone/cli@latest\n` +
+              `  Or: /settings to enable auto-update`,
+            );
+          }
+        })
+        .catch(() => {
+          // Non-critical — silently ignore
+        });
+    }, 2000);
+
+    return () => clearTimeout(timer);
+  }, [version, agentStream]);
+
+  // Insert welcome banner as system message (scrollable like chat)
+  useEffect(() => {
+    if (agentStream.state.messages.length === 0) {
+      agentStream.addSystemMessage(
+
+
+`YUAN v${version}
+Autonomous Coding Agent
+
+Type /help for commands
+yuaone.com`
+      );
+    }
+  }, []);
   // Input change → open/close slash menu
   const handleInputChange = useCallback(
     (value: string) => {
@@ -306,39 +337,32 @@ function App({
   // Slash menu is BELOW input (Claude Code style), so it still eats from content area
   const contentHeight = useMemo(() => Math.max(3, rows - 4 - slashMenuRows), [rows, slashMenuRows]);
 
-  const messages = agentStream.state.messages;
-  const showBanner = messages.length === 0 && !isRunning;
-
-  // Banner takes ~6 rows (5 lines + 1 margin)
-  const bannerRows = showBanner ? 7 : 0;
-  const messageHeight = Math.max(3, contentHeight - bannerRows);
+const messages = agentStream.state.messages;
 
   return (
     <Box flexDirection="column" width={columns} height={rows}>
       {/* Top bar */}
       <StatusBar
         version={version}
-        model={model}
+        model={currentModel}
         provider={provider}
         tokensPerSec={agentStream.state.tokensPerSecond || tokensPerSec}
         isRunning={isRunning}
+        updateAvailable={updateInfo}
       />
 
-      {/* Welcome banner — shown only when no messages, like Claude Code */}
-      {showBanner && <WelcomeBanner version={version} />}
-
       {/* Message area — shrinks when slash menu opens below input */}
-      <MessageList
+     <MessageList
         messages={messages}
         isThinking={isRunning}
-        maxHeight={showBanner ? messageHeight : contentHeight}
+        maxHeight={contentHeight}
       />
 
       {/* Approval prompt — shown when agent needs user approval for a tool call */}
-      {isAwaitingApproval && approvalToolName && (
+      {agentStream.state.status === "awaiting_approval" && (
         <ApprovalPrompt
-          toolName={approvalToolName}
-          toolArgs={approvalToolArgs ?? undefined}
+     toolName={agentStream.state.currentToolName ?? "tool"}
+     toolArgs={agentStream.state.currentToolArgs ?? undefined}
           onSelect={handleApproval}
         />
       )}

@@ -300,6 +300,7 @@ export class DebateOrchestrator extends EventEmitter {
   private readonly config: DebateConfig;
   private rounds: DebateRound[] = [];
   private totalTokens = 0;
+  private llmClient?: BYOKClient;
   private readonly roleTokens: RoleTokenUsage = {
     coder: { input: 0, output: 0 },
     reviewer: { input: 0, output: 0 },
@@ -313,6 +314,9 @@ export class DebateOrchestrator extends EventEmitter {
       ...DEFAULT_CONFIG,
       ...config,
     };
+    if (this.config.byokConfig) {
+      this.llmClient = new BYOKClient(this.config.byokConfig);
+    }
   }
 
   /**
@@ -353,6 +357,7 @@ export class DebateOrchestrator extends EventEmitter {
       if (this.config.abortSignal?.aborted) break;
 
       this.emit("debate:coder", { round, output: this.truncate(coderOutput, 500) });
+      this.extractFilePaths(coderOutput);
 
       // Step 2: Reviewer critiques the code
       const review = await this.runReviewer(coderOutput, task, round);
@@ -386,7 +391,10 @@ export class DebateOrchestrator extends EventEmitter {
           verifierResult: verification,
         };
         this.rounds.push(debateRound);
-
+        this.emit("debate:round:end", {
+          round,
+          issueCount: review.issues.length,
+        });
         if (verification.passed && verification.score >= this.config.qualityThreshold) {
           this.emit("debate:pass", { round, score: verification.score });
           return this.buildResult(verification);
@@ -398,6 +406,7 @@ export class DebateOrchestrator extends EventEmitter {
       if (this.config.abortSignal?.aborted) break;
 
       this.emit("debate:revision", { round, output: this.truncate(revision, 500) });
+      this.extractFilePaths(revision);
 
       // If we didn't push a round with verification yet (had critical issues), push now
       if (criticalOrMajor.length > 0 || !this.config.verifyBetweenRounds) {
@@ -576,14 +585,14 @@ export class DebateOrchestrator extends EventEmitter {
 
     if (this.config.toolExecutor) {
       const buildResult = await this.runToolSafe("shell_exec", {
-        command: "pnpm run build --dry-run 2>&1 || echo 'BUILD_CHECK_SKIPPED'",
+        command: "pnpm run build --if-present 2>&1",
         cwd: this.config.projectPath,
       });
       buildPassed = buildResult.success;
       buildOutput = buildResult.output;
 
       const testResult = await this.runToolSafe("shell_exec", {
-        command: "pnpm run test --passWithNoTests 2>&1 || echo 'TEST_CHECK_SKIPPED'",
+        command: "pnpm run test --if-present 2>&1",
         cwd: this.config.projectPath,
       });
       testsPassed = testResult.success;
@@ -646,14 +655,12 @@ export class DebateOrchestrator extends EventEmitter {
       return `[LLM not configured — ${role} agent would process: ${this.truncate(userMessage, 200)}]`;
     }
 
-    const byokConfig: BYOKConfig = {
-      ...this.config.byokConfig,
-    };
+    const byokConfig: BYOKConfig = { ...this.config.byokConfig };
     if (model) {
       byokConfig.model = model;
     }
 
-    const client = new BYOKClient(byokConfig);
+const client = this.llmClient ?? new BYOKClient(byokConfig);
 
     try {
       const response = await client.chat([
@@ -663,9 +670,17 @@ export class DebateOrchestrator extends EventEmitter {
 
       // Track token usage
       const usage = response.usage;
+ const newTotal = this.totalTokens + usage.input + usage.output;
+
+ if (newTotal > this.config.totalTokenBudget) {
+        throw new Error(
+          `[DebateOrchestrator] ${role} token budget exceeded: ` +
+          `${newTotal}/${this.config.totalTokenBudget}`,
+        );
+      }
       this.roleTokens[role].input += usage.input;
       this.roleTokens[role].output += usage.output;
-      this.totalTokens += usage.input + usage.output;
+      this.totalTokens = newTotal;
 
       this.emit("debate:token_usage", {
         role,
@@ -677,8 +692,10 @@ export class DebateOrchestrator extends EventEmitter {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`[DebateOrchestrator] ${role} LLM call failed: ${message}`);
-    }
+    } 
   }
+
+
 
   // ─── Tool Execution ───────────────────────────────────────────
 
@@ -823,10 +840,14 @@ export class DebateOrchestrator extends EventEmitter {
    * Extract JSON from a response that might contain markdown fencing or extra text.
    */
   private extractJson(text: string): string {
+    text = text.trim();
     // Try ```json ... ``` pattern first
     const fenced = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
     if (fenced) return fenced[1].trim();
-
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    return jsonMatch[0];
+  }
     // Try to find raw JSON object
     const firstBrace = text.indexOf("{");
     const lastBrace = text.lastIndexOf("}");
@@ -886,7 +907,7 @@ export class DebateOrchestrator extends EventEmitter {
     }
 
     if (round.coderRevision) {
-      sections.push(`\n### Last Revision\n${this.truncate(round.coderRevision, 4000)}`);
+      sections.push(`\n### Last Revision\n${this.truncate(round.coderRevision, 2000)}`);
     } else {
       sections.push(`\n### Last Code Output\n${this.truncate(round.coderOutput, 4000)}`);
     }
@@ -899,13 +920,6 @@ export class DebateOrchestrator extends EventEmitter {
    */
   private buildResult(finalVerification: VerifierResult): DebateResult {
     const roundCount = this.rounds.length;
-    const lastRound = this.rounds[roundCount - 1];
-
-    // Extract changed files from code output (look for file paths)
-    if (lastRound) {
-      const output = lastRound.coderRevision ?? lastRound.coderOutput;
-      this.extractFilePaths(output);
-    }
 
     const success =
       finalVerification.passed &&
@@ -938,7 +952,7 @@ export class DebateOrchestrator extends EventEmitter {
    */
   private extractFilePaths(text: string): void {
     // Match common file path patterns
-    const pathPattern = /(?:^|\s|`)((?:[\w.-]+\/)+[\w.-]+\.\w+)/gm;
+    const pathPattern = /(?:^|\s|`)((?:src|lib|app|test|packages)\/[\w./-]+\.\w+)/gm;
     let match: RegExpExecArray | null;
     while ((match = pathPattern.exec(text)) !== null) {
       const filePath = match[1];

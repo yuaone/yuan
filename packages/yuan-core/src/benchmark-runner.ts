@@ -112,7 +112,11 @@ function execWithTimeout(
       resolve({
         stdout: typeof stdout === "string" ? stdout : "",
         stderr: typeof stderr === "string" ? stderr : "",
-        exitCode: error ? (error as NodeJS.ErrnoException & { code?: number }).code ?? 1 : 0,
+        exitCode: error 
+  ? typeof (error as any).code === "number"
+    ? (error as any).code
+    : 1
+        : 0,
       });
     });
 

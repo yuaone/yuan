@@ -98,7 +98,15 @@ export class PluginValidator {
     const stage = validator.stage as ValidatorStage;
     const severity = this.mapSeverity(validator.severity);
     const check = validator.check;
-
+if (!check) {
+  return {
+    passed: true,
+    stage,
+    validatorId: validator.id,
+    message: "No check defined",
+    severity: "info",
+  };
+}
     // Determine if `check` is a command or a pattern
     const isCommand = check.includes(" ") && !check.startsWith("/");
 
@@ -106,7 +114,7 @@ export class PluginValidator {
       // Pattern-based validation: treat `check` as a regex
       const patternStr = check.startsWith("/") ? check.slice(1) : check;
       try {
-        const regex = new RegExp(patternStr, "i");
+        const regex = new RegExp(patternStr.slice(0, 200), "i");
 
         // Check against error output
         if (context.errorOutput && regex.test(context.errorOutput)) {

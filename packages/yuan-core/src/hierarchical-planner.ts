@@ -22,7 +22,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExecutionPlan, PlanStep, Message } from "./types.js";
 import type { BYOKClient } from "./llm-client.js";
-
+import type { SkillLearner } from "./skill-learner.js";
 // ─── Public Types ───
 
 /** Planning level identifier */
@@ -246,7 +246,11 @@ export class HierarchicalPlanner {
   private readonly config: Required<HierarchicalPlannerConfig>;
   private projectContext: string;
   private milestones: Map<string, Milestone> = new Map();
+private skillLearner: SkillLearner | null = null;
 
+setSkillLearner(learner: SkillLearner) {
+  this.skillLearner = learner;
+}
   constructor(config: HierarchicalPlannerConfig) {
     this.config = {
       projectPath: config.projectPath,
@@ -273,15 +277,33 @@ export class HierarchicalPlanner {
    * @param projectContext - Optional pre-gathered project context
    * @returns Strategic goal with sub-goals, complexity, and risk assessment
    */
-  async planStrategic(
-    goal: string,
-    llmClient: BYOKClient,
-    projectContext?: string,
-  ): Promise<StrategicGoal> {
-    const ctx = projectContext ?? await this.gatherProjectContext();
-    this.projectContext = ctx;
+async planStrategic(
+  goal: string,
+  llmClient: BYOKClient,
+  projectContext?: string,
+): Promise<StrategicGoal> {
 
-    const prompt = this.buildStrategicPrompt(goal, ctx);
+  const ctx = projectContext ?? await this.gatherProjectContext();
+
+  let skillHint = "";
+
+  if (this.skillLearner) {
+    const skills = this.skillLearner.getRelevantSkills({
+      errorMessage: goal,
+    });
+
+    if (skills.length > 0) {
+      const best = skills[0];
+      skillHint =
+        `\n\n## Learned Skill Hint\n` +
+        `Diagnosis: ${best.diagnosis}\n` +
+        `Strategy: ${best.strategy}\n` +
+        `Tool sequence: ${best.toolSequence.join(" → ")}\n`;
+    }
+  }
+
+  const prompt = this.buildStrategicPrompt(goal, ctx + skillHint);
+
     const messages: Message[] = [
       { role: "system", content: prompt },
       { role: "user", content: goal },
@@ -1093,7 +1115,21 @@ Respond with ONLY a JSON object (no markdown fences):
           estimatedIterations: (sg.estimatedIterations as number) ?? 5,
           modelPreference: sg.modelPreference as string | undefined,
         }));
+        if (this.skillLearner) {
+          const skills = this.skillLearner.getRelevantSkills({
+            errorMessage: fallbackGoal,
+          });
 
+          if (skills.length > 0) {
+            const best = skills[0];
+            for (const sg of subGoals) {
+              if (!sg.toolStrategy || sg.toolStrategy.length <= 1) {
+                sg.toolStrategy = [...best.toolSequence];
+              }
+            }
+          }
+        }
+ 
         const rawRisk = (parsed.riskAssessment ?? {}) as Record<string, unknown>;
 
         return {

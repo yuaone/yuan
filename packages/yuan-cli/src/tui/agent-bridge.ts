@@ -83,10 +83,11 @@ export class AgentBridge {
     this.isProcessing = true;
 
     const { provider, apiKey, model, baseUrl, workDir, useExecutionEngine } = this.config;
+    const normalizedProvider = this.toProvider(provider);
 
     // Build BYOK config
     const byokConfig: BYOKConfig = {
-      provider: provider as "openai" | "anthropic" | "yua",
+     provider: normalizedProvider,
       apiKey,
       model,
       baseUrl,
@@ -212,7 +213,13 @@ export class AgentBridge {
     engine.on("text_delta", (text: string) => {
       this.eventCallback?.({ kind: "agent:text_delta", text } as AgentEvent);
     });
-
+engine.on("token_usage", (usage: { input: number; output: number }) => {
+  this.eventCallback?.({
+    kind: "agent:token_usage",
+    input: usage.input,
+    output: usage.output,
+  } as AgentEvent);
+});
     engine.on("thinking", (text: string) => {
       this.eventCallback?.({ kind: "agent:thinking", content: text } as AgentEvent);
     });
@@ -310,5 +317,16 @@ export class AgentBridge {
   /** Reset file tracking */
   resetChangedFiles(): void {
     this.changedFiles = [];
+  }
+  private toProvider(provider: string): BYOKConfig["provider"] {
+    switch (provider) {
+      case "openai":
+      case "anthropic":
+      case "google":
+      case "yua":
+        return provider;
+      default:
+        return "openai";
+    }
   }
 }

@@ -140,7 +140,8 @@ export class ProgressRenderer {
   private thinkingBuffer = "";
   private thinkingTimer: ReturnType<typeof setTimeout> | null = null;
   private currentPhase: AgentPhase | null = null;
-
+  private recentThinkingLines: string[] = [];
+  private static readonly MAX_RECENT_THINKING_LINES = 24;
   constructor(config: ProgressRendererConfig) {
     this.config = config;
   }
@@ -197,8 +198,21 @@ export class ProgressRenderer {
   onThinking(delta: string): void {
     if (!this.config.showThinking) return;
 
-    this.thinkingBuffer += delta;
+    const normalized = this.normalizeThinkingChunk(delta);
+    if (!normalized) return;
 
+    if (this.isRecentlyRendered(normalized)) {
+      return;
+    }
+
+    this.thinkingBuffer += (this.thinkingBuffer ? " " : "") + normalized;
+    // sentence boundary flush (Claude-style)
+    const SENTENCE_BREAK = /[.!?。\n]\s*$/;
+
+    if (SENTENCE_BREAK.test(this.thinkingBuffer)) {
+      this.flushThinking();
+      return;
+    }
     if (this.thinkingTimer) clearTimeout(this.thinkingTimer);
     this.thinkingTimer = setTimeout(() => {
       this.flushThinking();
@@ -207,14 +221,48 @@ export class ProgressRenderer {
 
   /** Flush any buffered thinking text to stdout. */
   private flushThinking(): void {
+    if (this.thinkingBuffer.length > 4000) {
+      this.thinkingBuffer = this.thinkingBuffer.slice(-2000);
+    }
     if (!this.thinkingBuffer) return;
     const width = termWidth() - 4; // indent
-    const text = this.thinkingBuffer;
+    const text = this.normalizeThinkingChunk(this.thinkingBuffer);
     this.thinkingBuffer = "";
     this.thinkingTimer = null;
+    if (!text) return;
+    // detect subagent lifecycle
+    const subagentMatch = text.match(/\[(\w+):(start|done)\]\s*(.*)/);
+    if (subagentMatch) {
+      const [, agent, phase, msg] = subagentMatch;
+      const subagentLine = `[${agent}:${phase}] ${msg ?? ""}`.trim();
 
-    const lines = this.wrapText(text, width);
-    for (const line of lines) {
+      if (this.isRecentlyRendered(subagentLine)) {
+        return;
+      }
+      this.rememberThinkingLine(subagentLine);
+      const color =
+        phase === "start" ? colors.cyan :
+        phase === "done" ? colors.green :
+        colors.gray;
+
+      console.log(
+        c(color, `  ${agent}:${phase}`) +
+        (msg ? c(colors.dim, ` ${msg}`) : "")
+      );
+      return;
+    }
+    const wrappedLines = this.wrapText(text, width);
+    const dedupedLines: string[] = [];
+
+    for (const line of wrappedLines) {
+      const normalizedLine = this.normalizeThinkingChunk(line);
+      if (!normalizedLine) continue;
+      if (this.isRecentlyRendered(normalizedLine)) continue;
+      dedupedLines.push(normalizedLine);
+    }
+
+    for (const line of dedupedLines) {
+      this.rememberThinkingLine(line);
       console.log(c(colors.gray + colors.dim, `  ${line}`));
     }
   }
@@ -236,6 +284,37 @@ export class ProgressRenderer {
       remaining = remaining.slice(breakIdx).trimStart();
     }
     return result;
+  }
+
+ private normalizeThinkingChunk(text: string): string {
+    return text
+      .replace(/\r/g, "")
+      .replace(/[ \t]+/g, " ")
+      .replace(/\n{2,}/g, "\n")
+      .trim();
+  }
+
+  private isRecentlyRendered(text: string): boolean {
+    const normalized = this.normalizeThinkingChunk(text);
+    if (!normalized) return true;
+    return this.recentThinkingLines.includes(normalized);
+  }
+
+  private rememberThinkingLine(text: string): void {
+    const normalized = this.normalizeThinkingChunk(text);
+    if (!normalized) return;
+
+    this.recentThinkingLines.push(normalized);
+    if (
+      this.recentThinkingLines.length >
+      ProgressRenderer.MAX_RECENT_THINKING_LINES
+    ) {
+      this.recentThinkingLines.splice(
+        0,
+        this.recentThinkingLines.length -
+          ProgressRenderer.MAX_RECENT_THINKING_LINES,
+      );
+    }
   }
 
   // ─── Iteration Progress ───

@@ -1321,8 +1321,8 @@ export class CrossFileRefactor {
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
         if (this.isCommentLine(line)) continue;
-        if (!symbolRe.test(line)) continue;
-        symbolRe.lastIndex = 0;
+symbolRe.lastIndex = 0;
+if (!symbolRe.test(line)) continue;
 
         // Check that the match is not inside a string literal
         if (this.isInStringLiteral(line, symbolName)) continue;
@@ -1773,7 +1773,11 @@ export class CrossFileRefactor {
     const lines = content.split("\n");
 
     // Sort changes by startLine descending so later changes don't shift earlier ones
-    const sorted = [...changes].sort((a, b) => b.startLine - a.startLine);
+    const sorted = [...changes].
+     sort((a,b)=>{
+   if(b.startLine!==a.startLine) return b.startLine-a.startLine
+   return b.endLine-a.endLine
+ });
 
     for (const change of sorted) {
       const startIdx = change.startLine - 1;

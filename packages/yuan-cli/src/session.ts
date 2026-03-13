@@ -41,6 +41,9 @@ export interface SessionData {
   status: SessionStatus;
   iteration: number;
   tokenUsage: { input: number; output: number };
+ // restoreSession() compatibility
+  changedFiles?: string[];
+  plan?: PersistentSessionData["plan"];
 }
 
 /**
@@ -95,8 +98,8 @@ export class SessionManager {
         role: m.role as "system" | "user" | "assistant",
         content: m.content,
       })),
-      plan: null,
-      changedFiles: [],
+  plan: session.plan ?? null,
+  changedFiles: session.changedFiles ?? [],
     };
 
     // Ensure session directory exists SYNCHRONOUSLY before any async writes.
@@ -198,6 +201,7 @@ export class SessionManager {
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
         try {
+          const sessionDir = path.join(SESSIONS_DIR, entry.name);
           const stateFile = path.join(SESSIONS_DIR, entry.name, "state.json");
           const messagesFile = path.join(SESSIONS_DIR, entry.name, "messages.json");
 
@@ -206,7 +210,18 @@ export class SessionManager {
           const snapshot = JSON.parse(
             fs.readFileSync(stateFile, "utf-8"),
           ) as SessionSnapshot;
+ let checkpoint: CheckpointData | null = null;
 
+ const checkpointFile = path.join(sessionDir, "checkpoint.json");
+ if (fs.existsSync(checkpointFile)) {
+   try {
+     checkpoint = JSON.parse(
+       fs.readFileSync(checkpointFile, "utf-8")
+     ) as CheckpointData;
+   } catch {
+     checkpoint = null;
+   }
+ }
           let messages: SessionMessage[] = [];
           if (fs.existsSync(messagesFile)) {
             const rawMessages = JSON.parse(
@@ -228,8 +243,10 @@ export class SessionManager {
             provider: snapshot.provider,
             model: snapshot.model,
             status: snapshot.status,
-            iteration: snapshot.iteration,
-            tokenUsage: snapshot.tokenUsage,
+  iteration: checkpoint?.iteration ?? snapshot.iteration,
+  tokenUsage: checkpoint?.tokenUsage ?? snapshot.tokenUsage,
+  changedFiles: checkpoint?.changedFiles ?? [],
+  plan: null,
           });
         } catch {
           // Skip corrupted sessions
@@ -254,7 +271,17 @@ export class SessionManager {
   }
 
   // ─── Private ───
-
+toPersistent(session: SessionData): PersistentSessionData {
+  return {
+    snapshot: this.toSnapshot(session),
+    messages: session.messages.map((m) => ({
+      role: m.role as "system" | "user" | "assistant",
+      content: m.content,
+    })),
+    plan: session.plan ?? null,
+    changedFiles: session.changedFiles ?? [],
+  };
+}
   private toSnapshot(session: SessionData): SessionSnapshot {
     return {
       id: session.id,
@@ -308,7 +335,10 @@ export class SessionManager {
         model: snapshot.model,
         status: snapshot.status,
         iteration: snapshot.iteration,
-        tokenUsage: snapshot.tokenUsage,
+        tokenUsage: snapshot.tokenUsage ?? {
+          input: 0,
+          output: 0,
+        },
       };
     } catch {
       return null;

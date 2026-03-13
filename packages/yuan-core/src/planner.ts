@@ -6,7 +6,7 @@
  */
 
 import { readFile, readdir } from "node:fs/promises";
-import { join, extname, relative } from "node:path";
+import { join, extname, relative, dirname } from "node:path";
 import type {
   ExecutionPlan,
   PlanStep,
@@ -128,6 +128,7 @@ export class Planner {
       tools,
       estimatedIterations: Math.max(3, targetFiles.length * 2),
       dependsOn: [],
+      role: "coder",
     };
 
     return {
@@ -223,7 +224,7 @@ Rules:
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       try {
-        const parsed = JSON.parse(jsonMatch[0]) as {
+        const parsed = JSON.parse(jsonMatch[0].trim()) as {
           goal?: string;
           steps?: Array<{
             id?: string;
@@ -247,6 +248,7 @@ Rules:
             tools: s.tools ?? ["file_read", "file_edit"],
             estimatedIterations: s.estimatedIterations ?? 5,
             dependsOn: s.dependsOn ?? [],
+            role: (s as any).role ?? "coder",
           })),
           estimatedTokens: parsed.estimatedTokens ?? 30_000,
         };
@@ -349,8 +351,8 @@ Rules:
     fromFile: string,
     importSource: string,
   ): string {
-    const dir = join(fromFile, "..");
-    const resolved = join(dir, importSource);
+ const dir = dirname(fromFile);
+ const resolved = join(dir, importSource);
     return relative(this.config.projectPath, resolved);
   }
 }

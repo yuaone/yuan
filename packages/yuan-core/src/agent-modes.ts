@@ -438,7 +438,11 @@ export function isToolAllowedInMode(mode: AgentMode, toolName: string): boolean 
   if (config.deniedTools?.includes(toolName)) {
     return false;
   }
-
+  // TEST MODE write 제한
+  if (mode === "test" && (toolName === "file_write" || toolName === "file_edit")) {
+    // 파일 경로 검증은 상위 executor에서 수행해야 함
+    return true; // tool 자체는 허용하지만 path guard 필요
+  }
   // allowedTools가 빈 배열이면 전체 허용 (deniedTools 제외)
   if (config.allowedTools.length === 0) {
     return true;

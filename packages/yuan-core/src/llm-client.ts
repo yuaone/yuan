@@ -5,7 +5,7 @@
  * openai SDK를 사용하여 OpenAI 호환 포맷으로 통신 (YUA도 OpenAI-compatible).
  * Anthropic은 별도 네이티브 포맷 변환 후 호출.
  */
-
+import { randomUUID } from "node:crypto";
 import OpenAI from "openai";
 import {
   type BYOKConfig,
@@ -33,10 +33,17 @@ export interface LLMResponse {
 
 /** 스트리밍 청크 */
 export interface LLMStreamChunk {
-  type: "text" | "tool_call" | "done";
+   type: "text" | "reasoning" | "tool_call" | "done";
   /** 텍스트 델타 (type=text) */
   text?: string;
   /** 도구 호출 정보 (type=tool_call, 완료 시) */
+  reasoning?: {
+    id?: string;
+    text: string;
+    provider?: string;
+    model?: string;
+    source?: "llm";
+  };
   toolCall?: ToolCall;
   /** 최종 사용량 (type=done) */
   usage?: { input: number; output: number };
@@ -51,6 +58,20 @@ export class BYOKClient {
   private readonly model: string;
   private openaiClient: OpenAI | null;
 
+  async embed(text: string): Promise<{ embedding: number[] }> {
+    if (!this.openaiClient) {
+      throw new Error("Embedding not supported for this provider");
+    }
+
+    const response = await this.openaiClient.embeddings.create({
+      model: "text-embedding-3-small",
+      input: text,
+    });
+
+    return {
+      embedding: response.data[0].embedding,
+    };
+  }
   constructor(config: BYOKConfig) {
     this.config = config;
     this.model = config.model ?? MODEL_DEFAULTS[config.provider];
@@ -160,20 +181,37 @@ export class BYOKClient {
 
       for await (const chunk of stream as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>) {
         try {
-          const delta = chunk.choices[0]?.delta;
+          const choice = chunk.choices?.[0];
+          const delta = choice?.delta as Record<string, unknown> | undefined;
+
+          if (delta) {
+            for (const reasoningChunk of this.extractOpenAICompatibleReasoning(delta)) {
+              yield reasoningChunk;
+            }
+          }
 
           // Text delta
-          if (delta?.content) {
+          if (typeof delta?.content === "string" && delta.content.length > 0) {
             yield { type: "text", text: delta.content };
           }
 
           // Tool call deltas
-          if (delta?.tool_calls) {
-            for (const tc of delta.tool_calls) {
-              const idx = tc.index;
+         const toolCallDeltas = Array.isArray(delta?.tool_calls)
+           ? (delta.tool_calls as Array<{
+               index?: number;
+                id?: string;
+                function?: {
+                  name?: string;
+                  arguments?: string;
+                };
+              }>)
+            : [];
+
+          for (const tc of toolCallDeltas) {
+              const idx = tc.index ?? 0;
               if (!toolCallAccumulators.has(idx)) {
                 toolCallAccumulators.set(idx, {
-                  id: tc.id ?? "",
+                 id: tc.id ?? `call_${idx}_${Date.now()}`,
                   name: tc.function?.name ?? "",
                   arguments: "",
                 });
@@ -183,7 +221,7 @@ export class BYOKClient {
               if (tc.function?.name) acc.name = tc.function.name;
               if (tc.function?.arguments)
                 acc.arguments += tc.function.arguments;
-            }
+            
           }
 
           // Usage (final chunk)
@@ -202,7 +240,7 @@ export class BYOKClient {
         yield {
           type: "tool_call",
           toolCall: {
-            id: acc.id,
+            id: acc.id || randomUUID(),
             name: acc.name,
             arguments: acc.arguments,
           },
@@ -349,7 +387,7 @@ export class BYOKClient {
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
+        const lines = buffer.split("\n\n");
         buffer = lines.pop() ?? "";
 
         for (const line of lines) {
@@ -379,7 +417,23 @@ export class BYOKClient {
             const delta = event.delta as Record<string, unknown> | undefined;
             if (delta?.type === "text_delta") {
               yield { type: "text", text: delta.text as string };
-            } else if (delta?.type === "input_json_delta") {
+            }
+            else if (delta?.type === "thinking_delta") {
+              const reasoningChunk = this.buildReasoningChunk(
+                delta.thinking,
+                typeof event.index === "number" ? String(event.index) : undefined,
+              );
+              if (reasoningChunk) {
+    yield {
+      ...reasoningChunk,
+      reasoning: {
+        ...reasoningChunk.reasoning!,
+        provider: "anthropic",
+      },
+    };
+              }
+            }
+            else if (delta?.type === "input_json_delta") {
               currentToolArgs += (delta.partial_json as string) ?? "";
             }
           } else if (eventType === "content_block_stop") {
@@ -480,7 +534,7 @@ export class BYOKClient {
       }
       return {
         role: msg.role as "user" | "system",
-        content: parts as unknown as string,
+        content: parts as any,
       } as OpenAI.Chat.ChatCompletionMessageParam;
     }
 
@@ -682,6 +736,84 @@ export class BYOKClient {
 
   // ─── Helpers ───
 
+  private buildReasoningChunk(
+    text: unknown,
+    id?: string,
+  ): LLMStreamChunk | null {
+    if (typeof text !== "string") return null;
+  const normalized = text;
+  if (!normalized || normalized.length === 0) return null;
+
+    return {
+      type: "reasoning",
+      reasoning: {
+       id: id ?? `reasoning-${Date.now()}`,
+        text: normalized,
+        provider: this.config.provider,
+        model: this.model,
+        source: "llm",
+      },
+    };
+  }
+
+  /**
+   * OpenAI-compatible / YUA / Google(OpenAI-compatible gateway) 스트림에서
+   * reasoning 유사 필드를 최대한 느슨하게 흡수한다.
+   *
+   * 주의:
+   * - provider가 실제로 reasoning delta를 보내지 않으면 아무것도 emit하지 않는다.
+   * - 일반 text(delta.content)는 reasoning으로 취급하지 않는다.
+   */
+  private extractOpenAICompatibleReasoning(
+    delta: Record<string, unknown>,
+  ): LLMStreamChunk[] {
+    const rawCandidates: unknown[] = [
+      delta.reasoning,
+      delta.reasoning_text,
+      delta.reasoning_content,
+      delta.thinking,
+      delta.thinking_delta,
+    ];
+
+    const chunks: LLMStreamChunk[] = [];
+  if (!(this as any)._reasoningSeen) {
+    (this as any)._reasoningSeen = new Set<string>();
+  }
+
+  const seen: Set<string> = (this as any)._reasoningSeen;
+
+    const pushCandidate = (value: unknown): void => {
+      if (value == null) return;
+
+      if (typeof value === "string") {
+        const chunk = this.buildReasoningChunk(value);
+        if (chunk && !seen.has(chunk.reasoning!.text)) {
+          seen.add(chunk.reasoning!.text);
+          chunks.push(chunk);
+        }
+        return;
+      }
+
+      if (Array.isArray(value)) {
+        for (const item of value) pushCandidate(item);
+        return;
+      }
+
+      if (typeof value !== "object") return;
+
+      const obj = value as Record<string, unknown>;
+      pushCandidate(obj.text);
+      pushCandidate(obj.reasoning);
+      pushCandidate(obj.thinking);
+      pushCandidate(obj.reasoning_text);
+    };
+
+    for (const candidate of rawCandidates) {
+      pushCandidate(candidate);
+    }
+
+    return chunks;
+  }
   private getBaseUrl(provider: LLMProvider): string {
     return PROVIDER_BASE_URLS[provider];
   }
@@ -699,6 +831,12 @@ export class BYOKClient {
         "x-api-key": this.config.apiKey,
       };
     }
+
+ if (provider === "google") {
+   return {
+     Authorization: `Bearer ${this.config.apiKey}`,
+   };
+ }
     return {};
   }
 

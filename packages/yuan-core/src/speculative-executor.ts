@@ -9,6 +9,9 @@
 
 import { EventEmitter } from "node:events";
 import { execSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { BYOKClient } from "./llm-client.js";
 import type { BYOKConfig, ToolExecutor, ToolCall } from "./types.js";
 
@@ -87,6 +90,9 @@ export interface SpeculativeExecutorEvents {
   "speculative:approach:complete": [payload: { result: ApproachResult }];
   "speculative:evaluation": [payload: { allResults: ApproachResult[]; winner: ApproachResult | null }];
   "speculative:complete": [payload: { result: SpeculativeResult }];
+  "speculative:tool_call": [payload: { approachId: string; tool: string }];
+  "speculative:reasoning_delta": [payload: { approachId: string; text: string }];
+  "speculative:timeline": [payload: { source: "speculative"; taskId: string; text: string }];
 }
 
 // ─── Constants ───
@@ -281,7 +287,18 @@ export class SpeculativeExecutor extends EventEmitter<SpeculativeExecutorEvents>
 
         const response = await this.llmClient.chat(messages, toolExecutor.definitions);
         tokensUsed += (response.usage.input + response.usage.output);
-
+// CLI event: reasoning stream
+if (response.content) {
+  this.emit("speculative:reasoning_delta", {
+    approachId: approach.id,
+    text: response.content,
+  });
+  this.emit("speculative:timeline", {
+    source: "speculative",
+    taskId: approach.id,
+    text: response.content,
+  });
+}
         // If no tool calls, the agent is done
         if (response.toolCalls.length === 0) {
           if (response.content) {
@@ -298,10 +315,17 @@ export class SpeculativeExecutor extends EventEmitter<SpeculativeExecutorEvents>
         });
 
         for (const toolCall of response.toolCalls) {
+          // CLI event: tool call
+          this.emit("speculative:tool_call", {
+            approachId: approach.id,
+            tool: toolCall.name,
+          });
           const result = await toolExecutor.execute(toolCall);
           messages.push({
             role: "tool",
-            content: result.output,
+ content: typeof result.output === "string"
+   ? result.output
+   : JSON.stringify(result.output),
             tool_call_id: toolCall.id,
           });
 
@@ -411,65 +435,37 @@ export class SpeculativeExecutor extends EventEmitter<SpeculativeExecutorEvents>
     // 2. Execute approaches SEQUENTIALLY with git-based isolation.
     //    Each approach runs on a clean working tree; changes are stashed
     //    after execution so subsequent approaches start from the same baseline.
-    const allSettled: PromiseSettledResult<ApproachResult>[] = [];
+ 
+ const settledResults: PromiseSettledResult<ApproachResult>[] = [];
 
-    for (const approach of approaches) {
-      this.emit("speculative:approach:start", { approach });
+ for (const approach of approaches) {
+   try {
+     this.emit("speculative:approach:start", { approach });
 
-      // Snapshot: stash any uncommitted changes so each approach starts clean
-      const stashLabel = `yuan-speculative-${approach.id}-${Date.now()}`;
-      try {
-        execSync("git stash push -u -q -m " + JSON.stringify(stashLabel), {
-          cwd: this.config.projectPath,
-          encoding: "utf-8",
-          timeout: 10_000,
-        });
-      } catch {
-        // Not a git repo or nothing to stash — continue
-      }
+     const { path: worktreePath, cleanup } = this.createWorktree();
+     const isolatedToolExecutor = this.createScopedToolExecutor(
+       toolExecutor,
+       worktreePath,
+     );
 
-      try {
-        const result = await this.withTimeout(
-          this.executeApproach(approach, goal, toolExecutor),
-          this.config.approachTimeout,
-          approach,
-        );
+     const result = await this.withTimeout(
+       this.executeApproach(
+         approach,
+         goal,
+         isolatedToolExecutor,
+       ),
+       this.config.approachTimeout,
+       approach,
+     );
 
-        // Capture file changes from the working tree into the result
-        this.emit("speculative:approach:complete", { result });
+     this.emit("speculative:approach:complete", { result });
+     cleanup();
 
-        // Restore baseline: discard approach's filesystem changes, keep result in memory
-        try {
-          execSync("git checkout -- . && git clean -fd -q", {
-            cwd: this.config.projectPath,
-            encoding: "utf-8",
-            timeout: 10_000,
-          });
-        } catch {
-          // best-effort cleanup
-        }
-
-        allSettled.push({ status: "fulfilled", value: result });
-      } catch (err) {
-        // Restore baseline on failure too
-        try {
-          execSync("git checkout -- . && git clean -fd -q", {
-            cwd: this.config.projectPath,
-            encoding: "utf-8",
-            timeout: 10_000,
-          });
-        } catch {
-          // best-effort cleanup
-        }
-
-        allSettled.push({
-          status: "rejected",
-          reason: err instanceof Error ? err : new Error(String(err)),
-        });
-      }
-    }
-
-    const settledResults = allSettled;
+     settledResults.push({ status: "fulfilled", value: result });
+   } catch (err) {
+     settledResults.push({ status: "rejected", reason: err });
+   }
+ }
 
     const allResults: ApproachResult[] = settledResults.map((settled, idx) => {
       if (settled.status === "fulfilled") {
@@ -588,6 +584,8 @@ export class SpeculativeExecutor extends EventEmitter<SpeculativeExecutorEvents>
       return false;
     }
   }
+
+
 
   /**
    * 품질 점수 계산 (0–100).
@@ -820,5 +818,78 @@ export class SpeculativeExecutor extends EventEmitter<SpeculativeExecutorEvents>
     } catch {
       return null;
     }
+  }
+  /**
+   * Create isolated git worktree for speculative execution.
+   */
+  private createWorktree(): { path: string; cleanup: () => void } {
+    const base = mkdtempSync(join(tmpdir(), "speculative-"));
+    const worktreePath = join(base, "repo");
+
+  execSync(`git worktree add --detach ${worktreePath} HEAD`, {
+      cwd: this.config.projectPath,
+      stdio: "ignore",
+    });
+
+    return {
+      path: worktreePath,
+      cleanup: () => {
+        try {
+          execSync(`git worktree remove ${worktreePath} --force`, {
+            cwd: this.config.projectPath,
+            stdio: "ignore",
+          });
+        } catch {}
+
+        try {
+          rmSync(base, { recursive: true, force: true });
+        } catch {}
+      },
+    };
+  }
+  /**
+   * Wrap a ToolExecutor so every shell/file operation is scoped to the worktree.
+   * ToolExecutor 타입은 그대로 유지한다.
+   */
+  private createScopedToolExecutor(
+    base: ToolExecutor,
+    worktreePath: string,
+  ): ToolExecutor {
+    return {
+      definitions: base.definitions,
+      execute: async (call, abortSignal) => {
+        const rawArgs =
+          typeof call.arguments === "string"
+            ? this.safeParseJSON(call.arguments) ?? {}
+            : { ...call.arguments };
+
+        const args = { ...rawArgs };
+
+        if (call.name === "shell_exec") {
+          args["cwd"] = worktreePath;
+        }
+
+        if (
+          (call.name === "file_read" ||
+            call.name === "file_write" ||
+            call.name === "file_edit" ||
+            call.name === "file_delete") &&
+          typeof args["file_path"] === "string"
+        ) {
+          const filePath = args["file_path"] as string;
+          if (!filePath.startsWith(worktreePath)) {
+            args["file_path"] = join(worktreePath, filePath);
+          }
+        }
+
+        return base.execute(
+          {
+            ...call,
+            arguments: args,
+          },
+          abortSignal,
+        );
+      },
+    };
   }
 }

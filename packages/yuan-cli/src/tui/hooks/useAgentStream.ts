@@ -1,25 +1,25 @@
 /**
  * useAgentStream — bridges AgentLoop events to TUI React state.
  * Converts agent events into TUIMessage updates, tracks streaming state,
- * real-time elapsed timer, and status indicator metadata.
+ * real-time elapsed timer, reasoning stream, and status indicator metadata.
  */
 
 import { useState, useCallback, useRef, useEffect } from "react";
-import type { TUIMessage, TUIToolCall, AgentStreamState, AgentStatus } from "../types.js";
+import type { 
+  TUIMessage, 
+  TUIToolCall, 
+  AgentStreamState, 
+  AgentStatus,
+  ReasoningNode
+} from "../types.js";
 
 export interface UseAgentStreamReturn {
   state: AgentStreamState;
-  /** Process an incoming agent event */
   handleEvent: (event: AgentEventLike) => void;
-  /** Add a user message */
   addUserMessage: (content: string) => void;
-  /** Add a system message (for slash commands, etc.) */
   addSystemMessage: (content: string) => void;
-  /** Mark agent as started */
   startAgent: () => void;
-  /** Interrupt and reset to idle */
   interrupt: () => void;
-  /** Clear all messages */
   clearMessages: () => void;
 }
 
@@ -36,22 +36,23 @@ export function useAgentStream(): UseAgentStreamReturn {
   const [tokensPerSecond, setTokensPerSecond] = useState(0);
   const [totalTokensUsed, setTotalTokensUsed] = useState(0);
 
-  // Indicator state
   const [elapsedMs, setElapsedMs] = useState(0);
   const [lastElapsedMs, setLastElapsedMs] = useState<number | null>(null);
   const [currentToolName, setCurrentToolName] = useState<string | null>(null);
   const [currentToolArgs, setCurrentToolArgs] = useState<string | null>(null);
   const [lastError, setLastError] = useState<string | null>(null);
   const [filesChangedCount, setFilesChangedCount] = useState(0);
+  const [reasoningTree, setReasoningTree] = useState<ReasoningNode | undefined>(undefined);
 
   const currentMsgIdRef = useRef<string | null>(null);
   const tokenWindowRef = useRef<{ time: number; tokens: number }[]>([]);
+  const currentThinkingMsgIdRef = useRef<string | null>(null);
+  const activeToolBatchIdRef = useRef<string | null>(null);
+  const lastToolCallAtRef = useRef<number>(0);
 
-  // Elapsed timer refs
   const startTimeRef = useRef<number | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Start the real-time elapsed timer
   const startTimer = useCallback(() => {
     startTimeRef.current = Date.now();
     setElapsedMs(0);
@@ -60,10 +61,9 @@ export function useAgentStream(): UseAgentStreamReturn {
       if (startTimeRef.current) {
         setElapsedMs(Date.now() - startTimeRef.current);
       }
-    }, 1000); // 1s tick — prevents layout jitter from rapid re-renders
+    }, 1000);
   }, []);
 
-  // Stop the timer and freeze elapsed time
   const stopTimer = useCallback(() => {
     if (timerRef.current) {
       clearInterval(timerRef.current);
@@ -77,7 +77,6 @@ export function useAgentStream(): UseAgentStreamReturn {
     }
   }, []);
 
-  // Cleanup timer on unmount
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
@@ -88,20 +87,20 @@ export function useAgentStream(): UseAgentStreamReturn {
     (updater: (msg: TUIMessage) => TUIMessage) => {
       const id = currentMsgIdRef.current;
       if (!id) return;
-      setMessages((prev) =>
-        prev.map((m) => (m.id === id ? updater(m) : m)),
-      );
+      setMessages((prev) => prev.map((m) => (m.id === id ? updater(m) : m)));
     },
     [],
   );
 
-  // 스트리밍 텍스트 배치 버퍼 — 1토큰마다 re-render 하지 않고 모아서 flush
   const pendingTextRef = useRef("");
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const FLUSH_INTERVAL = 120; // 120ms 디바운스 — 문단 단위로 떨어지는 느낌
+  const FLUSH_INTERVAL = 120;
 
   const flushPendingText = useCallback(() => {
-    if (flushTimerRef.current) { clearTimeout(flushTimerRef.current); flushTimerRef.current = null; }
+    if (flushTimerRef.current) {
+      clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
     const text = pendingTextRef.current;
     if (text.length === 0) return;
     pendingTextRef.current = "";
@@ -111,7 +110,47 @@ export function useAgentStream(): UseAgentStreamReturn {
     }));
   }, [updateCurrentMessage]);
 
-  // 컴포넌트 unmount 시 타이머 정리
+  const appendThinkingLines = useCallback((raw: string) => {
+    const lines = raw
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => (line.startsWith("· ") ? line : `· ${line}`));
+
+    if (lines.length === 0) return;
+
+    const nextBlock = lines.join("\n");
+    const currentId = currentThinkingMsgIdRef.current;
+
+    if (!currentId) {
+      const id = `thinking-${Date.now()}`;
+      currentThinkingMsgIdRef.current = id;
+      const msg: TUIMessage = {
+        id,
+        role: "system",
+        content: nextBlock,
+        timestamp: Date.now(),
+      };
+      setMessages((prev) => [...prev, msg]);
+      return;
+    }
+
+    setMessages((prev) =>
+      prev.map((m) => {
+        if (m.id !== currentId) return m;
+
+        const existing = new Set(m.content.split("\n"));
+        const deduped = lines.filter((line) => !existing.has(line));
+        if (deduped.length === 0) return m;
+
+        return {
+          ...m,
+          content: `${m.content}\n${deduped.join("\n")}`,
+        };
+      }),
+    );
+  }, []);
+
   useEffect(() => {
     return () => {
       if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
@@ -145,6 +184,11 @@ export function useAgentStream(): UseAgentStreamReturn {
     setCurrentToolArgs(null);
     setLastError(null);
     setFilesChangedCount(0);
+    setTokensPerSecond(0);
+    tokenWindowRef.current = [];
+    currentThinkingMsgIdRef.current = null;
+    activeToolBatchIdRef.current = null;
+    lastToolCallAtRef.current = 0;
     startTimer();
 
     const msgId = `assistant-${Date.now()}`;
@@ -163,11 +207,17 @@ export function useAgentStream(): UseAgentStreamReturn {
   const handleEvent = useCallback(
     (event: AgentEventLike) => {
       switch (event.kind) {
-        case "agent:thinking":
+  case "agent:reasoning_delta": {
+    appendThinkingLines(String(event.text ?? ""));
+    break;
+  }
+        case "agent:thinking": {
           setStatus("thinking");
           setCurrentToolName(null);
           setCurrentToolArgs(null);
+          appendThinkingLines(String(event.content ?? ""));
           break;
+        }
 
         case "agent:text_delta": {
           const text = event.text as string;
@@ -175,21 +225,34 @@ export function useAgentStream(): UseAgentStreamReturn {
           setStatus("streaming");
           setCurrentToolName(null);
           setCurrentToolArgs(null);
-          // 배치 버퍼에 축적 → 디바운스로 한번에 flush (문단 단위 렌더링)
           pendingTextRef.current += text;
           if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
           flushTimerRef.current = setTimeout(flushPendingText, FLUSH_INTERVAL);
           break;
         }
-
+ case "agent:reasoning_timeline": {
+  setReasoningTree(event.tree as ReasoningNode);
+  break;
+ }
         case "agent:tool_call": {
           setStatus("tool_running");
           const toolName = event.tool as string;
-          const args = summarizeArgs(event.input);
+          const args = summarizeArgs(event.input as Record<string, unknown>);
           setCurrentToolName(toolName);
           setCurrentToolArgs(args);
 
-          // Track file changes
+          const now = Date.now();
+          const shouldReuseBatch =
+            activeToolBatchIdRef.current !== null &&
+            now - lastToolCallAtRef.current <= 180;
+
+          const batchId = shouldReuseBatch
+            ? activeToolBatchIdRef.current!
+            : `batch-${now}`;
+
+          activeToolBatchIdRef.current = batchId;
+          lastToolCallAtRef.current = now;
+
           const tl = toolName.toLowerCase();
           if (tl.includes("write") || tl.includes("edit")) {
             setFilesChangedCount((prev) => prev + 1);
@@ -197,11 +260,15 @@ export function useAgentStream(): UseAgentStreamReturn {
 
           const tc: TUIToolCall = {
             id: `tc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            callId: typeof event.callId === "string" ? event.callId : undefined,
             toolName,
             argsSummary: args,
             status: "running",
             isExpanded: false,
+            startedAt: now,
+            batchId,
           };
+
           updateCurrentMessage((msg) => ({
             ...msg,
             toolCalls: [...(msg.toolCalls ?? []), tc],
@@ -209,22 +276,44 @@ export function useAgentStream(): UseAgentStreamReturn {
           break;
         }
 
+ case "agent:tool_batch": {
+  activeToolBatchIdRef.current =
+    typeof event.batchId === "string" ? event.batchId : null;
+  break;
+ }
+
         case "agent:tool_result": {
           const toolName = event.tool as string;
           const output = event.output as string;
           const durationMs = event.durationMs as number;
-          // Clear current tool indicator (back to streaming/thinking)
+
           setCurrentToolName(null);
           setCurrentToolArgs(null);
 
+          let hasRunningTool = false;
+
           updateCurrentMessage((msg) => {
             const toolCalls = [...(msg.toolCalls ?? [])];
+
             for (let i = toolCalls.length - 1; i >= 0; i--) {
-              if (toolCalls[i].toolName === toolName && toolCalls[i].status === "running") {
+              const call = toolCalls[i];
+              if (!call) continue;
+
+              if (call.toolName === toolName && call.status === "running") {
+                const completedAt = Date.now();
+
+                let duration: number | undefined;
+                if (durationMs) {
+                  duration = durationMs / 1000;
+                } else if (call.startedAt) {
+                  duration = (completedAt - call.startedAt) / 1000;
+                }
+
                 toolCalls[i] = {
-                  ...toolCalls[i],
+                  ...call,
                   status: "success",
-                  duration: durationMs / 1000,
+                  completedAt,
+                  duration,
                   result: {
                     kind: detectResultKind(toolName, output),
                     content: output,
@@ -234,8 +323,12 @@ export function useAgentStream(): UseAgentStreamReturn {
                 break;
               }
             }
+
+            hasRunningTool = toolCalls.some((call) => call.status === "running");
             return { ...msg, toolCalls };
           });
+
+          if (!hasRunningTool) activeToolBatchIdRef.current = null;
           break;
         }
 
@@ -252,9 +345,11 @@ export function useAgentStream(): UseAgentStreamReturn {
             content: msg.content + `\n\nError: ${errMsg}`,
             isStreaming: false,
           }));
-          currentMsgIdRef.current = null;
 
-          // 3초 후 idle로 전환
+          currentMsgIdRef.current = null;
+          currentThinkingMsgIdRef.current = null;
+          activeToolBatchIdRef.current = null;
+
           setTimeout(() => {
             setStatus("idle");
           }, 3000);
@@ -262,7 +357,6 @@ export function useAgentStream(): UseAgentStreamReturn {
         }
 
         case "agent:completed": {
-          // 남은 버퍼 텍스트 즉시 flush
           flushPendingText();
           stopTimer();
           setStatus("completed");
@@ -275,10 +369,12 @@ export function useAgentStream(): UseAgentStreamReturn {
             content: msg.content || summary,
             isStreaming: false,
           }));
+
           setStreamBuffer("");
           currentMsgIdRef.current = null;
+          currentThinkingMsgIdRef.current = null;
+          activeToolBatchIdRef.current = null;
 
-          // 3초 후 idle로 전환 (completed 표시 유지 후)
           setTimeout(() => {
             setStatus("idle");
           }, 3000);
@@ -291,31 +387,45 @@ export function useAgentStream(): UseAgentStreamReturn {
           const total = input + output;
           setTotalTokensUsed((prev) => prev + total);
 
-          // Rolling 3-second window for tokens/sec
           const now = Date.now();
           tokenWindowRef.current.push({ time: now, tokens: total });
           tokenWindowRef.current = tokenWindowRef.current.filter(
             (e) => now - e.time < 3000,
           );
+
           const windowTokens = tokenWindowRef.current.reduce((s, e) => s + e.tokens, 0);
           const windowMs = Math.max(1, now - (tokenWindowRef.current[0]?.time ?? now));
           setTokensPerSecond(Math.round((windowTokens / windowMs) * 1000));
           break;
         }
 
-        case "agent:approval_needed":
-          setStatus("awaiting_approval");
+        case "agent:approval_needed": {
+  setStatus("awaiting_approval");
+
+  const action = event.action as any;
+
+  if (action?.tool) {
+    setCurrentToolName(action.tool);
+  }
+
+  const args = summarizeArgs(action?.input);
+  if (args) {
+    setCurrentToolArgs(args);
+  }
+
+  // DO NOT append system message
+  // approval will be rendered by ApprovalPrompt UI
           break;
+        }
 
         default:
           break;
       }
     },
-    [updateCurrentMessage, flushPendingText, stopTimer],
+    [appendThinkingLines, updateCurrentMessage, flushPendingText, stopTimer],
   );
 
   const interrupt = useCallback(() => {
-    // 남은 버퍼 flush 후 중단
     flushPendingText();
     stopTimer();
     setStatus("interrupted");
@@ -327,7 +437,10 @@ export function useAgentStream(): UseAgentStreamReturn {
       isStreaming: false,
       content: msg.content + "\n\n[Interrupted]",
     }));
+
     currentMsgIdRef.current = null;
+    currentThinkingMsgIdRef.current = null;
+    activeToolBatchIdRef.current = null;
 
     const sysMsg: TUIMessage = {
       id: `sys-${Date.now()}`,
@@ -337,15 +450,21 @@ export function useAgentStream(): UseAgentStreamReturn {
     };
     setMessages((prev) => [...prev, sysMsg]);
 
-    // 2초 후 idle로 전환
     setTimeout(() => {
       setStatus("idle");
     }, 2000);
   }, [updateCurrentMessage, flushPendingText, stopTimer]);
 
   const clearMessages = useCallback(() => {
-    if (flushTimerRef.current) { clearTimeout(flushTimerRef.current); flushTimerRef.current = null; }
-    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    if (flushTimerRef.current) {
+      clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+
     pendingTextRef.current = "";
     startTimeRef.current = null;
     setMessages([]);
@@ -357,6 +476,9 @@ export function useAgentStream(): UseAgentStreamReturn {
     setCurrentToolArgs(null);
     setLastError(null);
     setFilesChangedCount(0);
+
+    currentThinkingMsgIdRef.current = null;
+    activeToolBatchIdRef.current = null;
     currentMsgIdRef.current = null;
   }, []);
 
@@ -372,9 +494,18 @@ export function useAgentStream(): UseAgentStreamReturn {
     currentToolArgs,
     lastError,
     filesChangedCount,
+     reasoningTree,
   };
 
-  return { state, handleEvent, addUserMessage, addSystemMessage, startAgent, interrupt, clearMessages };
+  return {
+    state,
+    handleEvent,
+    addUserMessage,
+    addSystemMessage,
+    startAgent,
+    interrupt,
+    clearMessages,
+  };
 }
 
 function summarizeArgs(input: unknown): string {

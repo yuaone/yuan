@@ -1,6 +1,6 @@
 /**
  * @module memory-manager
- * @description YUAN 프로젝트 메모리 — 세션 간 학습 + 프로젝트 지식.
+ * @description YUAN 프로젝트 메모리 — 세션 간 학습 + 프로젝트 지식 (.yuan/memory.json SSOT).
  *
  * YuanMemory(memory.ts)가 YUAN.md 파일의 읽기/쓰기를 담당한다면,
  * MemoryManager는 그 위에 구조화된 학습/패턴/실패 기록을 관리한다.
@@ -41,9 +41,14 @@
  * ```
  */
 
-import { readFile, writeFile, access, mkdir } from "node:fs/promises";
-import { join, dirname } from "node:path";
-
+import { readFile, writeFile, access, mkdir, rename } from "node:fs/promises";
+import { join, dirname, basename } from "node:path";
+import {
+  YUAN_DIRNAME,
+  YUAN_MEMORY_JSON,
+  YUAN_GITIGNORE_ENTRY,
+  YUAN_MD_SEARCH_PATHS,
+} from "./constants.js";
 // ─── Types ───
 
 /** 코드베이스에서 발견된 패턴 */
@@ -120,7 +125,6 @@ export interface RelevantMemories {
 
 // ─── Constants ───
 
-const YUAN_MEMORY_FILENAME = "YUAN.md";
 const MAX_LEARNINGS = 100;
 const MAX_PATTERNS = 50;
 const MAX_FAILED_APPROACHES = 30;
@@ -130,11 +134,11 @@ const MAX_CONFIDENCE = 1.0;
 // ─── MemoryManager ───
 
 /**
- * MemoryManager — YUAN.md 기반 구조화된 프로젝트 메모리.
+* MemoryManager — .yuan/memory.json 기반 구조화된 프로젝트 메모리.
  *
- * YuanMemory가 YUAN.md의 원시 읽기/쓰기를 담당한다면,
+* YuanMemory가 YUAN.md human summary를 담당한다면,
  * MemoryManager는 구조화된 학습, 패턴, 실패 기록을 관리한다.
- * YUAN.md 파일을 마크다운 형식으로 직렬화/역직렬화한다.
+* 실제 SSOT는 .yuan/memory.json 이고, YUAN.md는 사람이 읽는 요약본이다.
  */
 export class MemoryManager {
   private readonly workDir: string;
@@ -146,29 +150,41 @@ export class MemoryManager {
   }
 
   /**
-   * YUAN.md를 로드하거나 새로 생성한다.
-   * 파일이 없으면 빈 메모리를 반환한다.
++   * .yuan/memory.json을 로드하거나, legacy YUAN.md를 import 하거나, 새로 생성한다.
++   * 절대 throw 없이 부트스트랩 가능해야 한다.
    *
    * @returns 로드된 프로젝트 메모리
    */
   async load(): Promise<ProjectMemory> {
-    const filePath = join(this.workDir, YUAN_MEMORY_FILENAME);
-
+    const { memoryJsonPath } = this.getStoragePaths();
+// 1) New SSOT: .yuan/memory.json
     try {
-      await access(filePath);
-      const raw = await readFile(filePath, "utf-8");
-      this.memory = this.parseMemoryMarkdown(raw);
+      await access(memoryJsonPath);
+      const raw = await readFile(memoryJsonPath, "utf-8");
+      this.memory = this.parseMemoryJson(raw);
+      return { ...this.memory };
     } catch {
-      // 파일 없음 — 빈 메모리 유지
-      this.memory = this.createEmptyMemory();
-      await this.detectProjectInfo();
+      // continue
     }
 
+    // 2) Legacy fallback: YUAN.md import
+    const imported = await this.tryImportLegacyMarkdown();
+    if (imported) {
+      this.memory = imported;
+      await this.save(this.memory);
+      return { ...this.memory };
+    }
+
+    // 3) Fresh workspace bootstrap
+    this.memory = this.createEmptyMemory();
+    await this.detectProjectInfo();
+    await this.save(this.memory);
+   
     return { ...this.memory };
   }
 
   /**
-   * 현재 메모리를 YUAN.md에 저장한다.
+ * 현재 메모리를 .yuan/memory.json + YUAN.md에 저장한다.
    *
    * @param memory 저장할 메모리 (미지정 시 현재 내부 상태)
    */
@@ -178,21 +194,17 @@ export class MemoryManager {
     }
     this.memory.lastUpdated = Date.now();
 
-    const filePath = join(this.workDir, YUAN_MEMORY_FILENAME);
-    const dir = dirname(filePath);
+    const { yuanDir, memoryJsonPath, humanSummaryPath } = this.getStoragePaths();
+    await mkdir(yuanDir, { recursive: true });
+    await this.ensureGitignoreEntry();
 
-    try {
-      await access(dir);
-    } catch {
-      await mkdir(dir, { recursive: true });
-    }
-
-    const markdown = this.serializeToMarkdown(this.memory);
-    await writeFile(filePath, markdown, "utf-8");
+    const json = JSON.stringify(this.memory, null, 2);
+    await this.atomicWrite(memoryJsonPath, json);
+    await this.atomicWrite(humanSummaryPath, this.serializeToMarkdown(this.memory));
   }
 
   /**
-   * 현재 메모리를 반환한다 (복사본).
+   * 현재 메모리를 반환한다 (얕은 복사본).
    */
   getMemory(): ProjectMemory {
     return { ...this.memory };
@@ -401,6 +413,97 @@ export class MemoryManager {
     );
   }
 
+ private getStoragePaths(): {
+    yuanDir: string;
+    memoryJsonPath: string;
+    humanSummaryPath: string;
+  } {
+    const yuanDir = join(this.workDir, YUAN_DIRNAME);
+    return {
+      yuanDir,
+      memoryJsonPath: join(yuanDir, YUAN_MEMORY_JSON),
+      humanSummaryPath: join(this.workDir, "YUAN.md"),
+    };
+  }
+
+  private parseMemoryJson(raw: string): ProjectMemory {
+ let parsed: Partial<ProjectMemory>;
+ try {
+   parsed = JSON.parse(raw);
+ } catch {
+   parsed = {};
+ }
+    const base = this.createEmptyMemory();
+
+    return {
+      ...base,
+      ...parsed,
+      conventions: Array.isArray(parsed.conventions) ? parsed.conventions : [],
+      patterns: Array.isArray(parsed.patterns) ? parsed.patterns : [],
+      learnings: Array.isArray(parsed.learnings) ? parsed.learnings : [],
+      failedApproaches: Array.isArray(parsed.failedApproaches)
+        ? parsed.failedApproaches
+        : [],
+      lastUpdated:
+        typeof parsed.lastUpdated === "number"
+          ? parsed.lastUpdated
+          : Date.now(),
+    };
+  }
+
+  private async tryImportLegacyMarkdown(): Promise<ProjectMemory | null> {
+    for (const relPath of YUAN_MD_SEARCH_PATHS) {
+      const fullPath = join(this.workDir, relPath);
+      try {
+        await access(fullPath);
+        const raw = await readFile(fullPath, "utf-8");
+        return this.parseMemoryMarkdown(raw);
+      } catch {
+        continue;
+      }
+    }
+
+    return null;
+  }
+
+  private async ensureGitignoreEntry(): Promise<void> {
+    const gitignorePath = join(this.workDir, ".gitignore");
+
+    try {
+      let content = "";
+      try {
+        content = await readFile(gitignorePath, "utf-8");
+      } catch {
+        // no .gitignore yet
+      }
+
+      const hasEntry = content
+        .split("\n")
+        .map((line) => line.trim())
+        .includes(YUAN_GITIGNORE_ENTRY);
+
+      if (!hasEntry) {
+        const next = content.trim().length > 0
+          ? `${content.replace(/\s*$/, "")}\n${YUAN_GITIGNORE_ENTRY}\n`
+          : `${YUAN_GITIGNORE_ENTRY}\n`;
+        await this.atomicWrite(gitignorePath, next);
+      }
+    } catch {
+      // gitignore write failure is non-fatal
+    }
+  }
+
+  private async atomicWrite(filePath: string, content: string): Promise<void> {
+    await mkdir(dirname(filePath), { recursive: true });
+    const tmpPath = `${filePath}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+    await writeFile(tmpPath, content, "utf-8");
+ try {
+   await rename(tmpPath, filePath);
+ } catch {
+   await writeFile(filePath, content, "utf-8");
+ }
+  }
+
   // ─── Private: Serialization ───
 
   private serializeToMarkdown(memory: ProjectMemory): string {
@@ -417,6 +520,8 @@ export class MemoryManager {
     sections.push(`- **Framework:** ${memory.framework}`);
     sections.push(`- **Build:** \`${memory.buildCommand}\``);
     sections.push(`- **Test:** \`${memory.testCommand}\``);
+    sections.push(`- **Persistence:** workspace-local`);
+    sections.push(`- **Storage:** \`.yuan/${YUAN_MEMORY_JSON}\``);
     sections.push("");
 
     // Conventions
@@ -599,8 +704,7 @@ export class MemoryManager {
 
   private async detectProjectInfo(): Promise<void> {
     // 프로젝트 이름: 디렉토리 이름
-    const parts = this.workDir.split("/");
-    this.memory.projectName = parts[parts.length - 1] || "unknown";
+this.memory.projectName = basename(this.workDir) || "unknown";
 
     // package.json에서 정보 추출
     try {
@@ -623,8 +727,12 @@ export class MemoryManager {
       // 패키지 매니저 감지
       const hasLock = await this.detectPackageManager();
       if (hasLock) {
-        this.memory.buildCommand = this.memory.buildCommand.replace("npm", hasLock);
-        this.memory.testCommand = this.memory.testCommand.replace("npm", hasLock);
+  if (this.memory.buildCommand.includes("npm")) {
+    this.memory.buildCommand = this.memory.buildCommand.replace("npm", hasLock);
+  }
+  if (this.memory.testCommand.includes("npm")) {
+    this.memory.testCommand = this.memory.testCommand.replace("npm", hasLock);
+  }
       }
 
       // 언어/프레임워크 감지

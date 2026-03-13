@@ -18,7 +18,7 @@
  * @see 설계 문서 Section 6.4
  */
 
-import { rename, writeFile, readFile } from "node:fs/promises";
+import { rename, writeFile, unlink } from "node:fs/promises";
 import path from "node:path";
 
 // ─── Error Classification ───
@@ -194,7 +194,6 @@ const ERROR_PATTERNS: ReadonlyArray<{
     category: "TEST_FAIL",
     patterns: [
       /\bFAIL\b/,
-      /AssertionError/i,
       /AssertionError/i,
       /Expected .+ received/i,
       /test failed/i,
@@ -463,7 +462,17 @@ export class FailureRecovery {
         // Atomic write: write to .tmp then rename
         const tmpPath = filePath + ".recovery.tmp";
         await writeFile(tmpPath, originalContent, "utf-8");
-        await rename(tmpPath, filePath);
+  try {
+    try {
+      await rename(tmpPath, filePath);
+    } catch {
+      await writeFile(filePath, originalContent, "utf-8");
+      await unlink(tmpPath).catch(() => {});
+    }
+  } catch {
+    await writeFile(filePath, originalContent, "utf-8");
+    await unlink(tmpPath).catch(() => {});
+  }
       } catch (err) {
         allSuccess = false;
         // Continue restoring other files even if one fails

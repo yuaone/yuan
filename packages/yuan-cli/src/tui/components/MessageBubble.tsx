@@ -18,12 +18,63 @@ export interface MessageBubbleProps {
   width: number;
   isLatest?: boolean;
 }
+const BANNER_TITLE_PREFIX = "YUAN v";
+const BANNER_SUBTITLE = "Autonomous Coding Agent";
+
+const FOX_PIXEL_PALETTE: Record<string, string | null> = {
+  ".": null,
+  "S": "#dbeafe",
+  "W": "#f8fafc",
+  "G": "#e5e7eb",
+  "N": "#111827",
+};
+
+const FOX_PIXEL_SPRITE = [
+  "..SWWWS.",
+  ".SWWWWWS",
+  "SWWNNWWS",
+  "SWWWWWW.",
+  ".SWWWWW.",
+  "..SWWW..",
+  "..SWW...",
+  "...S....",
+];
 
 function truncateArgs(args: string | undefined, maxLen: number): string {
   if (!args) return "";
   return args.length > maxLen ? args.slice(0, maxLen) + "…" : args;
 }
 
+function PixelFoxSprite(): React.JSX.Element {
+  return (
+    <Box flexDirection="column">
+      {FOX_PIXEL_SPRITE.map((row, rowIndex) => (
+        <Box key={`fox-row-${rowIndex}`}>
+          {row.split("").map((cell, colIndex) => {
+            const color = FOX_PIXEL_PALETTE[cell] ?? null;
+
+            if (!color) {
+              return (
+                <Text key={`fox-px-${rowIndex}-${colIndex}`}>
+                  {"  "}
+                </Text>
+              );
+            }
+
+            return (
+              <Text
+                key={`fox-px-${rowIndex}-${colIndex}`}
+                color={color}
+              >
+                {"██"}
+              </Text>
+            );
+          })}
+        </Box>
+      ))}
+    </Box>
+  );
+}
 function ToolCallLine({ tc, isLast }: { tc: TUIToolCall; isLast: boolean }): React.JSX.Element {
   const connector = isLast ? TOKENS.tree.last : TOKENS.tree.branch;
   const icon =
@@ -66,6 +117,10 @@ export function MessageBubble({
   isLatest,
 }: MessageBubbleProps): React.JSX.Element {
   const msg = message;
+  const isBannerMessage =
+    msg.role === "system" &&
+    msg.content.includes(BANNER_TITLE_PREFIX) &&
+    msg.content.includes(BANNER_SUBTITLE);
 
   switch (msg.role) {
     case "user": {
@@ -86,12 +141,14 @@ export function MessageBubble({
       // Find the longest line for uniform padding
       const longestLine = Math.max(...lines.map((l) => l.length), 1);
       const paddedLines = lines.map((l) => ` ${l.padEnd(longestLine)} `);
-
+     const horizontal = "─".repeat(longestLine + 2);
       return (
-        <Box flexDirection="column" marginBottom={1}>
+        <Box flexDirection="column" marginBottom={1} alignItems="flex-end">
+          <Text dimColor>{`┌${horizontal}┐`}</Text>
           {paddedLines.map((line, i) => (
-            <Text key={i} backgroundColor="#2a2a2a" color="white">{line}</Text>
+            <Text key={i} backgroundColor="#1e1e1e" color="white">{`│${line}│`}</Text>
           ))}
+          <Text dimColor>{`└${horizontal}┘`}</Text>
         </Box>
       );
     }
@@ -152,9 +209,46 @@ export function MessageBubble({
     }
 
     case "system":
+      if (isBannerMessage) {
+        const lines = msg.content.split("\n");
+        const title =
+          lines.find((line) => line.startsWith(BANNER_TITLE_PREFIX)) ?? "";
+        const subtitle =
+          lines.find((line) => line.includes(BANNER_SUBTITLE)) ?? "";
+        const help =
+          lines.find((line) => line.includes("Type /help")) ?? "";
+        const site =
+          lines.find((line) => line.includes("yuaone.com")) ?? "";
+
+        return (
+          <Box
+            flexDirection="row"
+            alignItems="flex-start"
+            marginBottom={1}
+            paddingLeft={1}
+          >
+            <Box marginRight={2}>
+              <PixelFoxSprite />
+            </Box>
+
+            <Box flexDirection="column">
+              <Text bold color="white">
+                {title}
+              </Text>
+              <Text color="#cbd5e1">{subtitle}</Text>
+
+              <Box height={1} />
+
+              <Text dimColor>{help}</Text>
+              <Text dimColor>{site}</Text>
+            </Box>
+          </Box>
+        );
+      }
+
       return (
-        <Box>
-          <Text dimColor>  {msg.content}</Text>
+        <Box marginBottom={1}>
+          <Text dimColor>{msg.content}</Text>
         </Box>
       );
 

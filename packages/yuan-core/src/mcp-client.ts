@@ -187,9 +187,13 @@ class MCPServerConnection {
           stdio: ["pipe", "pipe", "pipe"],
           env,
           // Don't let the child keep our event loop alive
+          
           detached: false,
         });
 
+ if (!this.process.pid) {
+   throw new Error(`Failed to spawn MCP server "${this.config.name}"`);
+ }
         this.state.pid = this.process.pid;
 
         // Handle spawn errors
@@ -700,6 +704,11 @@ export class MCPClient extends EventEmitter {
         properties: (tool.inputSchema.properties as Record<string, unknown>) ?? {},
         required: (tool.inputSchema.required as string[]) ?? [],
       },
+      source: "mcp",
+      serverName: tool.serverName,
+      readOnly: false,
+      requiresApproval: true,
+      riskLevel: "medium",
     }));
   }
 
@@ -874,11 +883,11 @@ export class MCPClient extends EventEmitter {
 
     // Bound queue size to prevent unbounded memory growth
     const MAX_QUEUE_SIZE = 100;
-    if (this.callQueue.length >= MAX_QUEUE_SIZE) {
-      return Promise.reject(
-        new Error(`MCP call queue is full (max ${MAX_QUEUE_SIZE}). Try again later.`),
-      );
-    }
+if (this.callQueue.length >= MAX_QUEUE_SIZE) {
+  return Promise.reject(
+    new Error(`MCP call queue is full (max ${MAX_QUEUE_SIZE}).`)
+  );
+}
 
     return new Promise<void>((resolve) => {
       this.callQueue.push(() => {
