@@ -65,6 +65,11 @@ import { CodebaseContext } from "./codebase-context.js";
 import { VectorIndex } from "./vector-index.js";
 import type { EmbeddingCache } from "./vector-index.js";
 import type { SQLExecutor, EmbeddingProvider } from "./vector-index.js";
+import {
+  InMemoryVectorStore,
+  OllamaEmbeddingProvider,
+} from "./vector-store.js";
+import type { VectorStoreMode } from "./vector-store.js";
 import { LanguageSupport } from "./language-support.js";
 import {
   HierarchicalPlanner,
@@ -187,6 +192,14 @@ export interface ExecutionEngineConfig {
   /** 벡터 검색 활성화 — pgvector 기반 시맨틱 검색 (기본 false, pgvector 필요) */
   enableVectorSearch?: boolean;
 
+  /**
+   * 벡터 스토어 백엔드 선택.
+   * - "postgres" — pgvector만 사용 (실패 시 에러)
+   * - "memory"   — InMemoryVectorStore만 사용 (오프라인 OK)
+   * - "auto"     — postgres 시도 후 실패 시 memory로 폴백 (기본값)
+   */
+  vectorStoreMode?: VectorStoreMode;
+
   /** MCP server configurations for external tool integration (기본 undefined — disabled) */
   mcpServerConfigs?: Array<{ name: string; command: string; args?: string[] }>;
 
@@ -238,6 +251,7 @@ interface ResolvedConfig {
   enableParallelExecution: boolean;
   maxParallelAgents: number;
   enableVectorSearch: boolean;
+  vectorStoreMode: VectorStoreMode;
   enableDebate: boolean;
   enableSecurityScan: boolean;
   enableDocGeneration: boolean;
@@ -373,6 +387,7 @@ export class ExecutionEngine extends EventEmitter {
   private readonly reflection: SelfReflection;
   private codebaseContext: CodebaseContext | null;
   private vectorIndex: VectorIndex | null;
+  private inMemoryVectorStore: InMemoryVectorStore | null;
 private embeddingCache: EmbeddingCache;
   private stateMachine: AgentStateMachine | null;
   private abortController: AbortController;
@@ -453,6 +468,7 @@ private embeddingCache: EmbeddingCache;
       enableParallelExecution: config.enableParallelExecution ?? ENGINE_DEFAULTS.enableParallelExecution,
       maxParallelAgents: config.maxParallelAgents ?? ENGINE_DEFAULTS.maxParallelAgents,
       enableVectorSearch: config.enableVectorSearch ?? false,
+      vectorStoreMode: config.vectorStoreMode ?? "auto",
       enableDebate: config.enableDebate ?? false,
       enableSecurityScan: config.enableSecurityScan ?? false,
       enableDocGeneration: config.enableDocGeneration ?? false,
@@ -486,6 +502,7 @@ private embeddingCache: EmbeddingCache;
 
     this.codebaseContext = null;
     this.vectorIndex = null;
+    this.inMemoryVectorStore = null;
 const memoryCache = new Map<string, number[]>();
 
 this.embeddingCache = {
@@ -678,9 +695,13 @@ this.dagOrchestrator.on("dag:agent_reasoning", (e: { text: string; taskId: strin
         );
       }
 
-      // 1b. VectorIndex initialization (pgvector semantic search)
-      if (this.config.enableVectorSearch && !this.vectorIndex) {
-        try {
+      // 1b. VectorIndex initialization (pgvector or in-memory semantic search)
+      if (this.config.enableVectorSearch && !this.vectorIndex && !this.inMemoryVectorStore) {
+        const mode = this.config.vectorStoreMode;
+        const projectId = path.basename(this.config.projectPath);
+
+        // Helper: try to initialize pgvector
+        const tryPostgres = async (): Promise<boolean> => {
           const sqlExecutor: SQLExecutor = {
             query: async (sql: string, params?: unknown[]) => {
               return this.config.toolExecutor.executeSQL
@@ -688,41 +709,80 @@ this.dagOrchestrator.on("dag:agent_reasoning", (e: { text: string; taskId: strin
                 : { rows: [] };
             },
           };
-
           const embeddingProvider: EmbeddingProvider = {
             dimension: 1536,
             embed: async (texts: string[]) => {
               const results: number[][] = [];
-
               for (const text of texts) {
                 const resp = await this.llmClient.embed(text);
                 results.push(resp.embedding);
               }
-
               return results;
             },
           };
-
-          this.vectorIndex = new VectorIndex({
-            projectId: path.basename(this.config.projectPath),
+          const vi = new VectorIndex({
+            projectId,
             sqlExecutor,
             embeddingProvider,
-            embeddingCache: this.embeddingCache
+            embeddingCache: this.embeddingCache,
           });
+          await vi.initialize();
+          this.vectorIndex = vi;
+          return true;
+        };
 
-          await this.vectorIndex.initialize();
+        // Helper: initialize in-memory store with Ollama (auto-falls back to TF-IDF)
+        const initMemory = async (): Promise<void> => {
+          const ollamaProvider = new OllamaEmbeddingProvider();
+          const store = new InMemoryVectorStore({
+            projectId,
+            projectPath: this.config.projectPath,
+            embeddingProvider: ollamaProvider,
+          });
+          await store.load();
+          this.inMemoryVectorStore = store;
+        };
 
+        if (mode === "postgres") {
+          // Strict postgres mode — fail loudly if unavailable
+          try {
+            await tryPostgres();
+            this._logger.info("system", "VectorIndex: pgvector mode active");
+          } catch (err) {
+            this._logger.warn(
+              "system",
+              `VectorIndex (postgres): init failed — ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        } else if (mode === "memory") {
+          // In-memory only mode
+          await initMemory();
+          const ollamaState = (this.inMemoryVectorStore as unknown as { embeddingProvider: OllamaEmbeddingProvider })
+            ?.embeddingProvider?.ollamaAvailable;
+          const backendName = ollamaState === false ? "TF-IDF fallback" : "Ollama (nomic-embed-text)";
           this._logger.info(
             "system",
-            "VectorIndex initialized (pgvector semantic search enabled)",
+            `VectorIndex: in-memory mode active (embedding: ${backendName})`,
           );
-        } catch (err) {
-          this._logger.warn(
-            "system",
-            `VectorIndex initialization failed: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-         );
+        } else {
+          // "auto" mode — try postgres, fall back to in-memory
+          let usedPostgres = false;
+          try {
+            usedPostgres = await tryPostgres();
+            this._logger.info("system", "VectorIndex: pgvector mode active (auto)");
+          } catch (pgErr) {
+            this._logger.warn(
+              "system",
+              `VectorIndex: pgvector unavailable (${pgErr instanceof Error ? pgErr.message : String(pgErr)}) — falling back to in-memory store`,
+            );
+          }
+          if (!usedPostgres) {
+            await initMemory();
+            this._logger.info(
+              "system",
+              "VectorIndex: in-memory mode active (Ollama/TF-IDF fallback, auto mode)",
+            );
+          }
         }
       }
 

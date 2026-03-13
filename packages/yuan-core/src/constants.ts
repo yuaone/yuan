@@ -158,6 +158,14 @@ export const TIMEOUT_DEFAULTS = {
   agentSessionDefaultMs: 24 * 60 * 60 * 1000,
 } as const;
 
+/**
+ * Vector store backend default.
+ * "auto" = try Postgres first, fall back to InMemoryVectorStore.
+ *
+ * @see VectorStoreMode in vector-store.ts
+ */
+export const DEFAULT_VECTOR_STORE_MODE = "auto" as const;
+
 /** Design Mode: allowed edit paths (Governor enforced) */
 export const DESIGN_ALLOWED_PATHS = [
   "src/",

@@ -4,12 +4,14 @@
  * and inlining symbols across multiple TypeScript/JavaScript files.
  *
  * Provides preview (dry-run) mode, rollback support, and safety checks (breaking change
- * detection, risk assessment). Uses regex-based analysis consistent with the rest of yuan-core.
+ * detection, risk assessment). Uses AST-based analysis (ts-morph) where available,
+ * with regex fallback for accuracy.
  */
 
 import { readdir, readFile, writeFile, mkdir, lstat } from "node:fs/promises";
 import { join, resolve, dirname, extname, relative, basename } from "node:path";
 import { randomUUID } from "node:crypto";
+import { AstAnalyzer } from "./ast-analyzer.js";
 
 // ─── Types ───
 
@@ -219,11 +221,14 @@ export class CrossFileRefactor {
   private projectPath: string;
   private rollbacks: Map<string, Map<string, string>>;
   private rollbackOrder: string[];
+  /** AST-based analyzer for accurate symbol reference finding */
+  private astAnalyzer: AstAnalyzer;
 
   constructor(projectPath: string) {
     this.projectPath = resolve(projectPath);
     this.rollbacks = new Map();
     this.rollbackOrder = [];
+    this.astAnalyzer = new AstAnalyzer(this.projectPath);
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -1295,13 +1300,40 @@ export class CrossFileRefactor {
   // ═══════════════════════════════════════════════════════════════
 
   /**
-   * Find all usages of a symbol across the project using regex word boundary matching.
-   * Excludes occurrences inside comments and string literals.
+   * Find all usages of a symbol across the project.
+   *
+   * First attempts AST-based reference finding via AstAnalyzer (ts-morph) for accurate
+   * results that exclude comments and string literals. Falls back to regex word boundary
+   * matching if the AST approach fails or returns no results.
+   *
+   * @param symbolName - The symbol name to search for
+   * @param scopeFile - Optional file to scope the search to (for rename in single file)
    */
   private async findAllUsages(
     symbolName: string,
     scopeFile?: string,
   ): Promise<SymbolUsage[]> {
+    // ── AST-based approach (accurate) ──
+    // Only try AST when we have a definite source file for the symbol definition.
+    // scopeFile is the file where the symbol is defined for rename operations.
+    if (scopeFile) {
+      const defFile = resolve(this.projectPath, scopeFile);
+      try {
+        const astRefs = await this.astAnalyzer.findReferences(defFile, symbolName);
+        if (astRefs.length > 0) {
+          return astRefs.map((ref) => ({
+            file: ref.file,
+            line: ref.line,
+            column: ref.context.indexOf(symbolName),
+            context: ref.context,
+          }));
+        }
+      } catch {
+        // AST failed — fall through to regex
+      }
+    }
+
+    // ── Regex fallback ──
     const usages: SymbolUsage[] = [];
     const files = scopeFile
       ? [resolve(this.projectPath, scopeFile)]
@@ -1321,8 +1353,8 @@ export class CrossFileRefactor {
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
         if (this.isCommentLine(line)) continue;
-symbolRe.lastIndex = 0;
-if (!symbolRe.test(line)) continue;
+        symbolRe.lastIndex = 0;
+        if (!symbolRe.test(line)) continue;
 
         // Check that the match is not inside a string literal
         if (this.isInStringLiteral(line, symbolName)) continue;

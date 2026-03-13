@@ -11,7 +11,8 @@ import { Box, Text } from "ink";
 import { TOKENS } from "../lib/tokens.js";
 import { Spinner } from "./Spinner.js";
 import { MarkdownRenderer } from "./MarkdownRenderer.js";
-import type { TUIMessage, TUIToolCall } from "../types.js";
+import { DiffView } from "./DiffView.js";
+import type { TUIMessage, TUIToolCall, ParsedDiff, ParsedDiffHunk } from "../types.js";
 
 export interface MessageBubbleProps {
   message: TUIMessage;
@@ -23,22 +24,105 @@ const BANNER_SUBTITLE = "Autonomous Coding Agent";
 
 const FOX_PIXEL_PALETTE: Record<string, string | null> = {
   ".": null,
-  "S": "#dbeafe",
-  "W": "#f8fafc",
-  "G": "#e5e7eb",
-  "N": "#111827",
+  "O": "#f97316",   // orange body
+  "D": "#c2410c",   // dark orange (ears/outline)
+  "W": "#f8fafc",   // white (face/chest)
+  "N": "#1c1917",   // dark (eyes/nose)
+  "T": "#fcd34d",   // tan/yellow (inner ear)
 };
 
 const FOX_PIXEL_SPRITE = [
-  "..SWWWS.",
-  ".SWWWWWS",
-  "SWWNNWWS",
-  "SWWWWWW.",
-  ".SWWWWW.",
-  "..SWWW..",
-  "..SWW...",
-  "...S....",
+  "....DOODD..DDOOD....",
+  "...DOOOTD.DTOOD....",
+  "...DOOOOOOOOOOOD...",
+  "..DOOOOOOOOOOOOOD..",
+  "..DOOWWWWWWWWWOOD..",
+  "..DOOWNNOONNWOOD...",
+  "..DOOWWWWWWWWWOOD..",
+  "..DOOOWWNNWWWOOOD..",
+  "...DOOOOOOOOOOOD...",
+  "....DDDDDDDDDDDD...",
 ];
+
+const DIFF_TOOL_NAMES = new Set(["file_write", "file_edit", "edit_file", "write_file"]);
+const MAX_DIFF_LINES = 20;
+
+/** Parse a unified diff string into ParsedDiff structure */
+function parseUnifiedDiff(raw: string, filePath = ""): ParsedDiff | null {
+  const lines = raw.split("\n");
+  const hunks: ParsedDiffHunk[] = [];
+  let additions = 0;
+  let deletions = 0;
+  let currentHunk: ParsedDiffHunk | null = null;
+  let oldLineNo = 0;
+  let newLineNo = 0;
+  let hasSignLines = false;
+
+  for (const line of lines) {
+    if (line.startsWith("@@")) {
+      const m = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      if (m) {
+        currentHunk = {
+          startOld: parseInt(m[1], 10),
+          startNew: parseInt(m[2], 10),
+          lines: [],
+        };
+        oldLineNo = currentHunk.startOld;
+        newLineNo = currentHunk.startNew;
+        hunks.push(currentHunk);
+      }
+    } else if (line.startsWith("+") && !line.startsWith("+++")) {
+      hasSignLines = true;
+      if (currentHunk) {
+        currentHunk.lines.push({ type: "add", content: line.slice(1), newLineNo: newLineNo++ });
+      }
+      additions++;
+    } else if (line.startsWith("-") && !line.startsWith("---")) {
+      hasSignLines = true;
+      if (currentHunk) {
+        currentHunk.lines.push({ type: "delete", content: line.slice(1), oldLineNo: oldLineNo++ });
+      }
+      deletions++;
+    } else if (line.startsWith(" ") && currentHunk) {
+      currentHunk.lines.push({ type: "context", content: line.slice(1), oldLineNo: oldLineNo++, newLineNo: newLineNo++ });
+    }
+  }
+
+  if (!hasSignLines || hunks.length === 0) return null;
+
+  // Extract filePath from diff header if not provided
+  if (!filePath) {
+    const plusLine = lines.find(l => l.startsWith("+++ "));
+    if (plusLine) filePath = plusLine.replace(/^\+\+\+ (b\/)?/, "");
+  }
+
+  return { filePath, hunks, additions, deletions };
+}
+
+/** Limit ParsedDiff to maxLines total diff lines for compact display */
+function limitDiffLines(diff: ParsedDiff, maxLines: number): { diff: ParsedDiff; truncated: number } {
+  let count = 0;
+  let truncated = 0;
+  const limitedHunks: ParsedDiffHunk[] = [];
+
+  for (const hunk of diff.hunks) {
+    if (count >= maxLines) {
+      truncated += hunk.lines.length;
+      continue;
+    }
+    const remaining = maxLines - count;
+    if (hunk.lines.length <= remaining) {
+      limitedHunks.push(hunk);
+      count += hunk.lines.length;
+    } else {
+      truncated += hunk.lines.length - remaining;
+      limitedHunks.push({ ...hunk, lines: hunk.lines.slice(0, remaining) });
+      count = maxLines;
+    }
+  }
+
+  return { diff: { ...diff, hunks: limitedHunks }, truncated };
+}
 
 function truncateArgs(args: string | undefined, maxLen: number): string {
   if (!args) return "";
@@ -75,7 +159,7 @@ function PixelFoxSprite(): React.JSX.Element {
     </Box>
   );
 }
-function ToolCallLine({ tc, isLast }: { tc: TUIToolCall; isLast: boolean }): React.JSX.Element {
+function ToolCallLine({ tc, isLast, width }: { tc: TUIToolCall; isLast: boolean; width: number }): React.JSX.Element {
   const connector = isLast ? TOKENS.tree.last : TOKENS.tree.branch;
   const icon =
     tc.status === "running" ? null :
@@ -88,24 +172,56 @@ function ToolCallLine({ tc, isLast }: { tc: TUIToolCall; isLast: boolean }): Rea
   const duration = tc.duration != null ? ` (${tc.duration.toFixed(1)}s)` : "";
   const argsTruncated = truncateArgs(tc.argsSummary, 40);
 
+  // Resolve diff to show: from result.diff (pre-parsed) or parse result.content if it's a unified diff
+  let resolvedDiff: ParsedDiff | null = null;
+  if (
+    tc.status === "success" &&
+    DIFF_TOOL_NAMES.has(tc.toolName) &&
+    tc.result
+  ) {
+    if (tc.result.diff) {
+      resolvedDiff = tc.result.diff;
+    } else if (tc.result.content && tc.result.content.includes("@@")) {
+      resolvedDiff = parseUnifiedDiff(tc.result.content, tc.argsSummary);
+    }
+  }
+
+  let displayDiff: ParsedDiff | null = null;
+  let truncatedLines = 0;
+  if (resolvedDiff) {
+    const limited = limitDiffLines(resolvedDiff, MAX_DIFF_LINES);
+    displayDiff = limited.diff;
+    truncatedLines = limited.truncated;
+  }
+
   return (
-    <Box paddingLeft={2}>
-      {tc.status === "running" ? (
-        <>
-          <Text color="#f59e0b">{TOKENS.brand.prefix} </Text>
-          <Text bold color="white">{tc.toolName}</Text>
-          {argsTruncated ? <Text dimColor>({argsTruncated})</Text> : null}
-          <Text> </Text>
-          <Spinner />
-        </>
-      ) : (
-        <>
-          <Text dimColor>{connector} </Text>
-          <Text color={iconColor}>{icon}</Text>
-          <Text color="white"> {tc.toolName}</Text>
-          {argsTruncated ? <Text dimColor>  {argsTruncated}</Text> : null}
-          <Text dimColor>{duration}</Text>
-        </>
+    <Box flexDirection="column" paddingLeft={2}>
+      <Box>
+        {tc.status === "running" ? (
+          <>
+            <Text color="#f59e0b">{TOKENS.brand.prefix} </Text>
+            <Text bold color="white">{tc.toolName}</Text>
+            {argsTruncated ? <Text dimColor>({argsTruncated})</Text> : null}
+            <Text> </Text>
+            <Spinner />
+          </>
+        ) : (
+          <>
+            <Text dimColor>{connector} </Text>
+            <Text color={iconColor}>{icon}</Text>
+            <Text color="white"> {tc.toolName}</Text>
+            {argsTruncated ? <Text dimColor>  {argsTruncated}</Text> : null}
+            <Text dimColor>{duration}</Text>
+          </>
+        )}
+      </Box>
+      {displayDiff && (
+        <Box flexDirection="column" marginTop={0} paddingLeft={2}>
+          <DiffView diff={displayDiff} width={width - 4} />
+          {truncatedLines > 0 && (
+            <Text dimColor>  … {truncatedLines} more line{truncatedLines === 1 ? "" : "s"}</Text>
+          )}
+        </Box>
       )}
     </Box>
   );
@@ -187,6 +303,7 @@ export function MessageBubble({
                   key={tc.id}
                   tc={tc}
                   isLast={i === msg.toolCalls!.length - 1}
+                  width={width}
                 />
               ))}
             </Box>

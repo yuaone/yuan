@@ -90,6 +90,8 @@ import { ReasoningTree } from "./reasoning-tree.js";
 import { ContextCompressor } from "./context-compressor.js";
 import { DependencyAnalyzer } from "./dependency-analyzer.js";
 import { CrossFileRefactor } from "./cross-file-refactor.js";
+import { ContextBudgetManager } from "./context-budget.js";
+import { QAPipeline, type QAPipelineResult } from "./qa-pipeline.js";
 /** AgentLoop 설정 */
 export interface AgentLoopOptions {
   abortSignal?: AbortSignal
@@ -231,6 +233,16 @@ export class AgentLoop extends EventEmitter {
   private static readonly MAX_ACTIVE_SKILLS = 3;
   /** Context Budget: track injected system messages per iteration to cap at 5 */
   private iterationSystemMsgCount = 0;
+  /** Task 1: ContextBudgetManager for LLM-based summarization at 60-70% context usage */
+  private contextBudgetManager: ContextBudgetManager | null = null;
+  /** Task 2: Track whether write tools ran this iteration for QA triggering */
+  private iterationWriteToolPaths: string[] = [];
+  /** Task 2: Last QA result (surfaced to LLM on issues) */
+  private lastQAResult: QAPipelineResult | null = null;
+  /** Task 3: Track TS files modified this run for auto-tsc */
+  private iterationTsFilesModified: string[] = [];
+  /** Task 3: Whether tsc was run in the previous iteration (skip cooldown) */
+  private tscRanLastIteration = false;
   private tokenUsage: TokenUsage = {
     input: 0,
     output: 0,
@@ -385,6 +397,13 @@ async restoreSession(data: SessionData): Promise<void> {
   async init(): Promise<void> {
     if (this.initialized) return;
     this.initialized = true;
+
+    // Task 1: Initialize ContextBudgetManager with the total token budget
+    this.contextBudgetManager = new ContextBudgetManager({
+      totalBudget: this.config.loop.totalTokenBudget,
+      enableSummarization: true,
+      summarizationThreshold: 0.60, // trigger summarize() at 60% (before ContextCompressor at 70%)
+    });
 
     const projectPath = this.config.loop.projectPath;
     if (!projectPath) return;
@@ -782,6 +801,9 @@ async restoreSession(data: SessionData): Promise<void> {
         total: 0,
       };
       this.impactHintInjected = false;
+      // Task 3: reset tsc tracking per run
+      this.iterationTsFilesModified = [];
+      this.tscRanLastIteration = false;
     }
 
 this.checkpointSaved = false;
@@ -1633,6 +1655,35 @@ let iteration = this.iterationCount;
       // checkpoint first, then let ContextManager compact instead of aborting/throwing.
       const contextUsageRatio = this.contextManager.getUsageRatio();
 
+      // Task 1: ContextBudgetManager LLM summarization at 60-70% — runs BEFORE ContextCompressor
+      // Summarizes old "medium" priority conversation turns into a compact summary message,
+      // freeing tokens before the heavier ContextCompressor kicks in at 70%.
+      if (contextUsageRatio >= 0.60 && contextUsageRatio < 0.70 && this.contextBudgetManager) {
+        try {
+          // Sync current messages into the budget manager so it knows what to summarize
+          this.contextBudgetManager.importMessages(this.contextManager.getMessages());
+          if (this.contextBudgetManager.needsSummarization()) {
+            const summary = await this.contextBudgetManager.summarize(
+              async (prompt: string): Promise<string> => {
+                const resp = await this.llmClient.chat(
+                  [{ role: "user", content: prompt }],
+                  [],
+                );
+                return typeof resp.content === "string" ? resp.content : "";
+              },
+            );
+            if (summary) {
+              this.emitEvent({
+                kind: "agent:thinking",
+                content: `Context at ${Math.round(contextUsageRatio * 100)}%: summarized ${summary.originalIds.length} old messages (${summary.originalTokens} → ${summary.summarizedTokens} tokens, ${Math.round(summary.compressionRatio * 100)}% ratio).`,
+              });
+            }
+          }
+        } catch {
+          // ContextBudgetManager summarization failure is non-fatal
+        }
+      }
+
       // Bug 5 fix: use ContextCompressor as an alternative when context pressure is high (>70%)
       // At 70-84% we apply intelligent priority-based compression before falling back to truncation.
       if (contextUsageRatio >= 0.70 && contextUsageRatio < 0.85) {
@@ -1918,6 +1969,49 @@ let iteration = this.iterationCount;
           });
         }
 
+        // Task 2: QAPipeline "thorough" mode at final task completion (LLM review included)
+        if (this.changedFiles.length > 0 && this.config.loop.projectPath) {
+          try {
+            const thoroughQA = new QAPipeline({
+              projectPath: this.config.loop.projectPath,
+              level: "thorough",
+              enableStructural: true,
+              enableSemantic: false, // skip tests for speed — structural + quality + review
+              enableQuality: true,
+              enableReview: true,
+              enableDecision: true,
+              autoFix: false,
+            });
+            const thoroughResult = await thoroughQA.run(
+              this.changedFiles,
+              async (prompt: string): Promise<string> => {
+                try {
+                  const reviewResp = await this.llmClient.chat(
+                    [
+                      { role: "system", content: "You are a code reviewer. Review the code changes concisely." },
+                      { role: "user", content: prompt },
+                    ],
+                    [],
+                  );
+                  return typeof reviewResp.content === "string" ? reviewResp.content : "";
+                } catch {
+                  return "";
+                }
+              },
+            );
+            const thoroughFailures = thoroughResult.stages
+              .flatMap((s) => s.checks)
+              .filter((c) => c.status === "fail");
+            this.emitEvent({
+              kind: "agent:thinking",
+              content: `QA thorough check at completion: ${thoroughResult.overall} (${thoroughFailures.length} failure(s) across ${this.changedFiles.length} file(s)).`,
+            });
+            this.lastQAResult = thoroughResult;
+          } catch {
+            // Thorough QA failure is non-fatal — proceed with completion
+          }
+        }
+
         this.emitEvent({
           kind: "agent:completed",
     summary: finalSummary,
@@ -1995,6 +2089,107 @@ this.emitEvent({
           role: "user",
           content: fixPrompt,
         });
+      }
+
+      // Task 2: QAPipeline — run "quick" (structural only) after any WRITE tool call this iteration
+      const projectPath = this.config.loop.projectPath;
+      if (this.iterationWriteToolPaths.length > 0 && projectPath) {
+        try {
+          const qaPipeline = new QAPipeline({
+            projectPath,
+            level: "quick",
+            enableStructural: true,
+            enableSemantic: false,
+            enableQuality: false,
+            enableReview: false,
+            enableDecision: true,
+            autoFix: false,
+          });
+          const qaResult = await qaPipeline.run(this.iterationWriteToolPaths);
+          this.lastQAResult = qaResult;
+
+          // Surface QA issues as a system message so LLM sees them next iteration
+          const failedChecks = qaResult.stages
+            .flatMap((s) => s.checks)
+            .filter((c) => c.status === "fail" || c.status === "warn");
+
+          if (failedChecks.length > 0 && this.iterationSystemMsgCount < 5) {
+            const checkSummary = failedChecks
+              .slice(0, 5)
+              .map((c) => `  - [${c.severity}] ${c.name}: ${c.message}`)
+              .join("\n");
+            this.contextManager.addMessage({
+              role: "system",
+              content: `[QA Quick Check] ${failedChecks.length} issue(s) detected in modified files:\n${checkSummary}`,
+            });
+            this.iterationSystemMsgCount++;
+            this.emitEvent({
+              kind: "agent:thinking",
+              content: `QA quick check: ${failedChecks.length} issue(s) in ${this.iterationWriteToolPaths.length} file(s).`,
+            });
+          } else if (failedChecks.length === 0) {
+            this.emitEvent({
+              kind: "agent:thinking",
+              content: `QA quick check passed for ${this.iterationWriteToolPaths.length} file(s).`,
+            });
+          }
+        } catch {
+          // QAPipeline failure is non-fatal
+        }
+      }
+      // Reset per-iteration write tool tracking
+      this.iterationWriteToolPaths = [];
+
+      // Task 3: Auto-run tsc --noEmit after 2+ TS files modified in this iteration
+      // Skip if tsc was already run in the previous iteration (cooldown)
+      const tscFilesThisIteration = [...this.iterationTsFilesModified];
+      this.iterationTsFilesModified = []; // reset for next iteration
+      const tscRanPrev = this.tscRanLastIteration;
+      this.tscRanLastIteration = false; // will set to true below if we run it
+
+      if (tscFilesThisIteration.length >= 2 && projectPath && !tscRanPrev) {
+        try {
+          const tscResult = await this.toolExecutor.execute({
+            id: `auto-tsc-${Date.now()}`,
+            name: "shell_exec",
+            arguments: JSON.stringify({
+              command: "npx tsc --noEmit 2>&1 || true",
+              cwd: projectPath,
+              timeout: 60000,
+            }),
+          });
+          this.tscRanLastIteration = true;
+
+          // Inject TypeScript errors into context so LLM sees them next iteration
+          if (tscResult.success && tscResult.output && tscResult.output.trim().length > 0) {
+            const tscOutput = tscResult.output.trim();
+            // Only inject if there are actual TS errors (output is non-empty)
+            const hasErrors = tscOutput.includes(": error TS") || tscOutput.includes("error TS");
+            if (hasErrors && this.iterationSystemMsgCount < 5) {
+              // Truncate long tsc output to avoid context bloat
+              const truncated = tscOutput.length > 2000
+                ? tscOutput.slice(0, 2000) + "\n[...tsc output truncated]"
+                : tscOutput;
+              this.contextManager.addMessage({
+                role: "system",
+                content: `[Auto-TSC] TypeScript errors detected after modifying ${tscFilesThisIteration.length} files:\n\`\`\`\n${truncated}\n\`\`\`\nPlease fix these type errors.`,
+              });
+              this.iterationSystemMsgCount++;
+              this.emitEvent({
+                kind: "agent:thinking",
+                content: `Auto-TSC: TypeScript errors found after editing ${tscFilesThisIteration.join(", ")}.`,
+              });
+            } else if (!hasErrors) {
+              this.emitEvent({
+                kind: "agent:thinking",
+                content: `Auto-TSC: No type errors after editing ${tscFilesThisIteration.length} file(s).`,
+              });
+            }
+          }
+        } catch {
+          // Auto-tsc failure is non-fatal
+          this.tscRanLastIteration = false;
+        }
       }
 
       // iteration 이벤트
@@ -2627,6 +2822,14 @@ if (this.sessionPersistence && this.sessionId) {
         const filePathStr = String(filePath);
         if (!this.changedFiles.includes(filePathStr)) {
           this.changedFiles.push(filePathStr);
+        }
+        // Task 2: track write tool paths per-iteration for QA triggering
+        if (!this.iterationWriteToolPaths.includes(filePathStr)) {
+          this.iterationWriteToolPaths.push(filePathStr);
+        }
+        // Task 3: track TS/TSX files modified this iteration for auto-tsc
+        if (filePathStr.match(/\.[cm]?tsx?$/) && !this.iterationTsFilesModified.includes(filePathStr)) {
+          this.iterationTsFilesModified.push(filePathStr);
         }
         this.emitEvent({ kind: "agent:file_change", path: filePathStr, diff: result.output });
         if (this.impactAnalyzer) {

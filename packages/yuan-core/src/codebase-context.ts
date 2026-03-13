@@ -3,8 +3,9 @@
  * @description Codebase Context Engine — indexes TypeScript/JavaScript projects,
  * extracts symbols, builds call graphs, and provides semantic search + blast radius analysis.
  *
- * Uses regex-based AST analysis (no ts-morph dependency). Designed for the YUAN coding agent
- * to understand project structure before making changes.
+ * Uses regex-based parsing with an optional ts-morph AST layer for improved accuracy on
+ * TypeScript/JavaScript files (avoids false positives in comments/strings, correctly detects
+ * type-only imports). Falls back to regex when ts-morph is unavailable.
  */
 
 import { readdir, readFile } from "node:fs/promises";
@@ -12,6 +13,7 @@ import { join, resolve, extname, relative } from "node:path";
 import type { ImportRef } from "./dependency-analyzer.js";
 import { LanguageSupport } from "./language-support.js";
 import type { SupportedLanguage, LanguagePatterns } from "./language-support.js";
+import { AstAnalyzer } from "./ast-analyzer.js";
 
 // ─── Types ───
 
@@ -248,10 +250,13 @@ export class CodebaseContext {
   private reverseDepMap: Map<string, Set<string>> = new Map();
   /** Optional multi-language support for non-TS/JS files */
   private languageSupport: LanguageSupport | null;
+  /** AST-based analyzer for accurate TS/JS analysis (ts-morph) */
+  private astAnalyzer: AstAnalyzer;
 
   constructor(projectPath: string, languageSupport?: LanguageSupport) {
     this.projectPath = resolve(projectPath);
     this.languageSupport = languageSupport ?? null;
+    this.astAnalyzer = new AstAnalyzer(this.projectPath);
     this.index = {
       files: new Map(),
       symbolTable: new Map(),
@@ -284,7 +289,7 @@ export class CodebaseContext {
       try {
         const content = await readFile(filePath, "utf-8");
         this.fileContents.set(filePath, content);
-        const analysis = this.analyzeFile(filePath, content);
+        const analysis = await this.analyzeFile(filePath, content);
         this.index.files.set(filePath, analysis);
       } catch {
         // Skip unreadable files
@@ -315,7 +320,7 @@ export class CodebaseContext {
     try {
       const content = await readFile(absPath, "utf-8");
       this.fileContents.set(absPath, content);
-      const analysis = this.analyzeFile(absPath, content);
+      const analysis = await this.analyzeFile(absPath, content);
       this.index.files.set(absPath, analysis);
     } catch {
       // File was deleted or unreadable — remove it
@@ -885,10 +890,12 @@ export class CodebaseContext {
    * Analyze a single source file — extract symbols, imports, exports,
    * and compute complexity metrics.
    *
-   * When LanguageSupport is available and the file is not TS/JS,
-   * uses language-specific patterns for symbol extraction.
+   * For TypeScript/JavaScript files, first attempts AST-based extraction via AstAnalyzer
+   * (ts-morph) for improved accuracy, then merges/falls back to regex-based extraction.
+   * When LanguageSupport is available and the file is not TS/JS, uses language-specific
+   * patterns for symbol extraction.
    */
-  private analyzeFile(filePath: string, content: string): FileAnalysis {
+  private async analyzeFile(filePath: string, content: string): Promise<FileAnalysis> {
     const ext = extname(filePath);
     const isTsJs = ext === ".ts" || ext === ".tsx" || ext === ".js" || ext === ".jsx";
 
@@ -904,12 +911,12 @@ export class CodebaseContext {
 
     const lines = content.split("\n");
 
-    // For TS/JS files or when LanguageSupport is unavailable, use built-in extraction
-    // For other languages, use LanguageSupport patterns for basic symbol extraction
     let symbols: SymbolInfo[];
     if (isTsJs || !this.languageSupport) {
-      symbols = this.extractSymbols(filePath, content, lines);
+      // For TS/JS: try AST-based extraction first for accuracy, fall back to regex
+      symbols = await this.extractSymbolsWithAstFallback(filePath, content, lines);
     } else {
+      // For other languages: use LanguageSupport patterns
       symbols = this.extractSymbolsWithLanguageSupport(filePath, content, lines, language as SupportedLanguage);
     }
 
@@ -919,6 +926,103 @@ export class CodebaseContext {
     const complexity = this.computeComplexity(content, lines, imports.length);
 
     return { file: filePath, language, symbols, imports, exports, callEdges, complexity };
+  }
+
+  /**
+   * Try AST-based symbol extraction (ts-morph) for a TS/JS file.
+   * If AstAnalyzer returns results, merges them with regex results to fill in detail
+   * (params, jsdoc, etc.) not available from the AST layer alone.
+   * Falls back to pure regex extraction on any error or empty AST result.
+   */
+  private async extractSymbolsWithAstFallback(
+    filePath: string,
+    content: string,
+    lines: string[],
+  ): Promise<SymbolInfo[]> {
+    try {
+      const astSymbols = await this.astAnalyzer.extractSymbols(filePath);
+      if (astSymbols.length > 0) {
+        // AstAnalyzer succeeded — use regex extraction to get full detail (params, jsdoc…),
+        // but trust AST line numbers and exported status for the symbols it found.
+        const regexSymbols = this.extractSymbols(filePath, content, lines);
+        return this.mergeAstAndRegexSymbols(astSymbols, regexSymbols, filePath);
+      }
+    } catch {
+      // AstAnalyzer failed — fall through to regex
+    }
+    return this.extractSymbols(filePath, content, lines);
+  }
+
+  /**
+   * Merge AST symbol info (accurate line numbers, exported status) with regex symbol info
+   * (params, jsdoc, return types). AST results are authoritative for line/endLine/exported/isDefault.
+   * Symbols found by AST but not regex are included as minimal entries (no params/jsdoc).
+   * Symbols found by regex but not AST are included as-is (regex may have false positives
+   * for unexported symbols inside bodies, which is acceptable).
+   */
+  private mergeAstAndRegexSymbols(
+    astSymbols: import("./ast-analyzer.js").AstSymbol[],
+    regexSymbols: SymbolInfo[],
+    filePath: string,
+  ): SymbolInfo[] {
+    const merged: SymbolInfo[] = [];
+    const regexByName = new Map<string, SymbolInfo[]>();
+    for (const sym of regexSymbols) {
+      const arr = regexByName.get(sym.name) ?? [];
+      arr.push(sym);
+      regexByName.set(sym.name, arr);
+    }
+
+    const astNames = new Set<string>();
+
+    for (const astSym of astSymbols) {
+      const displayName = astSym.isDefault && astSym.name === "__default__" ? "default" : astSym.name;
+      astNames.add(displayName);
+
+      // Find the best matching regex symbol (by name, pick closest line)
+      const candidates = regexByName.get(displayName) ?? [];
+      let best: SymbolInfo | undefined;
+      let bestLineDiff = Infinity;
+      for (const candidate of candidates) {
+        const diff = Math.abs(candidate.line - astSym.line);
+        if (diff < bestLineDiff) {
+          bestLineDiff = diff;
+          best = candidate;
+        }
+      }
+
+      if (best && bestLineDiff <= 5) {
+        // Merge: use AST accuracy for line/endLine/exported/isDefault, regex for the rest
+        merged.push({
+          ...best,
+          line: astSym.line,
+          endLine: astSym.endLine,
+          exported: true, // AST found it as exported declaration
+          isDefault: astSym.isDefault,
+        });
+      } else {
+        // AST found a symbol regex missed — include as a minimal entry
+        merged.push({
+          name: displayName,
+          kind: astSym.kind,
+          file: filePath,
+          line: astSym.line,
+          endLine: astSym.endLine,
+          exported: true,
+          isDefault: astSym.isDefault,
+          isAsync: false,
+        });
+      }
+    }
+
+    // Include regex-found symbols not covered by AST (unexported/internal — AST only returns exports)
+    for (const sym of regexSymbols) {
+      if (!astNames.has(sym.name)) {
+        merged.push(sym);
+      }
+    }
+
+    return merged;
   }
 
   /**
