@@ -1,6 +1,6 @@
 {
   "name": "@yuaone/cli",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "YUAN — Autonomous Coding Agent CLI",
   "license": "AGPL-3.0",
   "type": "module",
