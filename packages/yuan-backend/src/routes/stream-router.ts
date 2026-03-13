@@ -73,7 +73,7 @@ function sseComment(res: Response, comment: string): void {
  * Router
  * ------------------------------------------------------- */
 
-const router = Router();
+const router: import("express").Router = Router();
 
 router.use(requireAuth);
 

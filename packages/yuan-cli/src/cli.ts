@@ -118,16 +118,16 @@ configCmd
 configCmd
   .command("set-key")
   .description("Set API key for a provider")
-  .argument("<provider>", "Provider: openai, anthropic, or yua")
+  .argument("<provider>", "Provider: openai, anthropic, yua, or google")
   .argument("<key>", "API key")
   .action((provider: string, key: string) => {
-    const validProviders = ["openai", "anthropic", "yua"] as const;
+    const validProviders = ["openai", "anthropic", "yua", "google"] as const;
     if (!validProviders.includes(provider as typeof validProviders[number])) {
-      renderer.error(`Invalid provider: ${provider}. Use: openai, anthropic, or yua`);
+      renderer.error(`Invalid provider: ${provider}. Use: openai, anthropic, yua, or google`);
       process.exit(1);
     }
     const configManager = new ConfigManager();
-    configManager.setKey(provider as "openai" | "anthropic" | "yua", key);
+    configManager.setKey(provider as "openai" | "anthropic" | "yua" | "google", key);
     renderer.success(`API key saved for ${provider}`);
   });
 

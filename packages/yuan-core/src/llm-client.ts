@@ -176,6 +176,9 @@ export class BYOKClient {
         number,
         { id: string; name: string; arguments: string }
       >();
+      // id → index mapping: Gemini may omit index but always sends id
+      const idToIndex = new Map<string, number>();
+      let nextFallbackIndex = 0;
       let inputTokens = 0;
       let outputTokens = 0;
 
@@ -208,7 +211,19 @@ export class BYOKClient {
             : [];
 
           for (const tc of toolCallDeltas) {
-              const idx = tc.index ?? 0;
+              // Resolve index: prefer explicit index, then id-based mapping, then auto-increment
+              let idx: number;
+              if (tc.index !== undefined) {
+                idx = tc.index;
+              } else if (tc.id && idToIndex.has(tc.id)) {
+                idx = idToIndex.get(tc.id)!;
+              } else if (tc.id) {
+                idx = nextFallbackIndex++;
+                idToIndex.set(tc.id, idx);
+              } else {
+                idx = 0;
+              }
+
               if (!toolCallAccumulators.has(idx)) {
                 toolCallAccumulators.set(idx, {
                  id: tc.id ?? `call_${idx}_${Date.now()}`,
@@ -221,7 +236,6 @@ export class BYOKClient {
               if (tc.function?.name) acc.name = tc.function.name;
               if (tc.function?.arguments)
                 acc.arguments += tc.function.arguments;
-            
           }
 
           // Usage (final chunk)

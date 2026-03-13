@@ -16,7 +16,7 @@ import { initRedis } from "./db/redis.js";
 /* ---------------------------------------------------------
  * APP
  * ------------------------------------------------------- */
-const app = express();
+const app: import("express").Express = express();
 const PORT = Number(process.env.YUAN_PORT || "4100");
 
 const CORS_ORIGINS = (process.env.YUAN_CORS_ORIGINS || "")

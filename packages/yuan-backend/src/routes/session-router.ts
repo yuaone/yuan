@@ -79,7 +79,7 @@ export type SessionRecord = ActiveSessionRecord;
  * Router
  * ------------------------------------------------------- */
 
-const router = Router();
+const router: import("express").Router = Router();
 
 // All session routes require authentication
 router.use(requireAuth);
