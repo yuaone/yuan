@@ -28,18 +28,35 @@ On first run, YUAN will prompt you to set up an API key if none is configured.
 
 ## Features
 
+### Core Agent
 - **Agent Loop** -- Autonomous tool-use loop that plans, executes, and self-corrects
 - **10 Built-in Tools** -- file_read, file_write, file_edit, shell_exec, grep, glob, git_ops, test_run, code_search, web_search
 - **BYOK** -- Works with YUA, OpenAI, Anthropic, and Google Gemini API keys
 - **Multi-provider** -- Store keys for all providers, switch model at runtime with `/model`
-- **Full TUI** -- Full-screen terminal UI with slash menu, approval prompts, live token counters
-- **Persistent Conversation** -- History preserved across messages within a session
 - **Approval Flow** -- Interactive `[Allow] [Always Allow] [Deny]` for destructive operations
 - **One-shot Mode** -- Run a single task and exit (`yuan code "add error handling to auth.ts"`)
 - **Session Persistence** -- Pause, resume, and recover agent sessions
+
+### World Model & Proactive Replanning (v0.7.0)
+- **World Model** -- Agent maintains a live snapshot of the codebase state (files, build status, test results) as it works
+- **Transition Model** -- Per-tool failure probability predictions with EMA calibration; learns from past outcomes
+- **Simulation Engine** -- Simulates plan success probability before execution begins; flags high-risk steps upfront
+- **Proactive Replanning** -- Risk scoring every 5 iterations; auto-replan at 70%+ risk without waiting for failure
+- **Immutable Delta-Patch State** -- World state history uses structural sharing (O(k) not O(n) memory per update)
+
+### Planning & Intelligence
+- **HierarchicalPlanner** -- Task decomposition with dependency graph for complex multi-file work
+- **DebateOrchestrator** -- Coder → Reviewer → Verifier loop for higher code quality
+- **6D Self-Reflection** -- Per-iteration scoring across correctness, completeness, consistency, quality, security, performance
+- **CAG Prompting** -- Cache-Augmented Generation: cold system context cached, dynamic context uncached for efficiency
+- **Parallel Tool Execution** -- Read-only tools (file_read, grep, glob) run in parallel waves; writes serialized by dependency
+
+### Developer Experience
+- **Full TUI** -- Full-screen terminal UI with slash menu, approval prompts, live token counters
+- **Real-time Diff Output** -- file_write shows unified diff instead of silent overwrite
+- **Benchmark Runner** -- `/benchmark` command for tracking performance regressions across runs
 - **Design Mode** -- AI-powered real-time UI collaboration via Playwright
-- **Advanced AI Engine** -- HierarchicalPlanner, ReflexionEngine, ContinuationEngine, PolicyEngine
-- **Security** -- Blocked commands, shell injection prevention, sensitive file detection
+- **Security** -- Blocked commands, shell injection prevention, sensitive file detection, secret detector
 
 ---
 
