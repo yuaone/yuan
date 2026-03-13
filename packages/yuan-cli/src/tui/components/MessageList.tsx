@@ -26,28 +26,35 @@ export interface MessageListProps {
   maxHeight?: number;
 }
 
+const DIFF_TOOL_NAMES = new Set(["file_write", "file_edit", "edit_file", "write_file"]);
+
 /**
  * Estimate how many terminal lines a message will occupy.
  * Conservative (overestimates) to guarantee no overflow.
  */
 function estimateLines(msg: TUIMessage, columns: number): number {
-  const contentWidth = Math.max(20, columns - 8); // padding/indentation
+  const contentWidth = Math.max(20, columns - 8);
   const textLen = msg.content?.length ?? 0;
   const contentLines = textLen === 0 ? 0 : Math.ceil(textLen / contentWidth);
 
   switch (msg.role) {
     case "user":
-      // Bubble: word-wrapped lines + 1 marginBottom
       return Math.max(1, contentLines) + 1;
     case "assistant": {
-      // Header(1) + content lines + tool calls + marginBottom(1)
-      const toolLines = msg.toolCalls?.length ?? 0;
+      const toolCalls = msg.toolCalls ?? [];
+      // Each tool call: 1 status line + up to 22 diff lines if file write/edit
+      const toolLines = toolCalls.reduce((sum, tc) => {
+        const hasDiff = DIFF_TOOL_NAMES.has(tc.toolName) && tc.status === "success";
+        return sum + 1 + (hasDiff ? 22 : 0);
+      }, 0);
       return 1 + Math.max(0, contentLines) + toolLines + 1;
     }
     case "tool":
       return 1;
     case "system": {
-      // System messages can be multi-line (newlines in content)
+      // Banner message with 16×10 fox sprite = 10 sprite rows + 4 text lines
+      const isBanner = msg.content?.includes("YUAN v") && msg.content?.includes("Autonomous Coding Agent");
+      if (isBanner) return 14;
       const newlines = (msg.content?.match(/\n/g) ?? []).length;
       return Math.max(1, newlines + 1);
     }
@@ -78,12 +85,12 @@ export const MessageList = memo(function MessageList({
     prevMsgCountRef.current = messages.length;
   }, [messages.length, pinned]);
 
-  // Key handling for scroll
+  // Key handling for scroll (PageUp/PageDown + Ctrl+Up/Down)
   useInput((_input, key) => {
-    if (key.pageUp) {
+    if (key.pageUp || (key.ctrl && key.upArrow)) {
       setPinned(false);
       setScrollBack((prev) => Math.min(prev + 5, Math.max(0, messages.length - 1)));
-    } else if (key.pageDown) {
+    } else if (key.pageDown || (key.ctrl && key.downArrow)) {
       setScrollBack((prev) => {
         const next = Math.max(0, prev - 5);
         if (next === 0) setPinned(true);

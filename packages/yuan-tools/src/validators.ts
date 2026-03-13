@@ -73,28 +73,48 @@ export function resolveAndValidatePath(
 
 // ─── Path Traversal Defence ─────────────────────────────────────────
 
+/** System directories that are always blocked even for read-only access */
+const BLOCKED_SYSTEM_DIRS = ['/etc', '/proc', '/sys', '/dev', '/boot', '/root'];
+
+function isBlockedSystemPath(resolvedPath: string): boolean {
+  return BLOCKED_SYSTEM_DIRS.some(
+    d => resolvedPath === d || resolvedPath.startsWith(d + '/')
+  );
+}
+
 /**
- * Resolve and validate a path to ensure it stays within workDir.
- * Returns the resolved absolute path.
- * Throws on path traversal attempts (including symlink-based).
+ * Resolve and validate a path.
+ * - readOnly=false (default): path must stay within workDir (write-safe)
+ * - readOnly=true: path may go outside workDir but must not access system dirs
+ *   (/etc, /proc, /sys, /dev, /boot, /root). Allows sibling project dirs (../foo).
  */
-export function validatePath(inputPath: string, workDir: string): string {
-  // Reject null bytes
+export function validatePath(inputPath: string, workDir: string, readOnly = false): string {
+  // Reject null bytes always
   if (inputPath.includes('\0')) {
     throw new Error('Path contains null byte');
   }
 
   const resolved = resolve(workDir, inputPath);
-  const rel = relative(workDir, resolved);
 
-  // rel must not start with '..' and must not be absolute (outside workDir)
+  if (readOnly) {
+    // For reads: only block known dangerous system paths
+    if (isBlockedSystemPath(resolved)) {
+      throw new Error(
+        `Access to system path blocked: "${inputPath}" resolves to "${resolved}"`
+      );
+    }
+    return resolved;
+  }
+
+  // For writes/exec: must stay within workDir
+  const rel = relative(workDir, resolved);
   if (rel.startsWith('..') || resolve(rel) === rel) {
     throw new Error(
       `Path traversal detected: "${inputPath}" resolves outside workDir "${workDir}"`
     );
   }
 
-  // Symlink defence: verify the real path stays within workDir
+  // Symlink defence for write paths
   const symlinkCheck = resolveAndValidatePath(inputPath, workDir);
   if (!symlinkCheck.valid) {
     throw new Error(

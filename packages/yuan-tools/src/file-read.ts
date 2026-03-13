@@ -51,7 +51,7 @@ export class FileReadTool extends BaseTool {
 
     let resolvedPath: string;
     try {
-      resolvedPath = this.validatePath(path, workDir);
+      resolvedPath = this.validatePath(path, workDir, true);
     } catch (err) {
       return this.fail(toolCallId, (err as Error).message);
     }

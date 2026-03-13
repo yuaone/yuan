@@ -81,7 +81,7 @@ export class GrepTool extends BaseTool {
     let searchDir = workDir;
     if (searchPath) {
       try {
-        searchDir = this.validatePath(searchPath, workDir);
+        searchDir = this.validatePath(searchPath, workDir, true);
       } catch (err) {
         return this.fail(toolCallId, (err as Error).message);
       }
