@@ -68,6 +68,7 @@ program
     const bridge = new AgentBridge({
       provider: config.provider || "openai",
       apiKey: config.apiKey,
+      apiKeys: config.apiKeys,
       model: config.model,
       baseUrl: config.baseUrl,
       workDir: process.cwd(),
@@ -78,6 +79,7 @@ program
       model: configManager.getModel(),
       provider: config.provider || "openai",
       bridge,
+      configManager,
       onExit: () => {
         process.exit(0);
       },

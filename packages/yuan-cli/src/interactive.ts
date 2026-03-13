@@ -161,6 +161,7 @@ export class InteractiveSession {
       onModeChange: (newMode) => {
         console.log(`Mode changed to: ${newMode}`);
       },
+      hasPendingApproval: false,
     };
 
     const result = executeCommand(ctx, command);
@@ -531,6 +532,14 @@ export class InteractiveSession {
           };
           this.sessionManager.save(this.session);
 
+          break;
+
+        case "agent:qa_result":
+          // Display QA result in spinner — non-blocking informational output
+          if (!this.isStreaming) {
+            const qaStatus = event.passed ? "✓ passed" : `✗ ${event.issues.length} issue(s)`;
+            spinner.update(`QA ${event.stage}: ${qaStatus}`);
+          }
           break;
 
         default:

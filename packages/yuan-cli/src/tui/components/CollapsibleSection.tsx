@@ -1,6 +1,5 @@
 /**
  * CollapsibleSection — generic expand/collapse wrapper.
- * Used by ToolCallTree for file reads, diffs, bash output.
  */
 
 import React from "react";

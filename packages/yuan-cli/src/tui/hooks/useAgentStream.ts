@@ -418,6 +418,16 @@ export function useAgentStream(): UseAgentStreamReturn {
           break;
         }
 
+        case "agent:qa_result": {
+          const passed = event.passed as boolean;
+          const stage = event.stage as string;
+          const issues = event.issues as string[];
+          const statusLabel = passed ? "passed" : `${issues.length} issue(s)`;
+          const lines = [`[QA ${stage}] ${statusLabel}`, ...issues.slice(0, 5)];
+          appendThinkingLines(lines.join("\n"));
+          break;
+        }
+
         default:
           break;
       }

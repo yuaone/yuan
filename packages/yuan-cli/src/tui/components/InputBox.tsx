@@ -102,6 +102,35 @@ export function InputBox({
     (input, key) => {
       if (disabled) return;
 
+      // Raw ANSI arrow sequences — SSH environments where Ink doesn't parse key.leftArrow etc.
+      // ESC gets consumed by Ink, leaving "[D"/["C"/["A"/["B" as the input string.
+      if (input === "[D" || input === "\x1b[D") {
+        if (!slashMenuOpen) setCursorPos((p) => Math.max(0, p - 1));
+        return;
+      }
+      if (input === "[C" || input === "\x1b[C") {
+        if (!slashMenuOpen) setCursorPos((p) => Math.min(value.length, p + 1));
+        return;
+      }
+      if (input === "[A" || input === "\x1b[A") {
+        if (slashMenuOpen && onSlashNavigate) {
+          onSlashNavigate("up");
+        } else {
+          const prev = history.up(value);
+          if (prev !== null) updateValue(prev);
+        }
+        return;
+      }
+      if (input === "[B" || input === "\x1b[B") {
+        if (slashMenuOpen && onSlashNavigate) {
+          onSlashNavigate("down");
+        } else {
+          const next = history.down();
+          if (next !== null) updateValue(next);
+        }
+        return;
+      }
+
       // Esc → close slash menu first, then interrupt
       if (key.escape) {
         if (slashMenuOpen) {
@@ -215,7 +244,8 @@ export function InputBox({
       if (input && !key.ctrl && !key.meta) {
         // ANSI escape sequence, 마우스 이벤트, 제어 문자 차단
         // eslint-disable-next-line no-control-regex
-        const cleaned = input.replace(/[\x00-\x1f\x7f]|\x1b\[[^a-zA-Z]*[a-zA-Z]/g, "");
+        // Also filter residual [ABCD] from SSH (ESC consumed by Ink, leaving "[D" etc.)
+        const cleaned = input.replace(/[\x00-\x1f\x7f]|\x1b\[[^a-zA-Z]*[a-zA-Z]|\[[ABCD]$/g, "");
         if (cleaned.length > 0) {
           const isPaste = cleaned.length > 10 || cleaned.includes("\n") || cleaned.includes("\t");
           const normalized = cleaned

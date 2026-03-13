@@ -11,7 +11,6 @@
  * - governor: 실행 제한/안전 검증
  * - context-manager: 컨텍스트 윈도우 관리
  * - memory: YUAN.md 프로젝트 메모리
- * - planner: 작업 계획 수립
  * - system-prompt: 시스템 프롬프트 생성
  */
 
@@ -128,10 +127,6 @@ export type { ContextManagerConfig } from "./context-manager.js";
 export { YuanMemory } from "./memory.js";
 export type { YuanMemoryData, ProjectStructure } from "./memory.js";
 
-// ─── Planner ───
-export { Planner } from "./planner.js";
-export type { PlannerConfig, FileDependency } from "./planner.js";
-
 // ─── System Prompt ───
 export { buildSystemPrompt } from "./system-prompt.js";
 export type {
@@ -220,17 +215,6 @@ export type {
   IndependentGroup,
 } from "./dependency-analyzer.js";
 
-// ─── Conflict Resolver ───
-export { ConflictResolver, lcs, diff, merge3way } from "./conflict-resolver.js";
-export type {
-  ConflictType,
-  FileConflict,
-  ConflictResolution,
-  DiffHunk,
-  ConflictHunk,
-  MergeResult,
-} from "./conflict-resolver.js";
-
 // ─── Sub-Agent ───
 export { SubAgent } from "./sub-agent.js";
 export type {
@@ -318,17 +302,6 @@ export type {
   ContinuousReflectionOptions,
   ReflectionEvents,
 } from "./continuous-reflection.js";
-
-// ─── Role Registry ───
-export { RoleConfigRegistry } from "./role-registry.js";
-export type { RoleConfig } from "./role-registry.js";
-
-// ─── Dynamic Role Generator ───
-export { DynamicRoleGenerator } from "./dynamic-role-generator.js";
-export type {
-  DynamicRoleRequest,
-  DynamicRolePattern,
-} from "./dynamic-role-generator.js";
 
 // ─── Agent Modes ───
 export {
@@ -485,20 +458,6 @@ export type {
   KernelEventType,
   KernelEvent,
 } from "./kernel.js";
-
-// ─── Test Intelligence ───
-export { TestIntelligence } from "./test-intelligence.js";
-export type {
-  TestFile,
-  TestCase,
-  TestRunResult,
-  TestError,
-  AffectedTestResult,
-  CoverageGap,
-  TestSuggestion,
-  SuggestedTestCase,
-  TestIntelligenceConfig,
-} from "./test-intelligence.js";
 
 // ─── Cross-File Refactoring ───
 export { CrossFileRefactor } from "./cross-file-refactor.js";
