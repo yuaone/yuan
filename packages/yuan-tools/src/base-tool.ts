@@ -35,8 +35,8 @@ export abstract class BaseTool {
   abstract execute(args: Record<string, unknown>, workDir: string, abortSignal?: AbortSignal): Promise<ToolResult>;
 
   /** Validate and resolve a path within workDir. Throws on traversal. */
-  protected validatePath(path: string, workDir: string): string {
-    return _validatePath(path, workDir);
+  protected validatePath(path: string, workDir: string, readOnly = false): string {
+    return _validatePath(path, workDir, readOnly);
   }
 
   /** Truncate output to maxBytes. */

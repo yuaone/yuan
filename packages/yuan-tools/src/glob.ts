@@ -53,7 +53,7 @@ export class GlobTool extends BaseTool {
     let cwd = workDir;
     if (basePath) {
       try {
-        cwd = this.validatePath(basePath, workDir);
+        cwd = this.validatePath(basePath, workDir, true);
       } catch (err) {
         return this.fail(toolCallId, (err as Error).message);
       }

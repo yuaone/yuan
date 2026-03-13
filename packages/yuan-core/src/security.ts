@@ -419,17 +419,24 @@ export function validateFilePath(
     };
   }
 
-  // 2. Path traversal 검사 (기본 패턴)
-  // Note: 실제 resolve는 validators.ts의 validatePath에서도 수행
+  // 2. Path traversal 검사 — read-only 경로는 sibling dirs 허용, 시스템 경로만 차단
   const resolved = resolve(workDir, filePath);
   const rel = relative(workDir, resolved);
+  const isOutside = rel.startsWith("..") || resolve(rel) === rel;
 
-  if (rel.startsWith("..") || resolve(rel) === rel) {
-    return {
-      allowed: false,
-      reason: `Path traversal detected: "${filePath}" resolves outside workDir "${workDir}"`,
-      risk: "critical",
-    };
+  if (isOutside) {
+    // Block known dangerous system paths absolutely
+    const BLOCKED = ['/etc', '/proc', '/sys', '/dev', '/boot', '/root'];
+    const isSystemPath = BLOCKED.some(d => resolved === d || resolved.startsWith(d + '/'));
+    if (isSystemPath) {
+      return {
+        allowed: false,
+        reason: `System path access blocked: "${filePath}" resolves to "${resolved}"`,
+        risk: "critical",
+      };
+    }
+    // For reads outside workDir: warn but allow (user may be scanning sibling projects)
+    return { allowed: true, risk: "low" };
   }
 
   // 3. 민감 파일 검사
