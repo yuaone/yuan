@@ -94,12 +94,11 @@ function App({
         setTokensPerSec(input + output);
       }
 
-      // Accumulate ONLY real LLM reasoning into ReasoningPanel — no internal agent noise
+      // Stream reasoning delta directly into ReasoningPanel
       if (event.kind === "agent:reasoning_delta") {
-        const src = (event as { source?: string }).source;
         const text = (event as { text?: string }).text;
-        if (src === "llm" && text) {
-          setReasoningContent((prev) => prev ? `${prev}\n${text}` : text);
+        if (text) {
+          setReasoningContent((prev) => prev ? `${prev}${text}` : text);
         }
       }
     });
