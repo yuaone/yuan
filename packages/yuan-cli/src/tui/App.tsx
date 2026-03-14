@@ -502,17 +502,6 @@ const messages = agentStream.state.messages;
         />
       )}
 
-      {/* Reasoning panel — above input, expands upward pushing MessageList */}
-      {reasoningContent.trim() && (
-        <ReasoningPanel
-          content={reasoningContent}
-          isOpen={reasoningOpen}
-          onOpen={() => setReasoningOpen(true)}
-          onClose={() => setReasoningOpen(false)}
-          maxHeight={Math.max(6, Math.floor(rows / 3))}
-        />
-      )}
-
       {/* Input — above footer */}
       <InputBox
         onSubmit={handleSubmit}
@@ -539,6 +528,17 @@ const messages = agentStream.state.messages;
 
       {/* Status indicator — below input */}
       <FooterBar agentState={agentStream.state} slashMenuOpen={slashState.isOpen} hasReasoning={!!reasoningContent.trim()} />
+
+      {/* Reasoning panel — below footer, same level as TaskPanel */}
+      {reasoningContent.trim() && (
+        <ReasoningPanel
+          content={reasoningContent}
+          isOpen={reasoningOpen}
+          onOpen={() => setReasoningOpen(true)}
+          onClose={() => setReasoningOpen(false)}
+          maxHeight={Math.max(6, Math.floor(rows / 3))}
+        />
+      )}
 
       {/* Task panel — background agent list / detail view */}
       {taskPanel.isOpen && bgTasks.length > 0 && (
