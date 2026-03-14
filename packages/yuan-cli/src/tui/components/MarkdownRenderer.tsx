@@ -465,7 +465,7 @@ function renderBlock(block: RenderedBlock, idx: number, width: number): React.JS
         <Box
           key={idx}
           flexDirection="column"
-          marginTop={level === 1 ? 1 : 0}
+          marginTop={level <= 2 ? 1 : 0}
           marginBottom={1}
         >
           <Text bold color={color}>

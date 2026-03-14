@@ -440,14 +440,16 @@ const separator = useMemo(() => {
 
   return (
     <Box width={columns} flexDirection="column" flexShrink={0}>
-      {/* Pending queued message — shown above input when agent is running */}
-      {isRunning && pendingMessage ? (
-        <Box>
-          <Text dimColor>  ⏸ </Text>
-          <Text dimColor color="yellow">{pendingMessage.length > columns - 8 ? pendingMessage.slice(0, columns - 11) + "…" : pendingMessage}</Text>
-          <Text dimColor> (queued)</Text>
-        </Box>
-      ) : null}
+      {/* Pending queued message row — always 1 row height to prevent layout reflow */}
+      <Box height={1}>
+        {isRunning && pendingMessage ? (
+          <>
+            <Text dimColor>  ⏸ </Text>
+            <Text dimColor color="yellow" wrap="truncate">{pendingMessage.length > columns - 8 ? pendingMessage.slice(0, columns - 11) + "…" : pendingMessage}</Text>
+            <Text dimColor> (queued)</Text>
+          </>
+        ) : null}
+      </Box>
       {/* Top border */}
       <Text dimColor>{boxTop}</Text>
       {/* Input row inside box */}

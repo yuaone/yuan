@@ -470,12 +470,12 @@ function App({
     return Math.min(bgTasks.length + 3, 8); // header + rows + footer padding
   }, [taskPanel.isOpen, taskPanel.mode, taskPanel.detailTaskId, bgTasks]);
 
-  // Content area height = total rows - input(3) - footer(1) - slashMenu(N) - taskPanel(N) - reasoningPanel(N when open)
+  // Content area height = total rows - input(4: queued+border+input+border) - footer(1) - slashMenu(N) - taskPanel(N) - reasoningPanel(N when open)
   const reasoningPanelHeight = reasoningOpen && !!reasoningContent.trim()
     ? Math.max(6, Math.floor(rows / 3))
     : 0;
   const contentHeight = useMemo(
-    () => Math.max(3, rows - 4 - slashMenuRows - taskPanelRows - reasoningPanelHeight),
+    () => Math.max(3, rows - 5 - slashMenuRows - taskPanelRows - reasoningPanelHeight),
     [rows, slashMenuRows, taskPanelRows, reasoningPanelHeight],
   );
 

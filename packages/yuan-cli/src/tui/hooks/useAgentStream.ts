@@ -122,6 +122,7 @@ export function useAgentStream(): UseAgentStreamReturn {
 
   const pendingTextRef = useRef("");
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastChunkRef = useRef<string>(""); // for dedup: track previous chunk
   const FLUSH_INTERVAL = 40;
 
   // Debounce buffer for thinking/reasoning lines to avoid per-token re-renders
@@ -313,20 +314,20 @@ export function useAgentStream(): UseAgentStreamReturn {
           // Only update status/tool state on the FIRST token of a stream — not every token
           if (!isStreamingRef.current) {
             isStreamingRef.current = true;
-            // Reset thinking message ID so post-stream thinking events create a NEW message
-            // rather than appending to the old thinking block (prevents reasoning overlap)
+            lastChunkRef.current = ""; // reset dedup on new stream
             currentThinkingMsgIdRef.current = null;
             statusRef.current = "streaming";
             setStatus("streaming");
             setCurrentToolName(null);
             setCurrentToolArgs(null);
           }
-          // Dedup: if this chunk is an exact suffix of what we already buffered (LLM repeat at
-          // chunk boundary), skip it to prevent "합니다.합니다." style duplication.
-          const existing = pendingTextRef.current;
-          if (existing.length > 0 && text.length <= 20 && existing.endsWith(text)) {
+          // Dedup: skip ONLY if this chunk is identical to the previous chunk
+          // (pure repeat at chunk boundary). Avoid buffer-suffix matching which
+          // incorrectly drops legitimate text that happens to match the buffer tail.
+          if (text === lastChunkRef.current && text.length <= 20 && lastChunkRef.current.length > 0) {
             break;
           }
+          lastChunkRef.current = text;
           pendingTextRef.current += text;
           if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
           flushTimerRef.current = setTimeout(flushPendingText, FLUSH_INTERVAL);

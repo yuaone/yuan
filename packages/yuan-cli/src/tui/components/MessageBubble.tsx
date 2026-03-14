@@ -566,4 +566,24 @@ export const MessageBubble = React.memo(function MessageBubble({
     default:
       return <Box />;
   }
+}, (prev, next) => {
+  // Custom equality: skip re-render if message content/toolCalls/streaming haven't changed
+  if (prev.width !== next.width) return false;
+  if (prev.isLatest !== next.isLatest) return false;
+  const pm = prev.message;
+  const nm = next.message;
+  if (pm.id !== nm.id) return false;
+  if (pm.content !== nm.content) return false;
+  if (pm.isStreaming !== nm.isStreaming) return false;
+  if (pm.thinkingContent !== nm.thinkingContent) return false;
+  if ((pm.toolCalls?.length ?? 0) !== (nm.toolCalls?.length ?? 0)) return false;
+  // Check if any tool call status changed
+  if (pm.toolCalls && nm.toolCalls) {
+    for (let i = 0; i < pm.toolCalls.length; i++) {
+      if (pm.toolCalls[i]?.status !== nm.toolCalls[i]?.status) return false;
+      if (pm.toolCalls[i]?.duration !== nm.toolCalls[i]?.duration) return false;
+    }
+  }
+  if ((pm.phaseEvents?.length ?? 0) !== (nm.phaseEvents?.length ?? 0)) return false;
+  return true;
 });
