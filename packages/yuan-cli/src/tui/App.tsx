@@ -94,12 +94,13 @@ function App({
         setTokensPerSec(input + output);
       }
 
-      // Accumulate reasoning/thinking into ReasoningPanel content
-      if (event.kind === "agent:thinking" && (event as { content?: string }).content) {
-        setReasoningContent((prev) => prev ? `${prev}\n${(event as { content?: string }).content}` : (event as { content?: string }).content!);
-      }
-      if (event.kind === "agent:reasoning_delta" && (event as { text?: string }).text) {
-        setReasoningContent((prev) => prev ? `${prev}\n${(event as { text?: string }).text}` : (event as { text?: string }).text!);
+      // Accumulate ONLY real LLM reasoning into ReasoningPanel — no internal agent noise
+      if (event.kind === "agent:reasoning_delta") {
+        const src = (event as { source?: string }).source;
+        const text = (event as { text?: string }).text;
+        if (src === "llm" && text) {
+          setReasoningContent((prev) => prev ? `${prev}\n${text}` : text);
+        }
       }
     });
 
@@ -470,10 +471,13 @@ function App({
     return Math.min(bgTasks.length + 3, 8); // header + rows + footer padding
   }, [taskPanel.isOpen, taskPanel.mode, taskPanel.detailTaskId, bgTasks]);
 
-  // Content area height = total rows - status(1) - footer(1) - input(1) - slashMenu(N) - taskPanel(N)
+  // Content area height = total rows - input(3) - footer(1) - slashMenu(N) - taskPanel(N) - reasoningPanel(N when open)
+  const reasoningPanelHeight = reasoningOpen && !!reasoningContent.trim()
+    ? Math.max(6, Math.floor(rows / 3))
+    : 0;
   const contentHeight = useMemo(
-    () => Math.max(3, rows - 3 - slashMenuRows - taskPanelRows),
-    [rows, slashMenuRows, taskPanelRows],
+    () => Math.max(3, rows - 4 - slashMenuRows - taskPanelRows - reasoningPanelHeight),
+    [rows, slashMenuRows, taskPanelRows, reasoningPanelHeight],
   );
 
 const messages = agentStream.state.messages;
@@ -498,10 +502,18 @@ const messages = agentStream.state.messages;
         />
       )}
 
-      {/* Status indicator */}
-      <FooterBar agentState={agentStream.state} slashMenuOpen={slashState.isOpen} hasReasoning={!!reasoningContent.trim()} />
+      {/* Reasoning panel — above input, expands upward pushing MessageList */}
+      {reasoningContent.trim() && (
+        <ReasoningPanel
+          content={reasoningContent}
+          isOpen={reasoningOpen}
+          onOpen={() => setReasoningOpen(true)}
+          onClose={() => setReasoningOpen(false)}
+          maxHeight={Math.max(6, Math.floor(rows / 3))}
+        />
+      )}
 
-      {/* Input */}
+      {/* Input — above footer */}
       <InputBox
         onSubmit={handleSubmit}
         onInterrupt={handleInterrupt}
@@ -525,16 +537,8 @@ const messages = agentStream.state.messages;
         hasBackgroundTasks={bgTasks.length > 0}
       />
 
-      {/* Reasoning panel — below input, above task panel */}
-      {reasoningContent.trim() && (
-        <ReasoningPanel
-          content={reasoningContent}
-          isOpen={reasoningOpen}
-          onOpen={() => setReasoningOpen(true)}
-          onClose={() => setReasoningOpen(false)}
-          maxHeight={Math.max(6, Math.floor(rows / 3))}
-        />
-      )}
+      {/* Status indicator — below input */}
+      <FooterBar agentState={agentStream.state} slashMenuOpen={slashState.isOpen} hasReasoning={!!reasoningContent.trim()} />
 
       {/* Task panel — background agent list / detail view */}
       {taskPanel.isOpen && bgTasks.length > 0 && (

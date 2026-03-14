@@ -429,34 +429,53 @@ const separator = useMemo(() => {
     }
   }
 
+  const boxTop = useMemo(() => {
+    const w = Math.max(0, columns - 2);
+    return `\u250C${"─".repeat(w)}\u2510`;
+  }, [columns]);
+  const boxBottom = useMemo(() => {
+    const w = Math.max(0, columns - 2);
+    return `\u2514${"─".repeat(w)}\u2518`;
+  }, [columns]);
+
   return (
     <Box width={columns} flexDirection="column" flexShrink={0}>
-      <Text dimColor>{separator}</Text>
       {/* Pending queued message — shown above input when agent is running */}
       {isRunning && pendingMessage ? (
         <Box>
-          <Text dimColor>⏸ </Text>
-          <Text dimColor color="yellow">{pendingMessage.length > columns - 6 ? pendingMessage.slice(0, columns - 9) + "…" : pendingMessage}</Text>
+          <Text dimColor>  ⏸ </Text>
+          <Text dimColor color="yellow">{pendingMessage.length > columns - 8 ? pendingMessage.slice(0, columns - 11) + "…" : pendingMessage}</Text>
           <Text dimColor> (queued)</Text>
         </Box>
       ) : null}
+      {/* Top border */}
+      <Text dimColor>{boxTop}</Text>
+      {/* Input row inside box */}
       <Box justifyContent="space-between">
-        <Box flexShrink={1} overflow="hidden">
+        <Box flexShrink={1}>
+          <Text dimColor>{"\u2502"} </Text>
           {isRunning && !value ? (
-            // Running with no typed input — show dim hint
-            <Text dimColor>{prompt} type to queue next message…</Text>
+            <Text dimColor wrap="truncate">Message YUAN...</Text>
+          ) : !value && !isRunning ? (
+            <>
+              <Text dimColor>{prompt} </Text>
+              <Text wrap="truncate">{inputLine}</Text>
+              {!inputLine && <Text dimColor wrap="truncate">Message YUAN...</Text>}
+            </>
           ) : (
             <>
               <Text dimColor>{prompt} </Text>
-              <Text>{inputLine}</Text>
+              <Text wrap="truncate">{inputLine}</Text>
             </>
           )}
         </Box>
-
         <Box flexShrink={0}>
-          {pasteBadge ? <Text dimColor>{pasteBadge}</Text> : null}
+          {pasteBadge ? <Text dimColor>{pasteBadge} </Text> : null}
+          <Text dimColor>{"\u2502"}</Text>
         </Box>
       </Box>
+      {/* Bottom border */}
+      <Text dimColor>{boxBottom}</Text>
     </Box>
   );
 }

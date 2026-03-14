@@ -89,7 +89,7 @@ export function useAgentStream(): UseAgentStreamReturn {
       if (startTimeRef.current) {
         setElapsedMs(Date.now() - startTimeRef.current);
       }
-    }, 200);
+    }, 1000);
   }, []);
 
   const stopTimer = useCallback(() => {
@@ -280,11 +280,8 @@ export function useAgentStream(): UseAgentStreamReturn {
 
       switch (event.kind) {
   case "agent:reasoning_delta": {
-    // source:"agent" = internal loop progress (iteration N: ...) — goes to ReasoningPanel only, not chat
-    // source:"llm" = actual LLM extended thinking — show in chat as dimmed content
-    if ((event as { source?: string }).source !== "agent") {
-      appendThinkingLines(String(event.text ?? ""));
-    }
+    // LLM reasoning goes ONLY to ReasoningPanel (via App.tsx), not chat bubbles.
+    // Agent-internal reasoning_delta is ignored here entirely.
     break;
   }
         case "agent:thinking": {
@@ -312,6 +309,7 @@ export function useAgentStream(): UseAgentStreamReturn {
 
         case "agent:text_delta": {
           const text = event.text as string;
+          if (!text) break;
           // Only update status/tool state on the FIRST token of a stream — not every token
           if (!isStreamingRef.current) {
             isStreamingRef.current = true;
@@ -322,6 +320,12 @@ export function useAgentStream(): UseAgentStreamReturn {
             setStatus("streaming");
             setCurrentToolName(null);
             setCurrentToolArgs(null);
+          }
+          // Dedup: if this chunk is an exact suffix of what we already buffered (LLM repeat at
+          // chunk boundary), skip it to prevent "합니다.합니다." style duplication.
+          const existing = pendingTextRef.current;
+          if (existing.length > 0 && text.length <= 20 && existing.endsWith(text)) {
+            break;
           }
           pendingTextRef.current += text;
           if (flushTimerRef.current) clearTimeout(flushTimerRef.current);

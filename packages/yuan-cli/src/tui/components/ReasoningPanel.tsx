@@ -1,11 +1,14 @@
 /**
- * ReasoningPanel — tree-based collapsible reasoning viewer.
+ * ReasoningPanel — smart collapsible reasoning viewer.
+ *
+ * Displays ONLY real LLM extended thinking (source: "llm").
+ * Auto-detects section boundaries in plain text (no markdown headers required).
  *
  * UX
  * - r            : open / close
- * - ↑ / ↓        : move selection
- * - → / Enter    : expand branch + open body
- * - ←            : collapse branch or close body
+ * - up / down    : move selection
+ * - right / Enter: expand branch + open body
+ * - left         : collapse branch or close body
  * - 1..9         : quick jump to visible node
  * - esc          : close panel
  */
@@ -42,6 +45,8 @@ interface VisibleTreeRow {
   isExpanded: boolean;
 }
 
+/* ─── Helpers ──────────────────────────────────────────────────────── */
+
 function slugify(value: string): string {
   return value
     .toLowerCase()
@@ -51,6 +56,9 @@ function slugify(value: string): string {
     .slice(0, 32);
 }
 
+/**
+ * Original tree parser — used when content has markdown `#` headers.
+ */
 function parseReasoningTree(content: string): ReasoningNode[] {
   const lines = content.split("\n");
   const roots: ReasoningNode[] = [];
@@ -96,19 +104,88 @@ function parseReasoningTree(content: string): ReasoningNode[] {
     }
   }
 
-  const preambleText = preamble.join("\n").trim();
-  if (preambleText) {
-    roots.unshift({
-      id: "overview",
-      title: "Overview",
-      level: 1,
-      body: preambleText,
-      children: [],
-    });
-  }
-
+  // Discard preamble text (text before first ## header) — no synthetic "Overview" node
   return roots;
 }
+
+/**
+ * Smart section parser for plain-text LLM reasoning (no markdown headers).
+ *
+ * Splits on natural boundaries:
+ * - Double newlines (paragraph breaks)
+ * - Numbered steps: "1.", "2.", "Step 1:", etc.
+ * - Transition phrases: "First,", "Then,", "Next,", "Finally,", "Let me", "Now ", "Actually", "Wait,"
+ *
+ * Extracts a short title from the first line of each section.
+ */
+function parseReasoningIntoSections(content: string): ReasoningNode[] {
+  // Split on double-newlines first
+  const paragraphs = content.split(/\n{2,}/).filter((s) => s.trim());
+
+  if (paragraphs.length === 0) {
+    return [];
+  }
+
+  if (paragraphs.length === 1) {
+    // Single block — show as one "Thinking" section
+    return [
+      {
+        id: "thinking-0",
+        title: "Thinking",
+        level: 1,
+        body: content.trim(),
+        children: [],
+      },
+    ];
+  }
+
+  // Group paragraphs into logical sections
+  return paragraphs.map((para, i) => {
+    const firstLine = para.split("\n")[0]?.trim() ?? "";
+
+    // Try to use first line as title if it's short enough and looks like a heading
+    const isShortEnough = firstLine.length > 0 && firstLine.length <= 60;
+    // Remove leading markers like "1.", "Step 1:", "First,", etc.
+    const cleanedTitle = firstLine
+      .replace(/^(?:step\s*\d+[:.]\s*|(\d+)[.)]\s*)/i, "")
+      .replace(/^(?:First|Then|Next|Finally|Now|Actually|Wait|Let me|However|So|But),?\s*/i, "")
+      .trim();
+
+    let title: string;
+    let body: string;
+
+    if (isShortEnough && cleanedTitle.length > 0) {
+      title = cleanedTitle.length <= 50 ? cleanedTitle : cleanedTitle.slice(0, 47) + "...";
+      // Body is remaining lines after first
+      const rest = para.split("\n").slice(1).join("\n").trim();
+      body = rest || para.trim();
+    } else {
+      title = `Part ${i + 1}`;
+      body = para.trim();
+    }
+
+    return {
+      id: `section-${i}`,
+      title,
+      level: 1,
+      body,
+      children: [],
+    };
+  });
+}
+
+/**
+ * Choose the right parser based on content shape.
+ * If content has markdown `#` headers, use the tree parser; otherwise section parser.
+ */
+function parseContent(content: string): ReasoningNode[] {
+  if (/\n#{1,4}\s+/.test(content)) {
+    return parseReasoningTree(content);
+  }
+  return parseReasoningIntoSections(content);
+}
+
+/* ─── Tree traversal helpers ───────────────────────────────────────── */
 
 function collectIds(nodes: ReasoningNode[]): string[] {
   const out: string[] = [];
@@ -136,28 +213,24 @@ function countNodes(nodes: ReasoningNode[]): number {
 
 function findLastNodeWithBody(nodes: ReasoningNode[]): ReasoningNode | null {
   let last: ReasoningNode | null = null;
-
   const walk = (items: ReasoningNode[]) => {
     for (const item of items) {
       if (item.body.trim()) last = item;
       walk(item.children);
     }
   };
-
   walk(nodes);
   return last;
 }
 
 function buildInitialExpandedBranches(nodes: ReasoningNode[]): Record<string, boolean> {
   const expanded: Record<string, boolean> = {};
-
   const walk = (items: ReasoningNode[]) => {
     for (const item of items) {
       expanded[item.id] = item.level <= 1;
       walk(item.children);
     }
   };
-
   walk(nodes);
   return expanded;
 }
@@ -202,10 +275,11 @@ function flattenVisibleTree(
 function truncateMarkdownSafely(
   markdown: string,
   maxLines: number,
-): { content: string; truncated: boolean } {
+): { content: string; truncated: boolean; totalLines: number } {
   const rawLines = markdown.split("\n");
+  const totalLines = rawLines.length;
   if (rawLines.length <= maxLines) {
-    return { content: markdown, truncated: false };
+    return { content: markdown, truncated: false, totalLines };
   }
 
   const sliced = rawLines.slice(0, maxLines);
@@ -218,8 +292,21 @@ function truncateMarkdownSafely(
   return {
     content: sliced.join("\n"),
     truncated: true,
+    totalLines,
   };
 }
+
+/* ─── Color palette ────────────────────────────────────────────────── */
+
+const COLORS = {
+  border: "#334155",       // slate border
+  sectionTitle: "#94a3b8", // muted section title
+  selected: "#67e8f9",     // cyan highlight
+  thinkingText: "#64748b", // dim slate for reasoning body
+  hint: "#475569",         // very dim hint text
+} as const;
+
+/* ─── Component ────────────────────────────────────────────────────── */
 
 export function ReasoningPanel({
   content,
@@ -230,7 +317,7 @@ export function ReasoningPanel({
 }: ReasoningPanelProps): React.JSX.Element | null {
   const { columns } = useTerminalSize();
 
-  const tree = useMemo(() => parseReasoningTree(content), [content]);
+  const tree = useMemo(() => parseContent(content), [content]);
   const allIds = useMemo(() => collectIds(tree), [tree]);
   const totalSections = useMemo(() => countNodes(tree), [tree]);
 
@@ -269,111 +356,110 @@ export function ReasoningPanel({
   }, [visibleRows, selectedId]);
 
   const selectedRow = visibleRows[selectedIndex];
-  const openNodeTitle =
-    visibleRows.find((row) => row.node.id === openBodyId)?.node.title ?? "reasoning";
 
-  useInput((input, key) => {
+  // Hook 1: Always active — handles 'r' toggle only.
+  // Must be separate so it never blocks InputBox keys when panel is closed.
+  useInput((input) => {
     if (input === "r") {
       if (isOpen) onClose();
       else onOpen();
-      return;
-    }
-
-    if (!isOpen || visibleRows.length === 0) return;
-
-    if (key.upArrow) {
-      const next = visibleRows[Math.max(0, selectedIndex - 1)];
-      if (next) setSelectedId(next.node.id);
-      return;
-    }
-
-    if (key.downArrow) {
-      const next = visibleRows[Math.min(visibleRows.length - 1, selectedIndex + 1)];
-      if (next) setSelectedId(next.node.id);
-      return;
-    }
-
-    if (/^[1-9]$/.test(input)) {
-      const idx = Number(input) - 1;
-      const row = visibleRows[idx];
-      if (row) {
-        setSelectedId(row.node.id);
-        setOpenBodyId(row.node.id);
-        if (row.hasChildren) {
-          setExpandedBranches((prev) => ({ ...prev, [row.node.id]: true }));
-        }
-      }
-      return;
-    }
-
-    if (!selectedRow) return;
-
-    const current = selectedRow.node;
-    const hasChildren = selectedRow.hasChildren;
-    const isExpanded = selectedRow.isExpanded;
-
-    if (key.leftArrow) {
-      if (hasChildren && isExpanded) {
-        setExpandedBranches((prev) => ({ ...prev, [current.id]: false }));
-      } else if (openBodyId === current.id) {
-        setOpenBodyId(null);
-      }
-      return;
-    }
-
-    if (key.rightArrow || key.return || input === " ") {
-      if (hasChildren) {
-        setExpandedBranches((prev) => ({ ...prev, [current.id]: true }));
-      }
-      if (current.body.trim()) {
-        setOpenBodyId(current.id);
-      }
-      return;
-    }
-
-    if (key.escape) {
-      onClose();
     }
   });
 
+  // Hook 2: isActive:isOpen — handles navigation ONLY when panel is open.
+  // When isOpen=false this hook is dormant, so InputBox receives Enter/arrows uninterrupted.
+  useInput(
+    (input, key) => {
+      if (visibleRows.length === 0) return;
+
+      if (key.upArrow) {
+        const next = visibleRows[Math.max(0, selectedIndex - 1)];
+        if (next) setSelectedId(next.node.id);
+        return;
+      }
+
+      if (key.downArrow) {
+        const next = visibleRows[Math.min(visibleRows.length - 1, selectedIndex + 1)];
+        if (next) setSelectedId(next.node.id);
+        return;
+      }
+
+      if (/^[1-9]$/.test(input)) {
+        const idx = Number(input) - 1;
+        const row = visibleRows[idx];
+        if (row) {
+          setSelectedId(row.node.id);
+          setOpenBodyId(row.node.id);
+          if (row.hasChildren) {
+            setExpandedBranches((prev) => ({ ...prev, [row.node.id]: true }));
+          }
+        }
+        return;
+      }
+
+      if (!selectedRow) return;
+
+      const current = selectedRow.node;
+      const hasChildren = selectedRow.hasChildren;
+      const isExpanded = selectedRow.isExpanded;
+
+      if (key.leftArrow) {
+        if (hasChildren && isExpanded) {
+          setExpandedBranches((prev) => ({ ...prev, [current.id]: false }));
+        } else if (openBodyId === current.id) {
+          setOpenBodyId(null);
+        }
+        return;
+      }
+
+      if (key.rightArrow || key.return || input === " ") {
+        if (hasChildren) {
+          setExpandedBranches((prev) => ({ ...prev, [current.id]: true }));
+        }
+        if (current.body.trim()) {
+          setOpenBodyId(current.id);
+        }
+        return;
+      }
+
+      if (key.escape) {
+        onClose();
+      }
+    },
+    { isActive: isOpen },
+  );
+
   if (!content.trim()) return null;
 
+  // Panel is closed — render nothing (no collapsed bar)
+  // FooterBar shows "r reasons" hint so user knows it exists
+  if (!isOpen) return null;
+
   const B = TOKENS.box;
-  const borderColor = "#334155";
-  const label = " ◈ reasoning ";
-  const previewLineLimit = Math.max(6, maxHeight);
+  const previewLineLimit = Math.max(6, Math.min(12, maxHeight));
 
-  if (!isOpen) {
-    const hint = `${label}${totalSections} sections  ▼  (r to expand)`;
-    const pad = Math.max(0, columns - stringWidth(hint) - 1);
+  /* ─── Expanded state ──────────────────────────────────────────── */
 
-    return (
-      <Box width={columns}>
-        <Text dimColor>
-          {B.horizontal}
-          {hint}
-          {B.horizontal.repeat(pad)}
-        </Text>
-      </Box>
-    );
-  }
-
-  const title = `${label}${openNodeTitle}`;
-  const titlePad = Math.max(0, columns - stringWidth(title) - 2);
-  const footerHint = "↑↓ move  enter/→ open  ← collapse  1-9 jump  esc close";
-  const footer = footerHint.length > columns - 4
-    ? footerHint.slice(0, columns - 7) + "..."
-    : footerHint;
+  const titleLabel = ` thinking  ${totalSections} section${totalSections !== 1 ? "s" : ""} `;
+  const titlePad = Math.max(0, columns - stringWidth(titleLabel) - 4);
+  const footerHint = "up/dn move  enter/right open  left collapse  1-9 jump  esc close";
+  const footer =
+    footerHint.length > columns - 4
+      ? footerHint.slice(0, columns - 7) + "..."
+      : footerHint;
 
   return (
     <Box flexDirection="column" width={columns}>
-      <Text color={borderColor}>
+      {/* Top border */}
+      <Text color={COLORS.border}>
         {B.topLeft}
-        {title}
+        <Text color={COLORS.selected}>{" ◈"}</Text>
+        <Text color={COLORS.sectionTitle}>{titleLabel}</Text>
         {B.horizontal.repeat(titlePad)}
         {B.topRight}
       </Text>
 
+      {/* Section rows */}
       {visibleRows.map((row, index) => {
         const isSelected = row.node.id === selectedId;
         const isBodyOpen = row.node.id === openBodyId && !!row.node.body.trim();
@@ -381,13 +467,18 @@ export function ReasoningPanel({
           ? truncateMarkdownSafely(row.node.body, previewLineLimit)
           : null;
 
-        const marker = row.hasChildren
-          ? row.isExpanded
-            ? "▼"
+        // Markers: selected gets a filled marker, others get subtle ones
+        const marker = isSelected
+          ? row.hasChildren
+            ? row.isExpanded
+              ? "▼"
+              : "▶"
             : "▶"
-          : isBodyOpen
-            ? "●"
-            : "○";
+          : row.hasChildren
+            ? row.isExpanded
+              ? "▼"
+              : "▶"
+            : "·";
 
         const lineCount = row.node.body.trim()
           ? row.node.body.split("\n").filter((line) => line.trim()).length
@@ -398,32 +489,39 @@ export function ReasoningPanel({
 
         return (
           <Box key={row.node.id} flexDirection="column">
+            {/* Section header row */}
             <Box>
-              <Text color={borderColor}>{B.vertical} </Text>
+              <Text color={COLORS.border}>{B.vertical} </Text>
               <Box width={Math.max(10, columns - 4)}>
+                <Text color={COLORS.border}>{"│ "}</Text>
                 <Text
-                  color={isSelected ? "cyan" : "white"}
+                  color={isSelected ? COLORS.selected : COLORS.sectionTitle}
                   bold={isSelected}
                 >
                   {`${index < 9 ? `${index + 1} ` : "  "}${row.prefix}${marker} ${row.node.title}`}
                 </Text>
                 {lineCount > 0 ? (
-                  <Text dimColor>{`  ${lineCount}L`}</Text>
+                  <Text color={COLORS.hint}>{`  ${lineCount}L`}</Text>
                 ) : null}
               </Box>
-              <Text color={borderColor}> {B.vertical}</Text>
+              <Text color={COLORS.border}>{B.vertical}</Text>
             </Box>
 
+            {/* Body preview */}
             {isBodyOpen && bodyPreview && (
               <Box paddingLeft={depthPad}>
-                <Text color={borderColor}>{TOKENS.tree.pipe} </Text>
+                <Text color={COLORS.border}>{"│ "}</Text>
                 <Box flexDirection="column" width={bodyWidth}>
                   <MarkdownRenderer
                     content={bodyPreview.content}
                     width={bodyWidth}
                   />
                   {bodyPreview.truncated ? (
-                    <Text dimColor>… more hidden</Text>
+                    <Text color={COLORS.hint}>
+                      {"... "}
+                      {bodyPreview.totalLines - previewLineLimit}
+                      {" more lines"}
+                    </Text>
                   ) : null}
                 </Box>
               </Box>
@@ -432,13 +530,15 @@ export function ReasoningPanel({
         );
       })}
 
+      {/* Footer */}
       <Box>
-        <Text color={borderColor}>{B.vertical} </Text>
-        <Text dimColor>{footer.padEnd(Math.max(0, columns - 4))}</Text>
-        <Text color={borderColor}> {B.vertical}</Text>
+        <Text color={COLORS.border}>{B.vertical} </Text>
+        <Text color={COLORS.hint}>{footer.padEnd(Math.max(0, columns - 4))}</Text>
+        <Text color={COLORS.border}> {B.vertical}</Text>
       </Box>
 
-      <Text color={borderColor}>
+      {/* Bottom border */}
+      <Text color={COLORS.border}>
         {B.bottomLeft}
         {B.horizontal.repeat(Math.max(0, columns - 2))}
         {B.bottomRight}
