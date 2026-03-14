@@ -25,6 +25,7 @@ import { ApprovalPrompt, type ApprovalChoice } from "./components/ApprovalPrompt
 import { useSlashCommands } from "./hooks/useSlashCommands.js";
 import { useTaskPanel } from "./hooks/useTaskPanel.js";
 import { TaskPanel } from "./components/TaskPanel.js";
+import { ReasoningPanel } from "./components/ReasoningPanel.js";
 import { AgentBridge } from "./agent-bridge.js";
 import type { AgentEvent, ApprovalResponse } from "@yuaone/core";
 import { checkForUpdate, loadSettings, saveSettings } from "./lib/update-checker.js";
@@ -71,6 +72,10 @@ function App({
   // Pending message queue — typed while agent is running
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
 
+  // Reasoning panel state
+  const [reasoningOpen, setReasoningOpen] = useState(false);
+  const [reasoningContent, setReasoningContent] = useState("");
+
   // Slash command state
   const [slashState, slashActions] = useSlashCommands();
   const taskPanel = useTaskPanel();
@@ -87,6 +92,14 @@ function App({
         const input = event.input as number;
         const output = event.output as number;
         setTokensPerSec(input + output);
+      }
+
+      // Accumulate reasoning/thinking into ReasoningPanel content
+      if (event.kind === "agent:thinking" && (event as { content?: string }).content) {
+        setReasoningContent((prev) => prev ? `${prev}\n${(event as { content?: string }).content}` : (event as { content?: string }).content!);
+      }
+      if (event.kind === "agent:reasoning_delta" && (event as { text?: string }).text) {
+        setReasoningContent((prev) => prev ? `${prev}\n${(event as { text?: string }).text}` : (event as { text?: string }).text!);
       }
     });
 
@@ -126,6 +139,7 @@ function App({
       agentStream.addUserMessage(value);
       agentStream.startAgent();
       setTokensPerSec(undefined);
+      setReasoningContent("");
 
       lastMessageRef.current = value;
       bridgeRef.current.sendMessage(value).catch((err: Error) => {
@@ -485,7 +499,7 @@ const messages = agentStream.state.messages;
       )}
 
       {/* Status indicator */}
-      <FooterBar agentState={agentStream.state} slashMenuOpen={slashState.isOpen} />
+      <FooterBar agentState={agentStream.state} slashMenuOpen={slashState.isOpen} hasReasoning={!!reasoningContent.trim()} />
 
       {/* Input */}
       <InputBox
@@ -510,6 +524,17 @@ const messages = agentStream.state.messages;
         onTaskPanelOpen={taskPanel.open}
         hasBackgroundTasks={bgTasks.length > 0}
       />
+
+      {/* Reasoning panel — below input, above task panel */}
+      {reasoningContent.trim() && (
+        <ReasoningPanel
+          content={reasoningContent}
+          isOpen={reasoningOpen}
+          onOpen={() => setReasoningOpen(true)}
+          onClose={() => setReasoningOpen(false)}
+          maxHeight={Math.max(6, Math.floor(rows / 3))}
+        />
+      )}
 
       {/* Task panel — background agent list / detail view */}
       {taskPanel.isOpen && bgTasks.length > 0 && (

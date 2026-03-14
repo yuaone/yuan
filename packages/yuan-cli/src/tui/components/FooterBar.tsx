@@ -40,6 +40,7 @@ const PROGRESS_ICON: Record<string, { icon: string; color: string }> = {
 export interface FooterBarProps {
   agentState: AgentStreamState;
   slashMenuOpen?: boolean;
+  hasReasoning?: boolean;
 }
 
 /** Format milliseconds to human-readable elapsed time */
@@ -211,7 +212,7 @@ function Indicator({ agentState }: { agentState: AgentStreamState }): React.JSX.
   }
 }
 
-function KeybindHints({ agentState, slashMenuOpen }: { agentState: AgentStreamState; slashMenuOpen?: boolean }): React.JSX.Element {
+function KeybindHints({ agentState, slashMenuOpen, hasReasoning }: { agentState: AgentStreamState; slashMenuOpen?: boolean; hasReasoning?: boolean }): React.JSX.Element {
   const { status } = agentState;
 
   if (slashMenuOpen) {
@@ -259,13 +260,19 @@ function KeybindHints({ agentState, slashMenuOpen }: { agentState: AgentStreamSt
       <Text dimColor> commands  </Text>
       <Text bold>↑↓</Text>
       <Text dimColor> history  </Text>
+      {hasReasoning && (
+        <>
+          <Text bold>r</Text>
+          <Text dimColor> reasons  </Text>
+        </>
+      )}
       <Text bold>ctrl+c</Text>
       <Text dimColor> exit</Text>
     </Box>
   );
 }
 
-export const FooterBar = memo(function FooterBar({ agentState, slashMenuOpen }: FooterBarProps): React.JSX.Element {
+export const FooterBar = memo(function FooterBar({ agentState, slashMenuOpen, hasReasoning }: FooterBarProps): React.JSX.Element {
   const { columns } = useTerminalSize();
 
   return (
@@ -274,7 +281,7 @@ export const FooterBar = memo(function FooterBar({ agentState, slashMenuOpen }: 
         <Indicator agentState={agentState} />
       </Box>
       <Box minWidth={30}>
-        <KeybindHints agentState={agentState} slashMenuOpen={slashMenuOpen} />
+        <KeybindHints agentState={agentState} slashMenuOpen={slashMenuOpen} hasReasoning={hasReasoning} />
       </Box>
     </Box>
   );

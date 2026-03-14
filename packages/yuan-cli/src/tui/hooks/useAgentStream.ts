@@ -127,7 +127,7 @@ export function useAgentStream(): UseAgentStreamReturn {
   // Debounce buffer for thinking/reasoning lines to avoid per-token re-renders
   const pendingThinkingRef = useRef<string[]>([]);
   const thinkingFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const THINKING_FLUSH_INTERVAL = 80;
+  const THINKING_FLUSH_INTERVAL = 400; // 400ms batch — reduces flicker from rapid reasoning events
 
   const flushPendingText = useCallback(() => {
     if (flushTimerRef.current) {
@@ -280,7 +280,11 @@ export function useAgentStream(): UseAgentStreamReturn {
 
       switch (event.kind) {
   case "agent:reasoning_delta": {
-    appendThinkingLines(String(event.text ?? ""));
+    // source:"agent" = internal loop progress (iteration N: ...) — goes to ReasoningPanel only, not chat
+    // source:"llm" = actual LLM extended thinking — show in chat as dimmed content
+    if ((event as { source?: string }).source !== "agent") {
+      appendThinkingLines(String(event.text ?? ""));
+    }
     break;
   }
         case "agent:thinking": {
@@ -288,7 +292,14 @@ export function useAgentStream(): UseAgentStreamReturn {
           setStatus("thinking");
           setCurrentToolName(null);
           setCurrentToolArgs(null);
-          appendThinkingLines(String(event.content ?? ""));
+          const thinkContent = String(event.content ?? "");
+          // Filter shadow/internal prefixes — go to ReasoningPanel via App.tsx, not chat
+          const isInternalTrace = thinkContent.startsWith("[shadow]") ||
+            thinkContent.startsWith("[File Skill:") ||
+            thinkContent.startsWith("Phase: ");
+          if (!isInternalTrace) {
+            appendThinkingLines(thinkContent);
+          }
           break;
         }
 

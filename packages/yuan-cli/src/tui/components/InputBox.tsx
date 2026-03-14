@@ -277,7 +277,8 @@ export function InputBox({
           onSlashNavigate("up");
         } else if (isRunning && pendingMessage && !value) {
           updateValue(pendingMessage);
-        } else {
+        } else if (!isRunning) {
+          // Only navigate history when NOT running — avoids history injection during approval prompt
           const prev = history.up(value);
           if (prev !== null) updateValue(prev);
         }
@@ -292,7 +293,8 @@ export function InputBox({
         } else if (!value && !slashMenuOpen && hasBackgroundTasks && onTaskPanelOpen) {
           // ↓ on empty input → open task panel
           onTaskPanelOpen();
-        } else {
+        } else if (!isRunning) {
+          // Only navigate history when NOT running
           const next = history.down();
           if (next !== null) updateValue(next);
         }

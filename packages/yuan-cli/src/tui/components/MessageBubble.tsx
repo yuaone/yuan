@@ -219,11 +219,11 @@ function BlinkingDot(): React.JSX.Element {
   return <Text color={bright ? "white" : "#555555"}>●</Text>;
 }
 
-/** Live elapsed timer — ticks every 100ms while tool is running */
+/** Live elapsed timer — ticks every 1s while tool is running */
 function LiveElapsed({ startedAt }: { startedAt: number }): React.JSX.Element {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 100);
+    const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
   const elapsed = (now - startedAt) / 1000;
@@ -505,8 +505,8 @@ export const MessageBubble = React.memo(function MessageBubble({
         const borderColor = "#334155";
         const B = TOKENS.box;
 
-        return (
-          <Box flexDirection="column" marginBottom={1} paddingLeft={0}>
+ return (
+   <Box flexDirection="column" paddingLeft={0}>
             {/* Top border */}
             <Text color={borderColor}>{B.topLeft}{B.horizontal.repeat(2)} {title} {B.horizontal.repeat(Math.max(0, width - stringWidth(title) - 6))}{B.topRight}</Text>
 
