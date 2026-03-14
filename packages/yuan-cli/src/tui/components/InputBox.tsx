@@ -125,7 +125,14 @@ export function InputBox({
 
      // ---- terminal escape guard (mouse / wheel / ssh fragments) ----
    if (typeof input === "string") {
-
+  // GCP Web SSH mouse fragments
+  if (/^[\[<;0-9mM]+$/.test(input)) {
+    return;
+  }
+  // residual SGR mouse fragments (Ink sometimes strips ESC)
+  if (/^\d+;\d+;\d+[mM]$/.test(input)) {
+    return;
+  }
       // SGR mouse events (click / drag)
       if (
         input.startsWith("<") ||
@@ -310,18 +317,27 @@ export function InputBox({
         // ANSI escape sequence, 마우스 이벤트, 제어 문자 차단
         // eslint-disable-next-line no-control-regex
         // Also filter residual [ABCD] from SSH (ESC consumed by Ink, leaving "[D" etc.)
- const cleaned = input
-   // control chars
-   .replace(/[\x00-\x1f\x7f]/g, "")
+        // Completely ignore residual mouse / wheel fragments
+        // Common in GCP Web SSH where ESC gets stripped
+        if (/^[\[<;0-9mM]+$/.test(input)) {
+          return;
+        }
 
-   // ANSI escape sequences
-   .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+        const cleaned = input
+          // control chars
+          .replace(/[\x00-\x1f\x7f]/g, "")
 
-   // SGR mouse reporting
-   .replace(/<\d+;\d+;\d+[mM]/g, "")
+          // ANSI escape sequences
+          .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
 
-   // SSH arrow leftovers
-   .replace(/^\[[ABCD]$/, "");
+          // SGR mouse reporting
+          .replace(/<\d+;\d+;\d+[mM]/g, "")
+
+          // SSH arrow leftovers
+          .replace(/^\[[ABCD]$/, "")
+
+          // single stray bracket from xterm mouse
+          .replace(/^\[$/, "");
         if (cleaned.length > 0) {
           const isPaste = cleaned.length > 10 || cleaned.includes("\n") || cleaned.includes("\t");
           const normalized = cleaned
@@ -343,10 +359,10 @@ export function InputBox({
 
   const prompt = TOKENS.brand.prompt;
   // Memoize separator to avoid recreating the string on every render
-  const separator = useMemo(
-    () => TOKENS.box.horizontal.repeat(Math.max(0, columns - 1)),
-    [columns],
-  );
+const separator = useMemo(() => {
+  const w = columns - 1;
+  return w > 0 ? TOKENS.box.horizontal.repeat(w) : "";
+}, [columns]);
   // While running, show current typing (for pending queue). Cursor hidden while running.
   const displayValue = value;
   const clampedCursor = Math.min(cursorPos, displayValue.length);
@@ -379,23 +395,27 @@ export function InputBox({
   let inputLine: string;
   if (showCursor) {
     const before = displayValue.slice(0, clampedCursor);
-    const ch     = displayValue[clampedCursor] ?? " ";
-    const after  = displayValue.slice(clampedCursor + 1);
+    const after  = displayValue.slice(clampedCursor);
+
+    const cursor = `${CURSOR_ON} ${CURSOR_OFF}`;
 
     if (isSlash) {
       const color = cmdRecognized ? FG_CYAN : FG_RED;
+
       if (clampedCursor <= cmdToken.length) {
-        // Cursor is inside the slash command token
-        const tb = cmdToken.slice(0, clampedCursor);
-        const ta = cmdToken.slice(clampedCursor + 1) + cmdRest.slice(1);
-        inputLine = `${color}${tb}${CURSOR_ON}${ch}${CURSOR_OFF}${ta}${FG_RESET}`;
+        const left = cmdToken.slice(0, clampedCursor);
+        const right = cmdToken.slice(clampedCursor);
+
+        inputLine =
+          `${color}${left}${FG_RESET}${cursor}${color}${right}${FG_RESET}${cmdRest}`;
       } else {
-        // Cursor is past the command token, in the args
         const restBefore = before.slice(cmdToken.length);
-        inputLine = `${color}${cmdToken}${FG_RESET}${restBefore}${CURSOR_ON}${ch}${CURSOR_OFF}${after}`;
+
+        inputLine =
+          `${color}${cmdToken}${FG_RESET}${restBefore}${cursor}${after}`;
       }
     } else {
-      inputLine = `${before}${CURSOR_ON}${ch}${CURSOR_OFF}${after}`;
+      inputLine = `${before}${cursor}${after}`;
     }
   } else {
     // No cursor (running or slash menu open)

@@ -27,6 +27,8 @@ export function recordBudgetUsage(
 
 /**
  * Check whether the budget governor has halted this task.
+ * Only checks the task-level budget (not daily/project/branch) to avoid
+ * false halts from accumulated cross-session token counts.
  * Returns true if execution should stop.
  * Never throws.
  */
@@ -37,7 +39,15 @@ export function checkBudgetShouldHalt(
   if (!gov) return false;
   try {
     const status = gov.check(sessionId);
-    return status?.isHalted ?? false;
+    // Only halt on task-level exhaustion — daily/project budgets should degrade, not halt
+    const taskAlloc = status?.allocations?.find(
+      (a) => (a as { type?: string }).type === "task",
+    );
+    if (!taskAlloc) return false;
+    const limit = (taskAlloc as { limit?: number }).limit ?? 0;
+    const used = (taskAlloc as { used?: number }).used ?? 0;
+    if (limit <= 0) return false;
+    return used / limit >= 1.0;
   } catch {
     return false;
   }
