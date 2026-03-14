@@ -1,11 +1,15 @@
 /**
  * ApprovalPrompt — shows when agent needs user approval for a tool call.
- * Three options selectable by 1/2/3 keys or arrow keys + enter.
  *
- * Options:
- *   1. Allow — approve this action
- *   2. Allow always — approve and don't ask again for this tool
- *   3. Deny — reject this action
+ * Layout (Claude Code style):
+ *   <ToolName>
+ *     <args>
+ *     <description>
+ *
+ *   Do you want to allow this action?
+ *   > 1. Yes
+ *     2. Yes, and don't ask again for <toolName>
+ *     3. No  (esc)
  */
 
 import React, { useState } from "react";
@@ -19,18 +23,16 @@ export interface ApprovalPromptProps {
   onSelect: (choice: ApprovalChoice) => void;
 }
 
-interface Option {
-  key: string;
-  label: string;
-  description: string;
-  choice: ApprovalChoice;
+function toolDescription(toolName: string, args: string): string {
+  const n = toolName.toLowerCase();
+  if (n.includes("shell") || n.includes("exec") || n.includes("bash")) return `YUAN wants to run this command`;
+  if (n.includes("write")) return `YUAN wants to write to this file`;
+  if (n.includes("edit")) return `YUAN wants to edit this file`;
+  if (n.includes("read")) return `YUAN wants to read this file`;
+  if (n.includes("fetch") || n.includes("web")) return `YUAN wants to fetch this URL`;
+  if (n.includes("git")) return `YUAN wants to run a git operation`;
+  return `YUAN wants to use ${toolName}`;
 }
-
-const OPTIONS: Option[] = [
-  { key: "1", label: "허용", description: "이번만 실행", choice: "allow" },
-  { key: "2", label: "항상 허용", description: "이 도구 자동승인", choice: "allow_always" },
-  { key: "3", label: "거부", description: "실행 안 함", choice: "deny" },
-];
 
 export function ApprovalPrompt({
   toolName,
@@ -39,87 +41,65 @@ export function ApprovalPrompt({
 }: ApprovalPromptProps): React.JSX.Element {
   const [selectedIndex, setSelectedIndex] = useState(0);
 
+  const options = [
+    { key: "1", label: "Yes", choice: "allow" as ApprovalChoice },
+    { key: "2", label: `Yes, and don't ask again for ${toolName}`, choice: "allow_always" as ApprovalChoice },
+    { key: "3", label: "No  (esc)", choice: "deny" as ApprovalChoice },
+  ];
+
   useInput((input, key) => {
- // quick yes/no keys
-  if (input === "y") {
-    onSelect("allow");
-    return;
-  }
-
-  if (input === "n") {
-    onSelect("deny");
-    return;
-  }
-    // Arrow navigation
-    if (key.upArrow) {
-      setSelectedIndex((prev) => (prev <= 0 ? OPTIONS.length - 1 : prev - 1));
-      return;
-    }
-    if (key.downArrow) {
-      setSelectedIndex((prev) => (prev >= OPTIONS.length - 1 ? 0 : prev + 1));
-      return;
-    }
-
-    // Enter to confirm
-    if (key.return) {
-      onSelect(OPTIONS[selectedIndex].choice);
-      return;
-    }
-
-    // Quick-select by number
-    if (input === "1") {
-      onSelect(OPTIONS[0].choice);
-      return;
-    }
-    if (input === "2") {
-      onSelect(OPTIONS[1].choice);
-      return;
-    }
-    if (input === "3") {
-      onSelect(OPTIONS[2].choice);
-      return;
-    }
+    if (key.escape || input === "n") { onSelect("deny"); return; }
+    if (input === "y") { onSelect("allow"); return; }
+    if (key.upArrow) { setSelectedIndex((p) => (p <= 0 ? options.length - 1 : p - 1)); return; }
+    if (key.downArrow) { setSelectedIndex((p) => (p >= options.length - 1 ? 0 : p + 1)); return; }
+    if (key.return) { onSelect(options[selectedIndex].choice); return; }
+    if (input === "1") { onSelect("allow"); return; }
+    if (input === "2") { onSelect("allow_always"); return; }
+    if (input === "3") { onSelect("deny"); return; }
   });
 
-  const argsSummary = toolArgs ? toolArgs : "";
+  const args = toolArgs ?? "";
+  const desc = toolDescription(toolName, args);
 
   return (
-    <Box flexDirection="column" paddingLeft={2} paddingRight={2} marginTop={0} marginBottom={0}>
-      {/* Header */}
-      <Box>
-        <Text color="yellow">{"  \u26A0 "}</Text>
-        <Text bold color="white">{toolName}</Text>
-        {argsSummary ? (
-          <>
-            <Text dimColor> wants to run: </Text>
-            <Text color="white">{argsSummary}</Text>
-          </>
-        ) : (
-          <Text dimColor> requires approval</Text>
-        )}
+    <Box flexDirection="column" paddingLeft={2} paddingRight={2} marginTop={1} marginBottom={1}>
+      {/* Tool name header */}
+      <Text bold color="white">{toolName}</Text>
+
+      {/* Args */}
+      {args && (
+        <Box paddingLeft={2}>
+          <Text color="cyan">{args}</Text>
+        </Box>
+      )}
+
+      {/* Description */}
+      <Box paddingLeft={2}>
+        <Text dimColor>{desc}</Text>
       </Box>
 
       {/* Spacer */}
-      <Text>{" "}</Text>
+      <Box marginTop={1}>
+        <Text dimColor>Do you want to allow this action?</Text>
+      </Box>
 
       {/* Options */}
-      {OPTIONS.map((opt, i) => {
-        const isSelected = i === selectedIndex;
-        return (
-          <Box key={opt.key} paddingLeft={2}>
-            <Text dimColor>{opt.key}  </Text>
-            {isSelected ? (
-              <Text bold color="white">{opt.label.padEnd(12)}</Text>
-            ) : (
-              <Text dimColor>{opt.label.padEnd(12)}</Text>
-            )}
-            <Text dimColor>{" \u2014 "}{opt.description}</Text>
-          </Box>
-        );
-      })}
-
-      {/* Spacer */}
-      <Text>{" "}</Text>
+      <Box flexDirection="column" marginTop={0}>
+        {options.map((opt, i) => {
+          const isSelected = i === selectedIndex;
+          return (
+            <Box key={opt.key}>
+              <Text color={isSelected ? "white" : undefined} dimColor={!isSelected}>
+                {isSelected ? "> " : "  "}
+              </Text>
+              <Text dimColor={!isSelected}>{opt.key}. </Text>
+              <Text bold={isSelected} color={isSelected ? "white" : undefined} dimColor={!isSelected}>
+                {opt.label}
+              </Text>
+            </Box>
+          );
+        })}
+      </Box>
     </Box>
   );
 }

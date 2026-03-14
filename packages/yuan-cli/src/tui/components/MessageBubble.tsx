@@ -265,9 +265,9 @@ export function MessageBubble({
 
   switch (msg.role) {
     case "user": {
-      // Claude Code style: left-aligned, solid dark bg bar, ▶ prefix
+      // Claude Code style: left-aligned, solid dark bg bar, > prefix
       // Use stringWidth for CJK-safe wrapping (Korean/Chinese chars = 2 terminal columns each)
-      const maxContentWidth = width - 5; // "▶ " (2) + right pad (3)
+      const maxContentWidth = width - 5; // "> " (2) + right pad (3)
       const lines: string[] = [];
       const rawLines = msg.content.split("\n");
       for (const rawLine of rawLines) {
@@ -293,7 +293,7 @@ export function MessageBubble({
       return (
         <Box flexDirection="column" marginBottom={1}>
           {lines.map((line, i) => {
-            const prefix = i === 0 ? "▶ " : "  ";
+            const prefix = i === 0 ? "> " : "  ";
             const full = `${prefix}${line}`;
             // Pad with spaces to fillWidth using display width (handles CJK)
             const dispW = stringWidth(full);
@@ -310,32 +310,38 @@ export function MessageBubble({
       const toolCalls = msg.toolCalls ?? [];
       const hasTools = toolCalls.length > 0;
       const hasText = !!msg.content;
+      const hasThinking = !!msg.thinkingContent;
+
+      // Split content: first line inline with ●, rest below with indent
+      const contentLines = hasText ? msg.content.split("\n") : [];
+      const firstLine = contentLines[0] ?? "";
+      const restContent = contentLines.slice(1).join("\n");
+      const hasRest = restContent.length > 0;
+
       return (
         <Box flexDirection="column" marginBottom={1}>
-          {/* ● yuan — header row (always visible) */}
+          {/* ● <first line inline> */}
           <Box>
-            {msg.isStreaming && isLatest ? (
-              <>
-                <BlinkingDot />
-                <Text dimColor> yuan</Text>
-              </>
-            ) : (
-              <Text dimColor>● yuan</Text>
-            )}
+            <Text dimColor>● </Text>
+            {hasText ? (
+              <MarkdownRenderer content={firstLine} width={width - 4} />
+            ) : null}
           </Box>
-          {/* Streamed/completed assistant text — white, readable */}
-          {hasText && (
+          {/* Remaining lines — indented */}
+          {hasRest && (
             <Box paddingLeft={2}>
-              <MarkdownRenderer content={msg.content} width={width - 4} />
+              <MarkdownRenderer content={restContent} width={width - 4} />
             </Box>
           )}
-          {/* Cursor block while streaming with no text yet */}
-          {msg.isStreaming && isLatest && !hasText && (
-            <Box paddingLeft={2}>
-              <Text dimColor>█</Text>
+          {/* Thinking content — dim */}
+          {hasThinking && (
+            <Box paddingLeft={2} flexDirection="column">
+              {msg.thinkingContent!.split("\n").map((line, i) => (
+                <Text key={i} dimColor color="#555555">{line}</Text>
+              ))}
             </Box>
           )}
-          {/* Tool call tree — dimmer, smaller visual weight than text */}
+          {/* Tool call tree */}
           {hasTools && (
             <Box flexDirection="column" paddingLeft={2} marginTop={hasText ? 1 : 0}>
               {toolCalls.map((tc, i) => (
@@ -388,15 +394,7 @@ export function MessageBubble({
         const site = lines.find((l) => l.includes("yuaone.com")) ?? "yuaone.com";
 
         // What's new items for current version
-        const WHATS_NEW = [
-          "Native Gemini reasoning stream",
-          "Tool tree UI  ├─✓/└─●",
-          "LLM Orchestrator (retry + telemetry)",
-          "Non-blocking ctx summarization",
-          "Pending queue bubble + ↑ edit",
-        ];
-
-        const borderColor = "#5c3a1a";
+        const borderColor = "#334155";
         const B = TOKENS.box;
 
         return (
@@ -404,54 +402,44 @@ export function MessageBubble({
             {/* Top border */}
             <Text color={borderColor}>{B.topLeft}{B.horizontal.repeat(2)} {title} {B.horizontal.repeat(Math.max(0, width - title.length - 6))}{B.topRight}</Text>
 
-            {/* Content row: left (fox + info) | right (what's new) */}
+            {/* Content row: left (fox only) | right (info) */}
             <Box flexDirection="row">
-              {/* Left column */}
-              <Box flexDirection="column" paddingLeft={2} flexGrow={0} minWidth={30}>
+              {/* Left column — pixel fox only */}
+              <Box flexDirection="column" paddingLeft={2} flexGrow={0}>
                 <PixelFoxSprite />
-                <Box height={1} />
-                {meta.model && <Text dimColor>{meta.model}</Text>}
-                {meta.provider && <Text dimColor>{meta.provider}</Text>}
-                {meta.cwd && <Text dimColor>{meta.cwd}</Text>}
-                <Box height={1} />
-                <Text dimColor>{help}</Text>
-                <Text dimColor>{site}</Text>
               </Box>
 
               {/* Vertical divider */}
               <Box flexDirection="column" paddingLeft={1} paddingRight={1}>
-                {Array.from({ length: FOX_PIXEL_SPRITE.length + 7 }).map((_, i) => (
+                {Array.from({ length: FOX_PIXEL_SPRITE.length }).map((_, i) => (
                   <Text key={i} color={borderColor}>{B.vertical}</Text>
                 ))}
               </Box>
 
-              {/* Right column — Model info + What's new */}
-              <Box flexDirection="column" flexGrow={1} paddingRight={2}>
-                {/* Model / Provider (dynamic — from actual runtime config) */}
-                {(meta.model || meta.provider) && (
-                  <Box flexDirection="column" marginBottom={1}>
-                    {meta.model && (
-                      <Box>
-                        <Text dimColor>model  </Text>
-                        <Text color="white">{meta.model}</Text>
-                      </Box>
-                    )}
-                    {meta.provider && (
-                      <Box>
-                        <Text dimColor>via    </Text>
-                        <Text dimColor>{meta.provider}</Text>
-                      </Box>
-                    )}
+              {/* Right column — info */}
+              <Box flexDirection="column" flexGrow={1} paddingRight={2} justifyContent="center">
+                <Box height={1} />
+                {meta.model && (
+                  <Box>
+                    <Text dimColor>model  </Text>
+                    <Text color="white">{meta.model}</Text>
                   </Box>
                 )}
-                <Text bold color="white">What's new</Text>
-                <Box height={1} />
-                {WHATS_NEW.map((item, i) => (
-                  <Box key={i}>
-                    <Text color="#3a7d44">·</Text>
-                    <Text dimColor> {item}</Text>
+                {meta.provider && (
+                  <Box>
+                    <Text dimColor>via    </Text>
+                    <Text dimColor>{meta.provider}</Text>
                   </Box>
-                ))}
+                )}
+                {meta.cwd && (
+                  <Box>
+                    <Text dimColor>dir    </Text>
+                    <Text dimColor>{meta.cwd}</Text>
+                  </Box>
+                )}
+                <Box height={1} />
+                <Text dimColor>{help}</Text>
+                <Text dimColor>{site}</Text>
               </Box>
             </Box>
 
