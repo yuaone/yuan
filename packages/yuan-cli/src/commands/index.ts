@@ -11,6 +11,7 @@ import * as os from "node:os";
 import { execFileSync } from "node:child_process";
 import { loadSettings, saveSettings } from "../tui/lib/update-checker.js";
 import type { ConfigManager } from "../config.js";
+import { SKILL_TO_MODE } from "@yuaone/core";
 
 /* ──────────────────────────────────────────
    Types
@@ -249,40 +250,45 @@ interface ModelEntry {
 
 const MODEL_CATALOG: Record<string, ModelEntry[]> = {
   openai: [
-    // GPT-5 series (2026)
-    { id: "gpt-5.4",           label: "GPT-5.4",          ctx: "256K", note: "flagship, computer use" },
-    { id: "gpt-5.4-pro",       label: "GPT-5.4 Pro",      ctx: "256K", note: "most powerful" },
-    { id: "gpt-5.3-codex",     label: "GPT-5.3 Codex",    ctx: "256K", note: "coding specialist" },
-    // GPT-4.1 series
+    // GPT-5 series (2025~2026) — gpt-5 confirmed Aug 2025, gpt-5.4 confirmed Mar 2026
+    { id: "gpt-5.4",           label: "GPT-5.4",          ctx: "256K", note: "latest flagship (Mar 2026)" },
+    { id: "gpt-5-mini",        label: "GPT-5 Mini",       ctx: "128K", note: "cost-optimized GPT-5" },
+    { id: "gpt-5",             label: "GPT-5",            ctx: "128K", note: "base flagship (Aug 2025)" },
+    // GPT-4.1 series (confirmed Apr 2025, 1M ctx)
     { id: "gpt-4.1",           label: "GPT-4.1",          ctx: "1M",   note: "coding+instruction" },
     { id: "gpt-4.1-mini",      label: "GPT-4.1 Mini",     ctx: "1M",   note: "fast+cheap" },
     { id: "gpt-4.1-nano",      label: "GPT-4.1 Nano",     ctx: "1M",   note: "fastest" },
     // GPT-4o series
     { id: "gpt-4o",            label: "GPT-4o",           ctx: "128K" },
     { id: "gpt-4o-mini",       label: "GPT-4o Mini",      ctx: "128K", note: "default" },
-    // o-series reasoning
-    { id: "o3-pro",            label: "o3-pro",           ctx: "200K", note: "reasoning, most reliable" },
+    // o-series reasoning (temperature/top_p unsupported — uses reasoning_effort)
+    { id: "o3-pro",            label: "o3-pro",           ctx: "200K", note: "⚠ Responses API only" },
     { id: "o3",                label: "o3",               ctx: "200K", note: "reasoning" },
     { id: "o4-mini",           label: "o4-mini",          ctx: "200K", note: "reasoning fast" },
+    { id: "o3-mini",           label: "o3-mini",          ctx: "200K", note: "reasoning, cheapest" },
   ],
   anthropic: [
-    // Claude 4.x (2026 — current lineup)
-    { id: "claude-opus-4-6",           label: "Claude Opus 4.6",    ctx: "1M",   note: "flagship, 1M ctx" },
-    { id: "claude-sonnet-4-6",         label: "Claude Sonnet 4.6",  ctx: "1M",   note: "recommended, 1M ctx" },
-    { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5",   ctx: "200K", note: "fast, 3x cheaper" },
-    // Older but still available
-    { id: "claude-opus-4-5",           label: "Claude Opus 4.5",    ctx: "200K" },
-    { id: "claude-sonnet-4-20250514",  label: "Claude Sonnet 4",    ctx: "200K" },
-    { id: "claude-3-7-sonnet-20250219",label: "Claude 3.7 Sonnet",  ctx: "200K", note: "extended thinking" },
+    // Claude 4.6 series (2026-02 — current flagship)
+    { id: "claude-opus-4-6",              label: "Claude Opus 4.6",     ctx: "1M",   note: "flagship, adaptive thinking" },
+    { id: "claude-sonnet-4-6",            label: "Claude Sonnet 4.6",   ctx: "1M",   note: "recommended" },
+    // Claude 4.5 series (2025-10/11)
+    { id: "claude-opus-4-5",              label: "Claude Opus 4.5",     ctx: "1M",   note: "stable" },
+    { id: "claude-haiku-4-5-20251001",    label: "Claude Haiku 4.5",    ctx: "200K", note: "fast, cheapest" },
+    { id: "claude-sonnet-4-5-20250929",   label: "Claude Sonnet 4.5",   ctx: "200K" },
+    // Claude 4.0 series (2025-05)
+    { id: "claude-sonnet-4-20250514",     label: "Claude Sonnet 4",     ctx: "200K" },
+    { id: "claude-opus-4-20250514",       label: "Claude Opus 4",       ctx: "200K" },
+    // ⚠ claude-3-7-sonnet-20250219 → EOL Feb 19 2026, removed
   ],
   google: [
-    // Gemini 3.1 series (2026 — latest)
-    { id: "gemini-3.1-pro",            label: "Gemini 3.1 Pro",        ctx: "2M",  note: "latest flagship" },
-    { id: "gemini-3.1-flash-lite",     label: "Gemini 3.1 Flash Lite", ctx: "1M",  note: "latest fast" },
-    // Gemini 2.5 series (GA, stable)
-    { id: "gemini-2.5-pro",            label: "Gemini 2.5 Pro",        ctx: "1M",  note: "GA, stable" },
-    { id: "gemini-2.5-flash",          label: "Gemini 2.5 Flash",      ctx: "1M",  note: "GA default" },
-    { id: "gemini-2.5-flash-lite",     label: "Gemini 2.5 Flash Lite", ctx: "1M",  note: "cheapest" },
+    // Gemini 3.x series (2026 — Preview only, -preview suffix required)
+    { id: "gemini-3.1-pro-preview",       label: "Gemini 3.1 Pro",        ctx: "1M",  note: "Preview, thinkingLevel" },
+    { id: "gemini-3.1-flash-lite-preview",label: "Gemini 3.1 Flash-Lite", ctx: "1M",  note: "Preview, minimal thinking" },
+    { id: "gemini-3-flash-preview",       label: "Gemini 3 Flash",         ctx: "1M",  note: "Preview (Dec 2025)" },
+    // Gemini 2.5 series (GA, stable — use these for production)
+    { id: "gemini-2.5-pro",               label: "Gemini 2.5 Pro",         ctx: "1M",  note: "GA, stable" },
+    { id: "gemini-2.5-flash",             label: "Gemini 2.5 Flash",       ctx: "1M",  note: "GA default" },
+    { id: "gemini-2.5-flash-lite",        label: "Gemini 2.5 Flash-Lite",  ctx: "1M",  note: "cheapest" },
   ],
   yua: [
     { id: "yua-research",  label: "YUA Research",  ctx: "200K", note: "deep reasoning" },
@@ -1136,7 +1142,10 @@ const skills: CommandHandler = (ctx, args) => {
       }
       config.disabledSkills.splice(idx, 1);
       writeSkillsConfig(ctx.workDir, config);
-      return { output: `Enabled skill: ${skillName}` };
+      const mappedMode = SKILL_TO_MODE[skillName];
+      if (mappedMode) ctx.onModeChange?.(mappedMode);
+      const modeHint = mappedMode ? ` (agent mode set: ${mappedMode})` : "";
+      return { output: `Enabled skill: ${skillName}${modeHint}` };
     } catch {
       return { output: `Failed to enable skill "${skillName}" (could not write .yuan/config.json).` };
     }
