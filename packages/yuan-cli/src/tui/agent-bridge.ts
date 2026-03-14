@@ -184,6 +184,18 @@ export class AgentBridge {
       `## Current Mode\n` +
       `${modeInstruction}\n` +
       `\n` +
+      `## How to start a NEW task\n` +
+      `When the user gives you a NEW task (build X, create Y, make Z):\n` +
+      `1. **Design first, tools later.** Respond with a confident architecture/plan BEFORE touching any files.\n` +
+      `   - What components will this have?\n` +
+      `   - What tech stack / approach?\n` +
+      `   - What are the implementation phases?\n` +
+      `   Be specific and decisive — like a senior engineer who's done this before.\n` +
+      `2. **Then execute.** Once you've laid out the plan, start implementing immediately.\n` +
+      `   Don't ask "shall I proceed?" — just state the plan and start.\n` +
+      `3. **Exception**: if the task says "fix X" or "edit Y" and refers to EXISTING code,\n` +
+      `   then you should read the relevant file first before designing.\n` +
+      `\n` +
       `## How to work\n` +
       `- Before making changes, briefly state what you plan to do (1-2 lines max)\n` +
       `- After completing a step, summarize what was done and what's next\n` +
