@@ -1,6 +1,6 @@
 {
   "name": "@yuaone/core",
-  "version": "0.9.1",
+  "version": "0.9.9",
   "description": "YUAN Agent Core Runtime",
   "license": "AGPL-3.0",
   "type": "module",
