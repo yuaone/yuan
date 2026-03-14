@@ -1113,6 +1113,9 @@ this.checkpointSaved = false;
     this.tokenBudgetManager.reset();
     const runStartTime = Date.now();
 
+    // 즉시 start 이벤트 emit — init 전에 TUI 타이머/상태 시작
+    this.emitEvent({ kind: "agent:start", goal: userMessage });
+
     // 첫 실행 시 메모리/프로젝트 컨텍스트 자동 로드
     await this.init();
   if (!this.sessionId) {
@@ -1232,8 +1235,6 @@ this.checkpointSaved = false;
     } catch {
       // Vision intent detection is non-fatal; continue normally
     }
-
-    this.emitEvent({ kind: "agent:start", goal: userMessage });
 
     try {
       // Persona injection — 유저 선호도/언어/스타일 어댑테이션을 시스템 메시지로 주입

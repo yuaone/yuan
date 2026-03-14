@@ -89,7 +89,7 @@ export function useAgentStream(): UseAgentStreamReturn {
       if (startTimeRef.current) {
         setElapsedMs(Date.now() - startTimeRef.current);
       }
-    }, 1000);
+    }, 200);
   }, []);
 
   const stopTimer = useCallback(() => {
