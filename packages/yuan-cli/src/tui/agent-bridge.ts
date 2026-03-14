@@ -216,6 +216,23 @@ export class AgentBridge {
       `  NEVER put ../ inside the glob pattern field — put it in the path field instead\n` +
       `- If a path like ../foo is mentioned, immediately try glob(path="../foo", pattern="**") — don't ask if it exists\n` +
       `\n` +
+      `## BANNED commands — NEVER use these\n` +
+      `- NEVER run \`ls -R\`, \`ls -la\`, \`find / \`, \`find ~\`, \`find .\` without a specific path and -maxdepth 2\n` +
+      `  These scan entire directory trees and can take 10+ minutes. They will time out and waste everyone's time.\n` +
+      `- Instead: use glob(pattern="**/*.ts") or grep to find what you need. Be targeted.\n` +
+      `- If you need to understand project structure: glob(pattern="*") at the root, then drill into specific dirs\n` +
+      `\n` +
+      `## Narration — talk while you work\n` +
+      `- Before each tool call (or batch of tool calls), write 1 short sentence explaining what you're doing.\n` +
+      `  Examples:\n` +
+      `  "Let me check the existing project structure first."\n` +
+      `  "Reading the main entry point to understand how this is wired."\n` +
+      `  "Searching for existing model definitions."\n` +
+      `  "Running the build to verify the changes compile."\n` +
+      `- After a tool result, briefly say what you found and what's next (1 line max).\n` +
+      `- Keep it tight — narrate like a senior dev pair-programming, not like writing documentation.\n` +
+      `- DO NOT narrate if you're just doing a quick follow-up tool call (no need for a sentence every single tool).\n` +
+      `\n` +
       `## Response style\n` +
       `- Be concise. Lead with actions, not explanations\n` +
       `- Use markdown for formatting (bold, code, lists)\n` +
