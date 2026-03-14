@@ -110,12 +110,15 @@ Type `/` in the TUI to open the command menu (arrow keys to navigate, Enter to s
 | `/reject`    | Reject pending tool action                       |
 | `/retry`     | Retry last failed action                         |
 | `/cost`      | Token usage & estimated cost                     |
-| `/tools`     | List available tools                             |
-| `/memory`    | Show YUAN.md learnings                           |
+| `/tools`     | List available tools (built-in + MCP)            |
+| `/memory`    | Show learned patterns from YUAN.md               |
 | `/plugins`   | Plugin management (install/remove/search)        |
 | `/skills`    | Available skills (tree view)                     |
 | `/session`   | Session management                               |
 | `/settings`  | Auto-update preferences                          |
+| `/tip`       | Show a random usage tip                          |
+| `/mcp`       | Show loaded MCP servers and setup guide          |
+| `/qa`        | Show last QA result + governor config            |
 | `/exit`      | Exit YUAN                                        |
 
 ### /model — Provider & Model Management
@@ -238,6 +241,112 @@ yuan login                 # Browser-based OAuth
 yuan logout
 yuan whoami               # Show current user and plan
 ```
+
+---
+
+## MCP Server Integration
+
+YUAN supports any MCP (Model Context Protocol) server as external tools — no code changes needed.
+
+### Setup
+
+Create `~/.yuan/mcp.json` (gitignored, never committed):
+
+```json
+{
+  "servers": [
+    {
+      "name": "github",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxx" }
+    },
+    {
+      "name": "fetch",
+      "command": "uvx",
+      "args": ["mcp-server-fetch"]
+    },
+    {
+      "name": "memory",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"]
+    }
+  ]
+}
+```
+
+YUAN auto-discovers and connects all servers on startup. Tools appear in the LLM's tool list automatically (e.g. `github_search_code`, `fetch_fetch`).
+
+### Recommended MCP Servers
+
+#### Free / No API key required
+| Server | Install | What it adds |
+|--------|---------|-------------|
+| **mcp-server-fetch** (official) | `uvx mcp-server-fetch` | Fetch any URL → clean markdown |
+| **memory** (official) | `npx -y @modelcontextprotocol/server-memory` | Persistent knowledge graph across sessions |
+| **git** (official) | `uvx mcp-server-git` | Git operations via MCP |
+| **sequentialthinking** (official) | `npx -y @modelcontextprotocol/server-sequential-thinking` | Structured multi-step reasoning |
+| **filesystem** (official) | `npx -y @modelcontextprotocol/server-filesystem` | Extended file ops with configurable paths |
+| **Playwright** (Microsoft) | `npx -y @playwright/mcp` | Full browser automation |
+| **Docker** (community) | `npx -y mcp-server-docker` | Container management |
+| **Kubernetes** (community) | `npx -y mcp-server-kubernetes` | K8s cluster control |
+
+#### Requires API key (BYOK)
+| Server | Install | What it adds |
+|--------|---------|-------------|
+| **GitHub** (official) | `npx -y @modelcontextprotocol/server-github` | PR/issue management, code search |
+| **Brave Search** (official) | `npx -y @modelcontextprotocol/server-brave-search` | Web search (`BRAVE_API_KEY`) |
+| **Spider** | `npx -y @willbohn/spider-mcp` | Web scraping + search (`SPIDER_API_KEY`) |
+| **Semgrep** | `npx -y semgrep-mcp` | SAST security scanning |
+| **E2B** | `npx -y @e2b/mcp-server` | Isolated cloud code execution (`E2B_API_KEY`) |
+| **Perplexity** | via ppl-ai | Real-time web research (`PERPLEXITY_API_KEY`) |
+
+#### Self-hosted (free after setup)
+| Server | Setup | What it adds |
+|--------|-------|-------------|
+| **SearXNG** | Docker: `docker run -p 8080:8080 searxng/searxng` | Privacy-respecting multi-engine search (no API key) |
+| **Meilisearch** | Docker | Full-text + semantic search over your data |
+| **Chroma** | pip/Docker | Vector DB for embeddings |
+
+### Full mcp.json example
+
+```json
+{
+  "servers": [
+    {
+      "name": "github",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxx" }
+    },
+    {
+      "name": "brave",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "env": { "BRAVE_API_KEY": "BSA_xxx" }
+    },
+    {
+      "name": "fetch",
+      "command": "uvx",
+      "args": ["mcp-server-fetch"]
+    },
+    {
+      "name": "memory",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"]
+    },
+    {
+      "name": "playwright",
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp"]
+    }
+  ]
+}
+```
+
+> `~/.yuan/mcp.json` is gitignored and never committed — safe to store API keys.
+
+Use `/mcp` in the TUI to see which servers are currently loaded.
 
 ---
 
