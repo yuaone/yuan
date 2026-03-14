@@ -76,7 +76,17 @@ export class FileReadTool extends BaseTool {
           const buf = await fh.readFile();
           const b64 = buf.toString('base64');
           const language = detectLanguage(resolvedPath);
-          return this.ok(toolCallId, `[base64 image: ${language}]\n${b64}`, {
+          const ext = resolvedPath.split('.').pop()?.toLowerCase() ?? '';
+          const mediaTypeMap: Record<string, string> = {
+            png: 'image/png',
+            jpg: 'image/jpeg',
+            jpeg: 'image/jpeg',
+            gif: 'image/gif',
+            webp: 'image/webp',
+          };
+          const mediaType = mediaTypeMap[ext] ?? 'image/png';
+          const imageBlock = JSON.stringify({ mediaType, data: b64 });
+          return this.ok(toolCallId, `[IMAGE_BLOCK]\n${imageBlock}`, {
             totalLines: 0,
             language,
             truncated: false,

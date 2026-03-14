@@ -173,6 +173,7 @@ import { GitOpsTool } from './git-ops.js';
 import { TestRunTool } from './test-run.js';
 import { CodeSearchTool } from './code-search.js';
 import { SecurityScanTool } from './security-scan.js';
+import { WebSearchTool } from './web-search.js';
 
 /**
  * Create a ToolRegistry pre-loaded with all built-in YUAN tools.
@@ -190,6 +191,7 @@ export function createDefaultRegistry(): ToolRegistry {
     new TestRunTool(),
     new CodeSearchTool(),
     new SecurityScanTool(),
+    new WebSearchTool(),
   ]);
   return registry;
 }

@@ -18,6 +18,7 @@
     "overrides": {
       "hono": ">=4.12.7",
       "@tootallnate/once": ">=3.0.1"
-    }
+    },
+    "onlyBuiltDependencies": ["node-pty"]
   }
 }

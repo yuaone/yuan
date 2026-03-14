@@ -67,6 +67,7 @@ import { ContinuationEngine } from "./continuation-engine.js";
 import { MemoryUpdater, type RunAnalysis } from "./memory-updater.js";
 import type { ContinuationCheckpoint, ToolDefinition } from "./types.js";
 import { MCPClient, type MCPServerConfig } from "./mcp-client.js";
+import { loadMCPConfig } from "./mcp-config-loader.js";
 import { BOUNDS, cap, truncate, pushCapped } from "./safe-bounds.js";
 import { WorldStateCollector, type WorldStateSnapshot } from "./world-state.js";
 import { FailureRecovery, type RecoveryDecision } from "./failure-recovery.js";
@@ -134,6 +135,7 @@ import { recordBudgetUsage, checkBudgetShouldHalt } from "./extensions/budget-wi
 import { registerToolsInGraph, recordToolOutcomeInGraph } from "./extensions/cap-graph-wiring.js";
 import { getSelfWeaknessContext } from "./extensions/self-model-wiring.js";
 import { initMarketPlaybooks, selectMarketStrategy } from "./extensions/strategy-wiring.js";
+import { VisionIntentDetector } from "./vision-intent-detector.js";
 /** AgentLoop 설정 */
 export interface AgentLoopOptions {
   abortSignal?: AbortSignal
@@ -261,6 +263,10 @@ export class AgentLoop extends EventEmitter {
   private readonly policyOverrides?: Partial<ExecutionPolicy>;
   private checkpointSaved = false;
   private iterationCount = 0;
+  private agentHypothesis: string | undefined = undefined;
+  private agentFailureSig: string | undefined = undefined;
+  private agentVerifyState: "pass" | "fail" | "pending" | undefined = undefined;
+  private lastAgentStateInjection = 0;
   private originalSnapshots: Map<string, string> = new Map();
   private previousStrategies: import("./failure-recovery.js").RecoveryStrategy[] = [];
   private pluginRegistry: PluginRegistry;
@@ -362,6 +368,8 @@ private archSummarizer: ArchSummarizer | null = null;
   private capabilitySelfModel: CapabilitySelfModel | null = null;
   private strategyMarket: StrategyMarket | null = null;
   private sessionRunCount: number = 0;
+  /** Vision Intent Detector — auto-triggers image reads when LLM/user signals intent */
+  private readonly visionIntentDetector: VisionIntentDetector = new VisionIntentDetector();
   /**
    * Restore AgentLoop state from persisted session (yuan resume)
    */
@@ -665,17 +673,45 @@ async restoreSession(data: SessionData): Promise<void> {
     }
 
     // MCP 클라이언트 연결
-    if (this.mcpServerConfigs.length > 0) {
+    // Auto-load ~/.yuan/mcp.json and merge with any programmatically supplied configs
+    {
+      let mergedMCPConfigs = [...this.mcpServerConfigs];
       try {
-        this.mcpClient = new MCPClient({
-          servers: this.mcpServerConfigs,
+        const fileConfig = await loadMCPConfig();
+        if (fileConfig && fileConfig.servers.length > 0) {
+          // Deduplicate by name — programmatic configs take precedence
+          const existingNames = new Set(mergedMCPConfigs.map((s) => s.name));
+          for (const server of fileConfig.servers) {
+            if (!existingNames.has(server.name)) {
+              mergedMCPConfigs.push(server);
+            }
+          }
+        }
+      } catch (mcpLoadErr) {
+        // Config parse error — warn and continue without file-based servers
+        this.emitEvent({
+          kind: "agent:error",
+          message: `MCP config load warning: ${mcpLoadErr instanceof Error ? mcpLoadErr.message : String(mcpLoadErr)}`,
+          retryable: false,
         });
-        await this.mcpClient.connectAll();
-        this.mcpToolDefinitions = this.mcpClient.toToolDefinitions();
-      } catch {
-        // MCP 연결 실패는 치명적이지 않음 — 로컬 도구만 사용
-        this.mcpClient = null;
-        this.mcpToolDefinitions = [];
+      }
+
+      if (mergedMCPConfigs.length > 0) {
+        try {
+          this.mcpClient = new MCPClient({
+            servers: mergedMCPConfigs,
+          });
+          await this.mcpClient.connectAll();
+          this.mcpToolDefinitions = this.mcpClient.toToolDefinitions();
+          this.emitEvent({
+            kind: "agent:thinking",
+            content: `MCP: loaded ${this.mcpToolDefinitions.length} tools from ${mergedMCPConfigs.length} server(s)`,
+          });
+        } catch {
+          // MCP 연결 실패는 치명적이지 않음 — 로컬 도구만 사용
+          this.mcpClient = null;
+          this.mcpToolDefinitions = [];
+        }
       }
     }
 
@@ -1161,6 +1197,40 @@ this.checkpointSaved = false;
     this.lastUserMessage = userMessage;
     if (this.personaManager) {
       this.personaManager.analyzeUserMessage(userMessage);
+    }
+
+    // Vision Intent Detection — user message
+    // If the user signals they want to look at an image, auto-read it and inject as vision.
+    try {
+      const visionIntent = this.visionIntentDetector.detect(userMessage);
+      if (visionIntent && visionIntent.confidence >= 0.5) {
+        this.emitEvent({
+          kind: "agent:thinking",
+          content: `[Vision] Detected intent to view "${visionIntent.filePath}" (${visionIntent.detectedLanguage}, confidence ${visionIntent.confidence}). Auto-reading…`,
+        });
+        const visionResult = await this.toolExecutor.execute({
+          id: `vision-auto-${Date.now()}`,
+          name: "file_read",
+          arguments: { path: visionIntent.filePath },
+        });
+        if (visionResult.output.startsWith("[IMAGE_BLOCK]\n")) {
+          const jsonStr = visionResult.output.slice("[IMAGE_BLOCK]\n".length);
+          const parsed = JSON.parse(jsonStr) as { mediaType: string; data: string };
+          const validMediaTypes = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+          type ValidMediaType = typeof validMediaTypes[number];
+          const mediaType: ValidMediaType = validMediaTypes.includes(parsed.mediaType as ValidMediaType)
+            ? (parsed.mediaType as ValidMediaType)
+            : "image/png";
+          this.contextManager.addMessage({
+            role: "user",
+            content: [
+              { type: "image" as const, data: parsed.data, mediaType },
+            ],
+          });
+        }
+      }
+    } catch {
+      // Vision intent detection is non-fatal; continue normally
     }
 
     this.emitEvent({ kind: "agent:start", goal: userMessage });
@@ -1758,7 +1828,67 @@ this.checkpointSaved = false;
       completedTasks: progress.completedTasks,
       currentTask: progress.currentTask,
       remainingTasks: progress.remainingTasks,
+      hypothesis: this.agentHypothesis,
+      failureSignature: this.agentFailureSig,
+      verifyState: this.agentVerifyState,
     };
+  }
+
+  /**
+   * 매 이터레이션 LLM 호출 전 compact AgentState를 컨텍스트에 주입한다.
+   * 3 이터레이션마다 갱신하여 컨텍스트 팽창 방지.
+   */
+  private injectAgentStateIfNeeded(iteration: number): void {
+    // 첫 이터레이션 or 3회마다 or 상태 변화 시 주입
+    const stateChanged =
+      this.agentHypothesis !== undefined ||
+      this.agentFailureSig !== undefined ||
+      this.agentVerifyState === "fail";
+    const shouldInject =
+      iteration <= 1 ||
+      iteration - this.lastAgentStateInjection >= 3 ||
+      stateChanged;
+    if (!shouldInject) return;
+
+    const budgetPct = this.config?.loop?.totalTokenBudget
+      ? Math.round((this.tokenUsage.total / this.config.loop.totalTokenBudget) * 100)
+      : 0;
+    const remaining = 100 - budgetPct;
+
+    const lines: string[] = [`[AgentState] iteration=${iteration}`];
+    if (this.agentHypothesis) lines.push(`hypothesis: ${this.agentHypothesis}`);
+    if (this.agentFailureSig) lines.push(`last_failure: ${this.agentFailureSig}`);
+    if (this.agentVerifyState) lines.push(`verify: ${this.agentVerifyState}`);
+    if (this.changedFiles.length > 0) {
+      const files = this.changedFiles.slice(-4).join(", ");
+      lines.push(`changed: ${files}`);
+    }
+    lines.push(`token_budget: ${remaining}% remaining`);
+
+    if (this.iterationSystemMsgCount < 5) {
+      this.contextManager.addMessage({ role: "system", content: lines.join(" | ") });
+      this.lastAgentStateInjection = iteration;
+      this.iterationSystemMsgCount++;
+    }
+  }
+
+  /**
+   * LLM 응답 텍스트에서 "Updated hypothesis:" 마커를 파싱해 hypothesis를 갱신한다.
+   */
+  updateHypothesisFromResponse(text: string): void {
+    const match = text.match(/Updated hypothesis:\s*(.+?)(?:\n|$)/i);
+    if (match?.[1]) {
+      this.agentHypothesis = match[1].trim().slice(0, 300);
+    }
+  }
+
+  /**
+   * 검증 결과를 기록한다. CausalChainResolver 트리거에 사용.
+   */
+  recordVerifyResult(state: "pass" | "fail" | "pending", signature?: string): void {
+    this.agentVerifyState = state;
+    if (signature) this.agentFailureSig = signature;
+    if (state === "pass") this.agentFailureSig = undefined;
   }
 
   /**
@@ -2184,7 +2314,6 @@ let iteration = this.iterationCount;
  if (this.abortSignal?.aborted) {
     return { reason: "USER_CANCELLED" };
   }
-      if (iteration === 0) this.emitReasoning("starting agent loop");
       // Interrupt: pause 상태이면 resume될 때까지 대기
       if (this.interruptManager.isPaused()) {
         await this.waitForResume();
@@ -2224,8 +2353,6 @@ let iteration = this.iterationCount;
       // Cap allToolResults (prevents unbounded memory growth)
       this.allToolResults = cap(this.allToolResults, BOUNDS.allToolResults);
       this.allToolResultsSinceLastReplan = cap(this.allToolResultsSinceLastReplan, BOUNDS.toolResultsSinceReplan);
-
-      this.emitReasoning(`iteration ${iteration}: preparing context`);
 
       // Proactive replanning check (every 10 iterations when plan is active)
       if (
@@ -2409,7 +2536,8 @@ let iteration = this.iterationCount;
         }
       }
 
-      // 1. 컨텍스트 준비
+      // 1. 컨텍스트 준비 + AgentState 주입 (매 이터레이션, compact)
+      this.injectAgentStateIfNeeded(iteration);
       const messages = this.contextManager.prepareForLLM();
 
       // 2. LLM 호출 (streaming)
@@ -2424,8 +2552,6 @@ let iteration = this.iterationCount;
         // Try rebalancing to free up budget from idle roles
         this.tokenBudgetManager.rebalance();
       }
-
-     this.emitReasoning(`iteration ${iteration}: calling model`);
 
       let response: LLMResponse;
       try {
@@ -2473,6 +2599,11 @@ let iteration = this.iterationCount;
         output: this.tokenUsage.output,
       });
 
+      // hypothesis 업데이트 — LLM 응답에서 "Updated hypothesis:" 마커 파싱
+      if (response.content) {
+        this.updateHypothesisFromResponse(response.content);
+      }
+
       // LLM 응답 살균 — 간접 프롬프트 인젝션 방어
       if (response.content) {
         const llmSanitized = this.promptDefense.sanitizeToolOutput("llm_response", response.content);
@@ -2487,6 +2618,50 @@ let iteration = this.iterationCount;
         }
       }
 
+      // Vision Intent Detection — LLM reasoning/response
+      // If the LLM signals it wants to look at an image in its content/reasoning,
+      // auto-read it and inject as a user-side vision message for the next iteration.
+      if (response.content) {
+        try {
+          const visionIntent = this.visionIntentDetector.detect(response.content);
+          if (visionIntent && visionIntent.confidence >= 0.5 && response.toolCalls.length === 0) {
+            this.emitEvent({
+              kind: "agent:thinking",
+              content: `[Vision] LLM requested view of "${visionIntent.filePath}" (${visionIntent.detectedLanguage}, confidence ${visionIntent.confidence}). Auto-reading…`,
+            });
+            const visionResult = await this.toolExecutor.execute({
+              id: `vision-auto-llm-${Date.now()}`,
+              name: "file_read",
+              arguments: { path: visionIntent.filePath },
+            });
+            if (visionResult.output.startsWith("[IMAGE_BLOCK]\n")) {
+              const jsonStr = visionResult.output.slice("[IMAGE_BLOCK]\n".length);
+              const parsed = JSON.parse(jsonStr) as { mediaType: string; data: string };
+              const validMediaTypes = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+              type ValidMediaType = typeof validMediaTypes[number];
+              const mediaType: ValidMediaType = validMediaTypes.includes(parsed.mediaType as ValidMediaType)
+                ? (parsed.mediaType as ValidMediaType)
+                : "image/png";
+              // Add LLM response to context first, then inject vision as user follow-up
+              this.contextManager.addMessage({
+                role: "assistant",
+                content: response.content,
+              });
+              this.contextManager.addMessage({
+                role: "user",
+                content: [
+                  { type: "image" as const, data: parsed.data, mediaType },
+                ],
+              });
+              // Continue loop so LLM gets the image on the next iteration
+              continue;
+            }
+          }
+        } catch {
+          // Vision intent detection from LLM response is non-fatal
+        }
+      }
+
       // 3. 응답 처리
       if (response.toolCalls.length === 0) {
         const content = response.content ?? "";
@@ -2498,9 +2673,11 @@ let iteration = this.iterationCount;
           // Run cheap checks — if they fail, stay in implement and continue loop
           const cheapOk = await this.runCheapChecks();
           if (cheapOk) {
+            this.recordVerifyResult("pass");
             this.transitionPhase("finalize", "cheap checks passed");
           } else {
             // cheap checks failed — stay in implement, let LLM fix
+            this.recordVerifyResult("fail", "cheap checks failed");
             this.transitionPhase("implement", "cheap check failed, continuing");
             continue;
           }
@@ -2739,6 +2916,34 @@ this.emitEvent({
             message: `Prompt injection detected in ${result.name} output: ${sanitized.patternsFound.join(", ")}`,
             retryable: false,
           });
+        }
+
+        // Image block from file_read — inject as vision ContentBlock
+        if (sanitized.output.startsWith("[IMAGE_BLOCK]\n")) {
+          try {
+            const jsonStr = sanitized.output.slice("[IMAGE_BLOCK]\n".length);
+            const parsed = JSON.parse(jsonStr) as { mediaType: string; data: string };
+            const validMediaTypes = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+            type ValidMediaType = typeof validMediaTypes[number];
+            const mediaType: ValidMediaType = validMediaTypes.includes(parsed.mediaType as ValidMediaType)
+              ? (parsed.mediaType as ValidMediaType)
+              : "image/png";
+            this.contextManager.addMessage({
+              role: "tool",
+              content: [
+                { type: "image" as const, data: parsed.data, mediaType },
+              ],
+              tool_call_id: result.tool_call_id,
+            });
+          } catch {
+            // Fallback: treat as plain text if parsing fails
+            this.contextManager.addMessage({
+              role: "tool",
+              content: sanitized.output,
+              tool_call_id: result.tool_call_id,
+            });
+          }
+          continue;
         }
 
         // 큰 결과는 추가 압축
@@ -3279,8 +3484,8 @@ if (this.sessionPersistence && this.sessionId) {
     // 텍스트 버퍼링 — 1토큰씩 emit하지 않고 청크 단위로 모아서 emit
     let textBuffer = "";
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
-    const FLUSH_INTERVAL_MS = 80;        // 80ms마다 flush
-    const FLUSH_SIZE_THRESHOLD = 40;     // 40자 이상이면 즉시 flush
+    const FLUSH_INTERVAL_MS = 20;        // 20ms마다 flush (faster first-token display)
+    const FLUSH_SIZE_THRESHOLD = 15;     // 15자 이상이면 즉시 flush
     const SENTENCE_BREAKS = /[.!?\n。！？\n]\s*$/;  // 문장 경계에서도 flush
 
     const flushTextBuffer = () => {
@@ -3576,7 +3781,6 @@ if (this.sessionPersistence && this.sessionId) {
             : result.output,
         durationMs: result.durationMs,
       });
-      this.emitReasoning(`success: ${toolCall.name}`);
       this.reasoningTree.add("tool", `success: ${toolCall.name}`);
 
       if (["file_write", "file_edit"].includes(toolCall.name) && result.success) {
@@ -3844,7 +4048,6 @@ if (this.sessionPersistence && this.sessionId) {
         if (result?.output.startsWith('[INTERRUPTED]')) interrupted = true;
       } else {
         // Multi-tool — parallel execution
-        this.emitReasoning(`⚡ running ${batch.label} in parallel`);
         const settled = await Promise.allSettled(
           batch.calls.map((tc) => this.executeSingleTool(tc, toolCalls)),
         );
@@ -4601,7 +4804,6 @@ if (this.sessionPersistence && this.sessionId) {
       iteration: this.iterationCount,
       trigger,
     });
-    this.emitReasoning(`phase: ${from} → ${to} (${trigger})`);
   }
 
   /**
@@ -4619,7 +4821,7 @@ if (this.sessionPersistence && this.sessionId) {
     for (const f of this.changedFiles) {
       const abs = projectPath ? `${projectPath}/${f}` : f;
       if (f.startsWith("/") ? !existsSync(f) : !existsSync(abs)) {
-        this.emitReasoning(`cheap check: file missing: ${f}`);
+        // cheap check: file missing — stay in verify
         return false;
       }
     }
@@ -4640,7 +4842,7 @@ if (this.sessionPersistence && this.sessionId) {
         if (result.success && result.output) {
           const hasErrors = result.output.includes(": error TS");
           if (hasErrors) {
-            this.emitReasoning(`cheap check: tsc errors found, staying in verify`);
+            // cheap check: tsc errors found — staying in verify
             // Inject TS errors so LLM sees them and fixes them
             if (this.iterationSystemMsgCount < 5) {
               const truncated = result.output.length > 1000

@@ -19,6 +19,9 @@ const MAX_TIMEOUT = 600_000;   // 10m hard cap — prevents runaway processes
 const MAX_STDOUT = 100_000; // 100KB
 const MAX_STDERR = 50_000;  // 50KB
 
+// Regex to strip ANSI escape codes from PTY output
+const ANSI_ESCAPE_RE = /\x1B\[[0-9;]*[mGKHF]/g;
+
 export class ShellExecTool extends BaseTool {
   readonly name = 'shell_exec';
   readonly description =
@@ -54,6 +57,12 @@ export class ShellExecTool extends BaseTool {
       description: 'Additional environment variables',
       required: false,
     },
+    pty: {
+      type: 'boolean',
+      description: 'Run in PTY mode (pseudo-terminal). Use for interactive commands, curses UIs, or programs that require a TTY. Default: false.',
+      required: false,
+      default: false,
+    },
   };
 
   async execute(args: Record<string, unknown>, workDir: string, abortSignal?: AbortSignal): Promise<ToolResult> {
@@ -63,6 +72,7 @@ export class ShellExecTool extends BaseTool {
     const cwd = args.cwd as string | undefined;
     const timeout = Math.min((args.timeout as number) ?? DEFAULT_TIMEOUT, MAX_TIMEOUT);
     const env = args.env as Record<string, string> | undefined;
+    const usePty = (args.pty as boolean) ?? false;
 
     if (!executable) {
       return this.fail(toolCallId, 'Missing required parameter: executable');
@@ -119,6 +129,12 @@ export class ShellExecTool extends BaseTool {
 
     // Execute
     const startTime = Date.now();
+
+    if (usePty) {
+      return this.executePty(
+        toolCallId, executable, execArgs, resolvedCwd, timeout, env, startTime, abortSignal
+      );
+    }
 
     try {
       const result = await new Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean }>(
@@ -205,6 +221,121 @@ export class ShellExecTool extends BaseTool {
       return this.fail(
         toolCallId,
         `Execution failed: ${(err as Error).message} [duration: ${durationMs}ms]`
+      );
+    }
+  }
+
+  /**
+   * PTY-based execution using node-pty.
+   * Merges stdout+stderr into a single output stream (as a real terminal would).
+   * Strips ANSI escape codes before returning.
+   */
+  private async executePty(
+    toolCallId: string,
+    executable: string,
+    execArgs: string[],
+    resolvedCwd: string,
+    timeout: number,
+    env: Record<string, string> | undefined,
+    startTime: number,
+    abortSignal?: AbortSignal,
+  ): Promise<ToolResult> {
+    try {
+      // Lazy import to avoid startup cost when not used
+      const pty = await import('node-pty');
+
+      const result = await new Promise<{ output: string; exitCode: number; timedOut: boolean }>(
+        (resolve) => {
+          // Check if already aborted before starting
+          if (abortSignal?.aborted) {
+            resolve({ output: '', exitCode: 1, timedOut: false });
+            return;
+          }
+
+          const envVars = env ? sanitizeEnv(env) : {};
+          const ptyProcess = pty.spawn(executable, execArgs, {
+            name: 'xterm-color',
+            cols: 120,
+            rows: 30,
+            cwd: resolvedCwd,
+            env: { ...process.env, ...envVars },
+          });
+
+          let outputBuf = '';
+          let settled = false;
+
+          const settle = (code: number, timed: boolean) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            if (abortSignal) {
+              abortSignal.removeEventListener('abort', onAbort);
+            }
+            resolve({
+              output: truncateStr(outputBuf.replace(ANSI_ESCAPE_RE, ''), MAX_STDOUT),
+              exitCode: code,
+              timedOut: timed,
+            });
+          };
+
+          ptyProcess.onData((data: string) => {
+            outputBuf += data;
+            // Enforce output size cap to avoid OOM
+            if (outputBuf.length > MAX_STDOUT * 2) {
+              outputBuf = outputBuf.slice(-MAX_STDOUT);
+            }
+          });
+
+          ptyProcess.onExit(({ exitCode: code }: { exitCode: number }) => {
+            settle(code ?? 0, false);
+          });
+
+          // Timeout handling
+          const timer = setTimeout(() => {
+            ptyProcess.kill('SIGTERM');
+            setTimeout(() => {
+              try { ptyProcess.kill('SIGKILL'); } catch { /* already dead */ }
+            }, 3000);
+            settle(1, true);
+          }, timeout);
+
+          // AbortSignal support
+          const onAbort = () => {
+            ptyProcess.kill('SIGTERM');
+            setTimeout(() => {
+              try { ptyProcess.kill('SIGKILL'); } catch { /* already dead */ }
+            }, 3000);
+            settle(1, false);
+          };
+          if (abortSignal) {
+            abortSignal.addEventListener('abort', onAbort, { once: true });
+          }
+        }
+      );
+
+      const durationMs = Date.now() - startTime;
+
+      let output = '';
+      if (result.output) {
+        output += `[pty output]\n${result.output}\n`;
+      }
+      if (result.timedOut) {
+        output += `\n[TIMED OUT after ${timeout}ms]`;
+      }
+      output += `\n[exit code: ${result.exitCode}] [duration: ${durationMs}ms]`;
+
+      return {
+        tool_call_id: toolCallId,
+        name: this.name,
+        success: result.exitCode === 0 && !result.timedOut,
+        output: this.truncateOutput(output),
+        durationMs,
+      };
+    } catch (err) {
+      const durationMs = Date.now() - startTime;
+      return this.fail(
+        toolCallId,
+        `PTY execution failed: ${(err as Error).message} [duration: ${durationMs}ms]`
       );
     }
   }

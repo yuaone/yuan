@@ -472,17 +472,17 @@ engine.on("token_usage", (usage: { input: number; output: number }) => {
   private _currentMode: string = "code";
   setMode(mode: string): void {
     this._currentMode = mode;
-    // Destroy the current persistent loop so next message creates a new one with updated system prompt
-    // (preserve conversation history by NOT nulling it — will be recreated with mode in next sendMessage)
-    // Actually, we can't preserve history easily when recreating the loop.
-    // So instead, add a system message to the existing loop context if it exists.
+    // Recreate loop on next sendMessage with the new system prompt.
+    // We null persistentLoop here so the next message picks up the new mode.
+    // History is lost but mode must actually take effect in the LLM context.
     if (this.persistentLoop) {
-      // Signal mode change via thinking event
-      this.eventCallback?.({
-        kind: "agent:thinking",
-        content: `Mode switched to: ${mode}`,
-      } as import("@yuaone/core").AgentEvent);
+      this.persistentLoop = null;
+      this.loop = null;
     }
+    this.eventCallback?.({
+      kind: "agent:thinking",
+      content: `Mode → ${mode}`,
+    } as import("@yuaone/core").AgentEvent);
   }
   get currentMode(): string { return this._currentMode; }
 

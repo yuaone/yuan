@@ -57,6 +57,7 @@ export { CodeSearchTool } from './code-search.js';
 export { SecurityScanTool } from './security-scan.js';
 export type { SecurityFinding, SecurityReport, FindingSeverity } from './security-scan.js';
 export { BrowserTool } from './browser-tool.js';
+export { WebSearchTool } from './web-search.js';
 
 // Registry
 export { ToolRegistry, createDefaultRegistry, createDesignRegistry } from './tool-registry.js';

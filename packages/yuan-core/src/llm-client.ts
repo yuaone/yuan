@@ -110,6 +110,10 @@ export class BYOKClient {
         return await this.chatAnthropic(messages, tools);
       }
 
+      if (this.config.provider === "google") {
+        return await this.chatGeminiNative(messages, tools);
+      }
+
       if (!this.openaiClient) {
         throw new LLMError(this.config.provider, "OpenAI client not initialized for this provider");
       }
@@ -804,20 +808,45 @@ export class BYOKClient {
       }
 
       if (msg.role === "tool") {
-        // Tool results → functionResponse parts
-        const toolCalls = Array.isArray(msg.content)
-          ? (msg.content as Array<{ type: string; tool_use_id?: string; content?: unknown }>)
-          : [];
-        const parts = toolCalls
-          .filter((b) => b.type === "tool_result")
-          .map((b) => ({
-            functionResponse: {
-              name: (b as Record<string, unknown>).name ?? "tool",
-              response: { content: b.content ?? "" },
-            },
-          }));
-        if (parts.length > 0) {
-          geminiContents.push({ role: "user", parts });
+        // Tool results — may be plain text, functionResponse blocks, or image ContentBlocks
+        if (Array.isArray(msg.content)) {
+          const contentBlocks = msg.content as Array<{ type: string; [k: string]: unknown }>;
+          // Check if this is a vision tool result (image ContentBlocks)
+          const hasImageBlocks = contentBlocks.some((b) => b.type === "image");
+          if (hasImageBlocks) {
+            const parts: Array<Record<string, unknown>> = [];
+            for (const block of contentBlocks) {
+              if (block.type === "image") {
+                parts.push({
+                  inlineData: {
+                    mimeType: block.mediaType,
+                    data: block.data,
+                  },
+                });
+              } else if (block.type === "text" && typeof block.text === "string" && block.text) {
+                parts.push({ text: block.text });
+              }
+            }
+            if (parts.length > 0) {
+              geminiContents.push({ role: "user", parts });
+            }
+          } else {
+            // functionResponse blocks
+            const toolResultBlocks = contentBlocks as Array<{ type: string; tool_use_id?: string; content?: unknown }>;
+            const parts = toolResultBlocks
+              .filter((b) => b.type === "tool_result")
+              .map((b) => ({
+                functionResponse: {
+                  name: (b as Record<string, unknown>).name ?? "tool",
+                  response: { content: b.content ?? "" },
+                },
+              }));
+            if (parts.length > 0) {
+              geminiContents.push({ role: "user", parts });
+            }
+          }
+        } else if (typeof msg.content === "string" && msg.content) {
+          geminiContents.push({ role: "user", parts: [{ text: msg.content }] });
         }
         continue;
       }
@@ -835,6 +864,25 @@ export class BYOKClient {
               functionCall: {
                 name: block.name,
                 args: block.input ?? {},
+              },
+            });
+          }
+        }
+        if (parts.length > 0) geminiContents.push({ role, parts });
+        continue;
+      }
+
+      // User messages with ContentBlock[] — may include image blocks
+      if (Array.isArray(msg.content)) {
+        const parts: Array<Record<string, unknown>> = [];
+        for (const block of msg.content as Array<{ type: string; [k: string]: unknown }>) {
+          if (block.type === "text" && typeof block.text === "string" && block.text) {
+            parts.push({ text: block.text });
+          } else if (block.type === "image") {
+            parts.push({
+              inlineData: {
+                mimeType: block.mediaType,
+                data: block.data,
               },
             });
           }
@@ -990,6 +1038,217 @@ export class BYOKClient {
     }
 
     yield { type: "done", usage: { input: inputTokens, output: outputTokens } };
+  }
+
+  /**
+   * Native Gemini REST API non-streaming — uses the `generateContent` endpoint directly.
+   * Mirror of chatStreamGeminiNative but calls generateContent instead of streamGenerateContent.
+   */
+  private async chatGeminiNative(
+    messages: Message[],
+    tools?: ToolDefinition[],
+  ): Promise<LLMResponse> {
+    const apiKey = this.config.apiKey;
+    const baseUrl =
+      this.config.baseUrl?.replace(/\/openai\/?$/, "") ??
+      "https://generativelanguage.googleapis.com/v1beta";
+    const endpoint = `${baseUrl}/models/${this.model}:generateContent?key=${apiKey}`;
+
+    // Convert messages to Gemini format (same logic as chatStreamGeminiNative)
+    const systemParts: string[] = [];
+    const geminiContents: Array<{ role: string; parts: Array<Record<string, unknown>> }> = [];
+
+    for (const msg of messages) {
+      const textContent =
+        typeof msg.content === "string"
+          ? msg.content
+          : Array.isArray(msg.content)
+            ? msg.content
+                .filter((b): b is { type: "text"; text: string } => b.type === "text")
+                .map((b) => b.text)
+                .join("\n")
+            : "";
+
+      if (msg.role === "system") {
+        if (textContent) systemParts.push(textContent);
+        continue;
+      }
+
+      if (msg.role === "tool") {
+        if (Array.isArray(msg.content)) {
+          const contentBlocks = msg.content as Array<{ type: string; [k: string]: unknown }>;
+          const hasImageBlocks = contentBlocks.some((b) => b.type === "image");
+          if (hasImageBlocks) {
+            const parts: Array<Record<string, unknown>> = [];
+            for (const block of contentBlocks) {
+              if (block.type === "image") {
+                parts.push({
+                  inlineData: {
+                    mimeType: block.mediaType,
+                    data: block.data,
+                  },
+                });
+              } else if (block.type === "text" && typeof block.text === "string" && block.text) {
+                parts.push({ text: block.text });
+              }
+            }
+            if (parts.length > 0) {
+              geminiContents.push({ role: "user", parts });
+            }
+          } else {
+            const toolResultBlocks = contentBlocks as Array<{ type: string; tool_use_id?: string; content?: unknown }>;
+            const parts = toolResultBlocks
+              .filter((b) => b.type === "tool_result")
+              .map((b) => ({
+                functionResponse: {
+                  name: (b as Record<string, unknown>).name ?? "tool",
+                  response: { content: b.content ?? "" },
+                },
+              }));
+            if (parts.length > 0) {
+              geminiContents.push({ role: "user", parts });
+            }
+          }
+        } else if (typeof msg.content === "string" && msg.content) {
+          geminiContents.push({ role: "user", parts: [{ text: msg.content }] });
+        }
+        continue;
+      }
+
+      const role = msg.role === "assistant" ? "model" : "user";
+
+      if (msg.role === "assistant" && Array.isArray(msg.content)) {
+        const parts: Array<Record<string, unknown>> = [];
+        for (const block of msg.content as Array<{ type: string; [k: string]: unknown }>) {
+          if (block.type === "text" && typeof block.text === "string" && block.text) {
+            parts.push({ text: block.text });
+          } else if (block.type === "tool_use") {
+            parts.push({
+              functionCall: {
+                name: block.name,
+                args: block.input ?? {},
+              },
+            });
+          }
+        }
+        if (parts.length > 0) geminiContents.push({ role, parts });
+        continue;
+      }
+
+      if (Array.isArray(msg.content)) {
+        const parts: Array<Record<string, unknown>> = [];
+        for (const block of msg.content as Array<{ type: string; [k: string]: unknown }>) {
+          if (block.type === "text" && typeof block.text === "string" && block.text) {
+            parts.push({ text: block.text });
+          } else if (block.type === "image") {
+            parts.push({
+              inlineData: {
+                mimeType: block.mediaType,
+                data: block.data,
+              },
+            });
+          }
+        }
+        if (parts.length > 0) geminiContents.push({ role, parts });
+        continue;
+      }
+
+      if (textContent) {
+        geminiContents.push({ role, parts: [{ text: textContent }] });
+      }
+    }
+
+    // Build Gemini tool declarations (same stripping logic as streaming)
+    const stripGeminiUnsupported = (schema: Record<string, unknown>): Record<string, unknown> => {
+      const UNSUPPORTED = new Set(["additionalProperties", "$schema", "$defs", "definitions", "default", "examples", "$id", "$ref"]);
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(schema)) {
+        if (UNSUPPORTED.has(k)) continue;
+        if (k === "properties" && v && typeof v === "object") {
+          const stripped: Record<string, unknown> = {};
+          for (const [pk, pv] of Object.entries(v as Record<string, unknown>)) {
+            stripped[pk] = pv && typeof pv === "object" ? stripGeminiUnsupported(pv as Record<string, unknown>) : pv;
+          }
+          out[k] = stripped;
+        } else if (k === "items" && v && typeof v === "object") {
+          out[k] = stripGeminiUnsupported(v as Record<string, unknown>);
+        } else {
+          out[k] = v;
+        }
+      }
+      return out;
+    };
+
+    const functionDeclarations = tools?.map((t) => ({
+      name: t.name,
+      description: t.description,
+      parameters: stripGeminiUnsupported(t.parameters as Record<string, unknown>),
+    }));
+
+    const body: Record<string, unknown> = {
+      contents: geminiContents,
+      ...(systemParts.length > 0
+        ? { systemInstruction: { parts: systemParts.map((t) => ({ text: t })) } }
+        : {}),
+      ...(functionDeclarations && functionDeclarations.length > 0
+        ? { tools: [{ functionDeclarations }] }
+        : {}),
+      generationConfig: {
+        maxOutputTokens: 8192,
+      },
+    };
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => "");
+      throw new LLMError("google", `Gemini API error ${response.status}: ${errText}`);
+    }
+
+    const data = (await response.json()) as Record<string, unknown>;
+
+    // Parse Gemini generateContent response
+    const candidates = (data.candidates as Array<Record<string, unknown>>) ?? [];
+    const usageMetadata = data.usageMetadata as Record<string, unknown> | undefined;
+
+    let textContent: string | null = null;
+    const toolCalls: ToolCall[] = [];
+
+    for (const candidate of candidates) {
+      const content = candidate.content as Record<string, unknown> | undefined;
+      const parts = (content?.parts as Array<Record<string, unknown>>) ?? [];
+      for (const part of parts) {
+        if (typeof part.text === "string" && part.text) {
+          textContent = (textContent ?? "") + part.text;
+        }
+        const fc = part.functionCall as Record<string, unknown> | undefined;
+        if (fc && typeof fc.name === "string") {
+          const callId = `call_gemini_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+          toolCalls.push({
+            id: callId,
+            name: fc.name,
+            arguments: (fc.args as Record<string, unknown>) ?? {},
+          });
+        }
+      }
+    }
+
+    const firstCandidate = candidates[0] as Record<string, unknown> | undefined;
+    const finishReason = (firstCandidate?.finishReason as string) ?? "STOP";
+
+    return {
+      content: textContent,
+      toolCalls,
+      usage: {
+        input: (usageMetadata?.promptTokenCount as number) ?? 0,
+        output: (usageMetadata?.candidatesTokenCount as number) ?? 0,
+      },
+      finishReason,
+    };
   }
 
   /**

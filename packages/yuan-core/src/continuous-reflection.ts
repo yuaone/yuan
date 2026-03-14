@@ -109,6 +109,14 @@ export interface AgentStateSnapshot {
   currentTask: string;
   /** 남은 태스크 목록 */
   remainingTasks: string[];
+  /** 현재 working hypothesis (LLM이 업데이트) */
+  hypothesis?: string;
+  /** 마지막 실패 시그니처 */
+  failureSignature?: string;
+  /** 마지막 검증 결과 */
+  verifyState?: "pass" | "fail" | "pending";
+  /** 압축된 월드 스테이트 요약 */
+  worldStateSummary?: string;
 }
 
 /**

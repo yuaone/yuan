@@ -122,12 +122,12 @@ export function useAgentStream(): UseAgentStreamReturn {
 
   const pendingTextRef = useRef("");
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const FLUSH_INTERVAL = 120;
+  const FLUSH_INTERVAL = 40;
 
   // Debounce buffer for thinking/reasoning lines to avoid per-token re-renders
   const pendingThinkingRef = useRef<string[]>([]);
   const thinkingFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const THINKING_FLUSH_INTERVAL = 400; // 400ms batch — reduces flicker from rapid reasoning events
+  const THINKING_FLUSH_INTERVAL = 80; // 80ms batch — fast thinking display, minimal flicker
 
   const flushPendingText = useCallback(() => {
     if (flushTimerRef.current) {

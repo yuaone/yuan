@@ -463,6 +463,9 @@ export type {
   MCPServerState,
 } from "./mcp-client.js";
 
+// ─── MCP Config Loader ───
+export { loadMCPConfig, MCP_CONFIG_PATH } from "./mcp-config-loader.js";
+
 // ─── Self-Reflection ───
 export { SelfReflection } from "./self-reflection.js";
 export type {
@@ -1043,3 +1046,12 @@ export type {
   CoordinatorResult,
   CoordinatorConfig,
 } from "./agent-coordinator.js";
+
+
+// ─── Causal Chain Resolver (Phase 9) ───
+export { CausalChainResolver } from "./causal-chain-resolver.js";
+export type { CausalChainResult } from "./causal-chain-resolver.js";
+
+// ─── Vision Intent Detector ───
+export { VisionIntentDetector } from "./vision-intent-detector.js";
+export type { VisionIntent } from "./vision-intent-detector.js";

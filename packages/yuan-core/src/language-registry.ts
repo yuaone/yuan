@@ -992,6 +992,143 @@ export const LANGUAGE_REGISTRY: LanguageRegistryEntry[] = [
     commonErrors: ["Unable to resolve symbol", "ArityException", "ClassCastException", "NullPointerException"],
     group: "functional",
   },
+  // ═══════════════════════════════════════════════════════════════
+  // TPU / JAX / XLA
+  // ═══════════════════════════════════════════════════════════════
+
+  {
+    id: "jax",
+    displayName: "JAX/XLA (TPU)",
+    extensions: [".py"],
+    manifestFiles: ["requirements.txt"],
+    buildCmd: "python -c 'import jax; print(jax.devices())'",
+    testCmd: "pytest tests/",
+    errorSignal: "XlaRuntimeError",
+    commonErrors: [
+      "RESOURCE_EXHAUSTED",
+      "TracerArrayConversionError",
+      "UnexpectedTracerError",
+      "INVALID_ARGUMENT: Shapes must be compatible",
+      "Cannot use a jit-compiled function",
+    ],
+    group: "emerging",
+  },
+
+  {
+    id: "torch-xla",
+    displayName: "PyTorch/XLA (TPU)",
+    extensions: [".py"],
+    errorSignal: "torch_xla",
+    commonErrors: [
+      "XLA device not found",
+      "mark_step",
+      "RESOURCE_EXHAUSTED",
+      "unsupported operation on XLA",
+      "xla_model",
+    ],
+    group: "emerging",
+  },
+
+  // ═══════════════════════════════════════════════════════════════
+  // NPU (Neural Processing Unit)
+  // ═══════════════════════════════════════════════════════════════
+
+  {
+    id: "coreml",
+    displayName: "Core ML / Apple Neural Engine",
+    extensions: [".py", ".mlmodel", ".mlpackage"],
+    errorSignal: "coremltools.models",
+    commonErrors: [
+      "Unsupported op",
+      "Model conversion failed",
+      "shape mismatch",
+      "Operator not supported in target compute unit",
+      "ANE compiler error",
+    ],
+    group: "emerging",
+  },
+
+  {
+    id: "openvino",
+    displayName: "OpenVINO (Intel NPU)",
+    extensions: [".py", ".xml", ".bin"],
+    errorSignal: "[ERROR] OpenVINO",
+    commonErrors: [
+      "Unsupported primitive",
+      "Layer type is not supported",
+      "Input shape is not supported",
+      "runtime error",
+      "Failed to compile model",
+    ],
+    group: "emerging",
+  },
+
+  {
+    id: "snpe",
+    displayName: "Qualcomm SNPE (NPU)",
+    extensions: [".py", ".dlc"],
+    errorSignal: "SNPE Error",
+    commonErrors: [
+      "Unsupported network layer",
+      "Buffer size mismatch",
+      "Runtime backend not found",
+      "Failed to load model",
+      "Quantization failed",
+    ],
+    group: "emerging",
+  },
+
+  // ═══════════════════════════════════════════════════════════════
+  // QPU (Quantum Processing Unit)
+  // ═══════════════════════════════════════════════════════════════
+
+  {
+    id: "qiskit",
+    displayName: "Qiskit (IBM QPU)",
+    extensions: [".py"],
+    manifestFiles: ["requirements.txt"],
+    buildCmd: "python -c 'import qiskit; print(qiskit.__version__)'",
+    testCmd: "pytest tests/",
+    errorSignal: "QiskitError",
+    commonErrors: [
+      "CircuitError",
+      "TranspilerError",
+      "Circuit too wide",
+      "JobError: job status is ERROR",
+      "BackendJobLimit",
+    ],
+    group: "emerging",
+  },
+
+  {
+    id: "cirq",
+    displayName: "Cirq (Google QPU)",
+    extensions: [".py"],
+    errorSignal: "cirq.errors",
+    commonErrors: [
+      "InvalidArgumentError",
+      "Moment can only hold",
+      "No qubits specified",
+      "Gate not supported on device",
+      "Simulation error",
+    ],
+    group: "emerging",
+  },
+
+  {
+    id: "pennylane",
+    displayName: "PennyLane (QPU)",
+    extensions: [".py"],
+    errorSignal: "pennylane.DeviceError",
+    commonErrors: [
+      "DeviceError",
+      "Operation not supported",
+      "Invalid wire",
+      "gradient not defined",
+      "QuantumFunctionError",
+    ],
+    group: "emerging",
+  },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -109,16 +109,19 @@ export const MessageList = memo(function MessageList({
 
   // Mouse wheel scroll
   const handleMouseUp = useCallback(() => {
-    setPinned(false);
-    setScrollBack((prev) => Math.min(prev + 3, Math.max(0, messages.length - 1)));
+  setPinned(false);
+  setScrollBack((prev) => {
+    const next = prev + 1;
+    return Math.min(next, Math.max(0, messages.length - 1));
+  });
   }, [messages.length]);
 
   const handleMouseDown = useCallback(() => {
-    setScrollBack((prev) => {
-      const next = Math.max(0, prev - 3);
-      if (next === 0) setPinned(true);
-      return next;
-    });
+  setScrollBack((prev) => {
+    const next = Math.max(0, prev - 1);
+    if (next === 0) setPinned(true);
+    return next;
+  });
   }, []);
 
   useMouseScroll(handleMouseUp, handleMouseDown);
@@ -144,14 +147,14 @@ export const MessageList = memo(function MessageList({
 
   // Claude Code–style layout: start from top when messages are few,
   // pin to bottom once they fill the viewport (feels natural, not floating in center)
-  const totalVisibleLines = visibleMessages.reduce((sum, m) => sum + estimateLines(m, columns), 0);
-const justifyContent =
-  totalVisibleLines < height * 0.7
-    ? "flex-start"
-    : "flex-end";
+ const totalVisibleLines = visibleMessages.reduce((sum, m) => sum + estimateLines(m, columns), 0);
 
-  return (
-    <Box flexDirection="column" height={height} overflow="hidden" justifyContent="flex-end" flexGrow={1}>
+ // Claude Code style
+ // Messages always start from top and grow downward
+ const justifyContent = "flex-start";
+
+return (
+  <Box flexDirection="column" height={height} overflow="hidden" justifyContent={justifyContent} flexGrow={1}>
       {/* Empty state */}
       {visibleMessages.length === 0 && !isThinking && (
         <Box justifyContent="center" flexGrow={1}>
