@@ -146,6 +146,27 @@ Type `/` in the TUI to open the command menu (arrow keys to navigate, Enter to s
 /mode ask         # Q&A only, no file changes
 ```
 
+### /skills — Skill Management
+
+```bash
+/skills                    # List all available skills (tree view)
+/skills enable debug        # Enable a skill manually
+/skills disable debug       # Disable a skill
+/skills info typescript     # Show skill details and patterns
+```
+
+YUAN bundles **35 skills** by default — skills activate automatically based on file types and context. Enabling a skill also sets the corresponding agent mode (e.g., `debug` → debug mode, `security-scan` → security mode).
+
+**Built-in skill groups:**
+
+| Group | Skills |
+|-------|--------|
+| Core | `debug`, `test-driven`, `code-review`, `security-scan`, `refactor`, `plan` |
+| Languages | `typescript`, `javascript`, `python`, `react`, `vue`, `svelte`, `go`, `rust`, `java`, `kotlin`, `swift`, `csharp`, `dart`, `ruby`, `php`, `c`, `cpp`, `bash`, `sql`, `elixir`, `haskell`, `lua`, `r` |
+| Special Domains | `solidity`, `docker`, `terraform`, `gdscript`, `cuda`, `verilog` |
+
+User skills: `~/.yuan/skills/*.md`. Plugin skills: `npm install @yuaone/plugin-*`.
+
 ---
 
 ## Model Catalog (2026)
@@ -235,6 +256,9 @@ YUAN uses a multi-layer AI engine:
 | **QAPipeline** | Quick + thorough quality checks post-execution |
 | **Governor** | Safety/security scanning before tool execution |
 | **AutoFix** | Automatic lint/type error repair loop |
+| **TaskClassifier** | Classifies user task type (feature/debug/refactor/security/…) |
+| **StrategySelector** | Picks up to 3 execution strategies, propagates to subagents |
+| **SkillLoader** | Loads 35 built-in skills + user/plugin skills, auto-activates |
 
 ---
 

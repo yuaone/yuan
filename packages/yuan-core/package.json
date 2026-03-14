@@ -1,6 +1,6 @@
 {
   "name": "@yuaone/core",
-  "version": "0.7.0",
+  "version": "0.9.1",
   "description": "YUAN Agent Core Runtime",
   "license": "AGPL-3.0",
   "type": "module",
@@ -35,7 +35,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && rm -rf dist/skills && cp -r src/skills dist/skills",
     "dev": "tsc --watch",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
