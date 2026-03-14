@@ -6,7 +6,7 @@
  * Esc → close slash menu or interrupt agent.
  */
 
-import React, { useState, useCallback, useEffect, useRef } from "react";
+import React, { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { Box, Text, useInput } from "ink";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
 import { useInputHistory } from "../hooks/useInputHistory.js";
@@ -62,8 +62,9 @@ export function InputBox({
 }: InputBoxProps): React.JSX.Element {
   const { columns } = useTerminalSize();
   const history = useInputHistory();
-  const [value, setValue] = useState("");
-  const [cursorPos, setCursorPos] = useState(0);
+  // Combine value+cursor into single state → guaranteed single re-render per keypress
+  const [inputState, setInputState] = useState({ value: "", cursor: 0 });
+  const { value, cursor: cursorPos } = inputState;
 
   const [pasteBadge, setPasteBadge] = useState<string | null>(null);
   const pasteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -104,8 +105,8 @@ export function InputBox({
   }, []);
   const updateValue = useCallback(
     (newValue: string, newCursor?: number) => {
-      setValue(newValue);
-      setCursorPos(newCursor ?? newValue.length);
+      // Single state update → single re-render per keypress
+      setInputState({ value: newValue, cursor: newCursor ?? newValue.length });
       // Debounce onInputChange to avoid parent re-render on every keystroke
       if (onInputChange) {
         if (inputChangeTimerRef.current) clearTimeout(inputChangeTimerRef.current);
@@ -122,14 +123,37 @@ export function InputBox({
     (input, key) => {
       if (disabled) return;
 
+     // ---- terminal escape guard (mouse / wheel / ssh fragments) ----
+   if (typeof input === "string") {
+
+      // SGR mouse events (click / drag)
+      if (
+        input.startsWith("<") ||
+        input.startsWith("\x1b[<") ||
+        /\x1b\[\d+;\d+;\d+[mM]/.test(input)
+      ) {
+        return;
+      }
+
+      // mouse wheel scroll
+      if (/\x1b\[<6[45];/.test(input)) {
+        return;
+      }
+
+      // SSH broken arrow fragments
+      if (/^\[\[?[ABCD]$/.test(input)) {
+        return;
+      }
+    }
+
       // Raw ANSI arrow sequences — SSH environments where Ink doesn't parse key.leftArrow etc.
       // ESC gets consumed by Ink, leaving "[D"/["C"/["A"/["B" as the input string.
       if (input === "[D" || input === "\x1b[D") {
-        if (!slashMenuOpen) setCursorPos((p) => Math.max(0, p - 1));
+        if (!slashMenuOpen) setInputState(s => ({ ...s, cursor: Math.max(0, s.cursor - 1) }));
         return;
       }
       if (input === "[C" || input === "\x1b[C") {
-        if (!slashMenuOpen) setCursorPos((p) => Math.min(value.length, p + 1));
+        if (!slashMenuOpen) setInputState(s => ({ ...s, cursor: Math.min(s.value.length, s.cursor + 1) }));
         return;
       }
       if (input === "[A" || input === "\x1b[A") {
@@ -220,21 +244,21 @@ export function InputBox({
 
       // Left/Right arrow → move cursor inline
       if (key.leftArrow && !slashMenuOpen) {
-        setCursorPos(p => Math.max(0, p - 1));
+        setInputState(s => ({ ...s, cursor: Math.max(0, s.cursor - 1) }));
         return;
       }
       if (key.rightArrow && !slashMenuOpen) {
-        setCursorPos(p => Math.min(value.length, p + 1));
+        setInputState(s => ({ ...s, cursor: Math.min(s.value.length, s.cursor + 1) }));
         return;
       }
 
       // Ctrl+A → beginning, Ctrl+E → end
       if (key.ctrl && input === "a") {
-        setCursorPos(0);
+        setInputState(s => ({ ...s, cursor: 0 }));
         return;
       }
       if (key.ctrl && input === "e") {
-        setCursorPos(value.length);
+        setInputState(s => ({ ...s, cursor: s.value.length }));
         return;
       }
 
@@ -286,7 +310,18 @@ export function InputBox({
         // ANSI escape sequence, 마우스 이벤트, 제어 문자 차단
         // eslint-disable-next-line no-control-regex
         // Also filter residual [ABCD] from SSH (ESC consumed by Ink, leaving "[D" etc.)
-        const cleaned = input.replace(/[\x00-\x1f\x7f]|\x1b\[[^a-zA-Z]*[a-zA-Z]|\[[ABCD]$/g, "");
+ const cleaned = input
+   // control chars
+   .replace(/[\x00-\x1f\x7f]/g, "")
+
+   // ANSI escape sequences
+   .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+
+   // SGR mouse reporting
+   .replace(/<\d+;\d+;\d+[mM]/g, "")
+
+   // SSH arrow leftovers
+   .replace(/^\[[ABCD]$/, "");
         if (cleaned.length > 0) {
           const isPaste = cleaned.length > 10 || cleaned.includes("\n") || cleaned.includes("\t");
           const normalized = cleaned
@@ -307,6 +342,11 @@ export function InputBox({
   );
 
   const prompt = TOKENS.brand.prompt;
+  // Memoize separator to avoid recreating the string on every render
+  const separator = useMemo(
+    () => TOKENS.box.horizontal.repeat(Math.max(0, columns - 1)),
+    [columns],
+  );
   // While running, show current typing (for pending queue). Cursor hidden while running.
   const displayValue = value;
   const clampedCursor = Math.min(cursorPos, displayValue.length);
@@ -369,7 +409,7 @@ export function InputBox({
 
   return (
     <Box width={columns} flexDirection="column" flexShrink={0}>
-      <Text dimColor>{TOKENS.box.horizontal.repeat(Math.max(0, columns - 1))}</Text>
+      <Text dimColor>{separator}</Text>
       {/* Pending queued message — shown above input when agent is running */}
       {isRunning && pendingMessage ? (
         <Box>

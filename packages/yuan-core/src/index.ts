@@ -328,6 +328,9 @@ export type {
   AgentModeConfig,
 } from "./agent-modes.js";
 
+// ─── Skill-Mode Bridge ───
+export { SKILL_TO_MODE, skillToMode } from "./skill-mode-bridge.js";
+
 // ─── Context Compressor ───
 export { ContextCompressor } from "./context-compressor.js";
 export type {
@@ -399,6 +402,56 @@ export type {
   RePlanResult,
   HierarchicalPlannerConfig,
 } from "./hierarchical-planner.js";
+
+// ─── Safe Bounds ───
+export {
+  BOUNDS, cap, capHead, truncate, truncateHead,
+  pushCapped, safeJsonStringify, safeJsonParse,
+} from "./safe-bounds.js";
+
+// ─── Trace Recorder ───
+export { TraceRecorder } from "./trace-recorder.js";
+export type { TraceEntry } from "./trace-recorder.js";
+
+// ─── Evidence Chain (Provenance Layer) ───
+export { EvidenceChain } from "./evidence-chain.js";
+export type {
+  EvidenceItem,
+  ProvenanceRecord,
+  EvidenceChainConfig,
+  EvidenceSource,
+} from "./evidence-chain.js";
+
+// ─── Architecture Summarizer ───
+export { ArchSummarizer } from "./arch-summarizer.js";
+
+// ─── Overhead Governor ───
+export { OverheadGovernor } from "./overhead-governor.js";
+export type { OverheadGovernorConfig, GuardMode, TriggerContext, TaskPhase as GovernorTaskPhase } from "./overhead-governor.js";
+
+// ─── Failure Signature Memory ───
+export { FailureSignatureMemory } from "./failure-signature-memory.js";
+export type { FailureSignature, FixRecord, FailureSignatureMemoryConfig } from "./failure-signature-memory.js";
+
+// ─── Playbook Library ───
+export { PlaybookLibrary } from "./playbook-library.js";
+export type { Playbook, PlaybookTaskType, PlaybookLibraryConfig } from "./playbook-library.js";
+
+// ─── Phase 3: Autonomous Engineering Loop ───
+export {
+  TaskMemory,
+  ResearchAgent,
+  ExplicitPlanningEngine,
+  PatchTournamentExecutor,
+  IncidentDebugger,
+} from "./autonomous/index.js";
+export type {
+  TaskState, AutonomousTaskStatus, TaskMemoryPhase, EvidenceEntry,
+  ResearchResult, ResearchSource, ResearchAgentConfig,
+  ExplicitPlan, AutonomousPlanStep, ExplicitPlannerConfig,
+  TournamentResult, CandidatePatch, RunAgentCallback, PatchTournamentConfig,
+  DebugReport, DebugEvidence, IncidentDebuggerConfig,
+} from "./autonomous/index.js";
 
 // ─── MCP Client ───
 export { MCPClient } from "./mcp-client.js";
@@ -887,3 +940,106 @@ export type {
   ReplanDecision,
   ProactiveReplanResult,
 } from "./planner/index.js";
+
+// ─── Stall Detector ───
+export { StallDetector } from "./stall-detector.js";
+export type { StallCheckResult, StallReason, StallDetectorConfig } from "./stall-detector.js";
+
+// ─── Project Executive ───
+export { ProjectExecutive } from "./project-executive.js";
+export type {
+  ProjectExecutiveState,
+  ProjectGoal,
+  ProjectMilestone,
+  StalledTask,
+  ResumePoint,
+  GoalStatus,
+  GoalStrategy,
+  ProjectExecutiveConfig,
+} from "./project-executive.js";
+
+// ─── Phase 4: Remaining ───
+export { SelfImprovementLoop } from "./self-improvement-loop.js";
+export type { StrategyOutcome, ImprovementProposal, SelfImprovementConfig } from "./self-improvement-loop.js";
+
+export { MetaLearningCollector } from "./meta-learning-collector.js";
+export type { TaskRunStat, PolicyRecommendation, MetaLearningReport, MetaLearningConfig } from "./meta-learning-collector.js";
+
+export { TrustEconomics } from "./trust-economics.js";
+export type { TrustRecord, TrustRecommendation, TrustEconomicsConfig, ActionClass } from "./trust-economics.js";
+
+export { AgentReputation } from "./agent-reputation.js";
+export type { AgentPerformanceRecord, RoutingRecommendation, RoleAgentType } from "./agent-reputation.js";
+
+// ─── Phase 5 — Autonomous Capability Evolution ───
+export { StrategyLearner } from "./strategy-learner.js";
+export type { StrategyMetric, StrategyRanking, StrategyLearnerConfig } from "./strategy-learner.js";
+
+export { SkillRegistry } from "./skill-registry.js";
+export type { RegistrySkill, SkillRegistryConfig } from "./skill-registry.js";
+
+export { TracePatternExtractor } from "./trace-pattern-extractor.js";
+export type { PlaybookProposal, TracePatternExtractorConfig } from "./trace-pattern-extractor.js";
+
+export { MetaLearningEngine } from "./meta-learning-engine.js";
+export type { PolicyRecommendationDetail, MetaLearningReport as MetaLearningEngineReport, MetaLearningEngineConfig } from "./meta-learning-engine.js";
+
+export { ToolSynthesizer } from "./tool-synthesizer.js";
+export type { ToolCapabilityDescriptor, ToolProposal, ToolTemplate, ToolSynthesizerConfig } from "./tool-synthesizer.js";
+
+// ─── Research Loop ───
+export { ResearchLoop } from "./research-loop.js";
+export type {
+  ResearchHypothesis,
+  ResearchSession,
+  ResearchLoopConfig,
+} from "./research-loop.js";
+
+// ─── Budget Governor V2 ───
+export { BudgetGovernorV2 } from "./budget-governor-v2.js";
+export type {
+  BudgetType,
+  BudgetAllocationV2,
+  BudgetPolicy,
+  BudgetStatusV2,
+} from "./budget-governor-v2.js";
+
+// ─── Checkpoint Manager ───
+export { CheckpointManager } from "./checkpoint-manager.js";
+export type {
+  TaskCheckpoint,
+  RollbackResult,
+  CheckpointManagerConfig,
+} from "./checkpoint-manager.js";
+
+// ─── Capability Graph ───
+export { CapabilityGraph } from "./capability-graph.js";
+export type {
+  CapabilityNode,
+  CapabilityEdge,
+  CapabilityPath,
+  CapabilityNodeType,
+  // Note: named CapabilityEdgeType to avoid conflict with EdgeType from repo-knowledge-graph
+  CapabilityEdgeType,
+} from "./capability-graph.js";
+
+// ─── Strategy Market (Playbook Evolution) ───
+export { StrategyMarket } from "./strategy-market.js";
+export type { PlaybookContender, MarketResult } from "./strategy-market.js";
+
+// ─── Capability Self Model ───
+export { CapabilitySelfModel } from "./capability-self-model.js";
+export type {
+  ToolAvailability,
+  EnvironmentStrength,
+  SelfAssessment,
+} from "./capability-self-model.js";
+
+
+// ─── Agent Coordinator ───
+export { AgentCoordinator } from "./agent-coordinator.js";
+export type {
+  CoordinatorTask,
+  CoordinatorResult,
+  CoordinatorConfig,
+} from "./agent-coordinator.js";

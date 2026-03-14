@@ -17,7 +17,6 @@ import { enterTUI, exitTUI } from "./lib/ansi.js";
 import { useTerminalSize } from "./hooks/useTerminalSize.js";
 import { useAgentStream } from "./hooks/useAgentStream.js";
 import { useKeyHandler } from "./hooks/useKeyHandler.js";
-import { StatusBar } from "./components/StatusBar.js";
 import { MessageList } from "./components/MessageList.js";
 import { InputBox } from "./components/InputBox.js";
 import { FooterBar } from "./components/FooterBar.js";
@@ -141,13 +140,16 @@ function App({
   );
 
   // Pending message handler — called when user submits while agent is running
+  // Stores the queued message ID (not content) so we can promote the bubble in-place
   const pendingMessageRef = useRef<string | null>(null);
   const handleQueueMessage = useCallback(
     (value: string) => {
-      pendingMessageRef.current = value;
-      setPendingMessage(value);
+      const id = `queued-${Date.now()}`;
+      agentStream.addQueuedMessage(value, id);  // ghost bubble immediately visible
+      pendingMessageRef.current = id;            // store id, not content
+      setPendingMessage(value);                  // InputBox hint text
     },
-    [],
+    [agentStream],
   );
 
   // Auto-send pending message when agent becomes idle/completed/interrupted
@@ -161,15 +163,28 @@ function App({
     const isNowIdle = curr === "idle";
 
     if (wasRunning && isNowIdle && pendingMessageRef.current) {
-      const msg = pendingMessageRef.current;
+      const queuedId = pendingMessageRef.current;
       pendingMessageRef.current = null;
       setPendingMessage(null);
+
+      // Find content from the already-existing queued bubble
+      const queuedMsg = agentStream.state.messages.find((m) => m.id === queuedId);
+      if (!queuedMsg) return;
+      const content = queuedMsg.content;
+
       // Small delay so the "idle" state is fully settled
       setTimeout(() => {
-        handleSubmit(msg);
+        // Promote ghost bubble (queued_user → user) in-place, then start agent
+        agentStream.promoteQueuedMessage(queuedId);
+        agentStream.startAgent();
+        setTokensPerSec(undefined);
+        lastMessageRef.current = content;
+        bridgeRef.current.sendMessage(content).catch((err: Error) => {
+          agentStream.handleEvent({ kind: "agent:error", message: err.message, retryable: false });
+        });
       }, 100);
     }
-  }, [agentStream.state.status, handleSubmit]);
+  }, [agentStream.state.status, agentStream]);
 
   // Interruption
   const handleInterrupt = useCallback(() => {
@@ -443,7 +458,7 @@ function App({
 
   // Content area height = total rows - status(1) - footer(1) - input(1) - slashMenu(N) - taskPanel(N)
   const contentHeight = useMemo(
-    () => Math.max(3, rows - 4 - slashMenuRows - taskPanelRows),
+    () => Math.max(3, rows - 3 - slashMenuRows - taskPanelRows),
     [rows, slashMenuRows, taskPanelRows],
   );
 
@@ -451,15 +466,6 @@ const messages = agentStream.state.messages;
 
   return (
     <Box flexDirection="column" width={columns} height={rows}>
-      {/* Top bar */}
-      <StatusBar
-        version={version}
-        model={currentModel}
-        provider={provider}
-        tokensPerSec={agentStream.state.tokensPerSecond || tokensPerSec}
-        isRunning={isRunning}
-        updateAvailable={updateInfo}
-      />
 
       {/* Message area — shrinks when slash menu opens below input */}
      <MessageList

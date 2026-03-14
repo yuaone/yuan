@@ -15,7 +15,7 @@ export type {
   StateHistoryEntry,
 } from "./state-store.js";
 export { TransitionModel } from "./transition-model.js";
-export type { StateDelta, StateTransition } from "./transition-model.js";
+export type { StateDelta, StateTransition, ImpactHint } from "./transition-model.js";
 export { SimulationEngine } from "./simulation-engine.js";
 export type { SimulationStep, SimulationResult } from "./simulation-engine.js";
 export { StateUpdater } from "./state-updater.js";

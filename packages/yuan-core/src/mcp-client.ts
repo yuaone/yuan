@@ -708,7 +708,7 @@ export class MCPClient extends EventEmitter {
       serverName: tool.serverName,
       readOnly: false,
       requiresApproval: true,
-      riskLevel: "medium",
+      riskLevel: "critical",
     }));
   }
 

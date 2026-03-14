@@ -6,7 +6,6 @@
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { ContextManager, type ContextManagerConfig } from "../context-manager.js";
-import { ContextOverflowError } from "../errors.js";
 import type { Message } from "../types.js";
 
 // ─── Helpers ───
@@ -261,8 +260,8 @@ describe("ContextManager", () => {
     );
   });
 
-  // === 13. ContextOverflowError when compaction is insufficient ===
-  it("throws ContextOverflowError when even compaction cannot fit", () => {
+  // === 13. Emergency trim when compaction is insufficient ===
+  it("returns trimmed messages when even compaction cannot fit", () => {
     // Extremely small limit
     const cm = makeManager({
       maxContextTokens: 20,
@@ -274,15 +273,9 @@ describe("ContextManager", () => {
     cm.addMessage(makeSystemMessage("System prompt that is fairly long to exceed the tiny limit we set."));
     cm.addMessage(makeUserMessage("x".repeat(500)));
 
-    assert.throws(
-      () => cm.prepareForLLM(),
-      (err: unknown) => {
-        assert.ok(err instanceof ContextOverflowError);
-        assert.ok(err.currentTokens > 0);
-        assert.ok(err.maxTokens > 0);
-        return true;
-      },
-    );
+    // prepareForLLM no longer throws — it emergency-trims instead
+    const result = cm.prepareForLLM();
+    assert.ok(Array.isArray(result), "should return an array");
   });
 
   // === 14. Compression preserves head and tail ===

@@ -154,7 +154,7 @@ export class ContinuationEngine {
        createdAt: (safeCheckpoint.createdAt ?? new Date()).toISOString(),
       };
 
-      const json = JSON.stringify(serialized, null, 2);
+      const json = JSON.stringify(serialized);
 
       // Atomic write: tmp에 쓰고 rename
       await writeFile(tmpPath, json, "utf-8");

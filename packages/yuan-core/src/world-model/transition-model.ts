@@ -33,6 +33,11 @@ export interface StateTransition {
   reasoning: string;
 }
 
+export interface ImpactHint {
+  cascadeFileCount: number;
+  riskLevel: "minimal" | "low" | "moderate" | "high" | "critical";
+}
+
 /** Internal record for calibrating accuracy */
 interface TransitionRecord {
   predicted: StateTransition;
@@ -89,6 +94,7 @@ export class TransitionModel {
     tool: string,
     args: Record<string, unknown>,
     currentState: WorldState,
+    impactHint?: ImpactHint,
   ): StateTransition {
     const delta = emptyDelta();
     let baseProbability = 0.10;
@@ -152,6 +158,12 @@ export class TransitionModel {
       // Read-only — no state changes
       baseProbability = 0.01;
       reasoning = "read-only tool — minimal failure probability";
+    }
+
+    // Apply impactHint cascade adjustment for write tools
+    if (impactHint && impactHint.cascadeFileCount > 5) {
+      baseProbability = Math.min(1.0, baseProbability + impactHint.cascadeFileCount * 0.01);
+      reasoning += ` (cascade: ${impactHint.cascadeFileCount} files affected)`;
     }
 
     // Apply calibration multiplier if available

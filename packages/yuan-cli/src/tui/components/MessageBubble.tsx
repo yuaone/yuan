@@ -12,7 +12,7 @@ import stringWidth from "string-width";
 import { TOKENS } from "../lib/tokens.js";
 import { MarkdownRenderer } from "./MarkdownRenderer.js";
 import { DiffView } from "./DiffView.js";
-import type { TUIMessage, TUIToolCall, ParsedDiff, ParsedDiffHunk } from "../types.js";
+import type { TUIMessage, TUIToolCall, TUIPhaseEvent, ParsedDiff, ParsedDiffHunk } from "../types.js";
 
 export interface MessageBubbleProps {
   message: TUIMessage;
@@ -47,6 +47,55 @@ const FOX_PIXEL_SPRITE = [
 
 const DIFF_TOOL_NAMES = new Set(["file_write", "file_edit", "edit_file", "write_file"]);
 const MAX_DIFF_LINES = 20;
+
+// ─── Phase 3: Autonomous Event Tree ─────────────────────────────────────────
+
+const PHASE_ICONS: Record<TUIPhaseEvent["kind"], string> = {
+  research:   "◎",
+  plan:       "☰",
+  tournament: "⚡",
+  task:       "◈",
+  debug:      "⊘",
+};
+const PHASE_COLORS: Record<TUIPhaseEvent["status"], string> = {
+  running: "yellow",
+  done:    "#3a7d44",
+  error:   "red",
+};
+
+function PhaseEventTree({ events, width }: { events: TUIPhaseEvent[]; width: number }): React.JSX.Element {
+  const maxItemW = Math.max(20, width - 8);
+  return (
+    <Box flexDirection="column" paddingLeft={2} marginTop={1}>
+      {events.map((ev) => {
+        const icon = PHASE_ICONS[ev.kind] ?? "◇";
+        const color = PHASE_COLORS[ev.status] ?? "#888888";
+        const titleTrunc = ev.title.length > width - 6 ? ev.title.slice(0, width - 9) + "…" : ev.title;
+        return (
+          <Box key={ev.id} flexDirection="column">
+            {/* Header row: ◎ Research  confidence:72%  12 sources */}
+            <Box>
+              <Text color={color}>{icon} </Text>
+              <Text bold color="white">{titleTrunc}</Text>
+            </Box>
+            {/* Tree items */}
+            {ev.items.map((item, i) => {
+              const isLast = i === ev.items.length - 1;
+              const connector = isLast ? TOKENS.tree.last : TOKENS.tree.branch;
+              const label = item.length > maxItemW ? item.slice(0, maxItemW - 1) + "…" : item;
+              return (
+                <Box key={i} paddingLeft={2}>
+                  <Text dimColor>{connector} </Text>
+                  <Text dimColor>{label}</Text>
+                </Box>
+              );
+            })}
+          </Box>
+        );
+      })}
+    </Box>
+  );
+}
 
 /** Parse a unified diff string into ParsedDiff structure */
 function parseUnifiedDiff(raw: string, filePath = ""): ParsedDiff | null {
@@ -170,6 +219,17 @@ function BlinkingDot(): React.JSX.Element {
   return <Text color={bright ? "white" : "#555555"}>●</Text>;
 }
 
+/** Live elapsed timer — ticks every 100ms while tool is running */
+function LiveElapsed({ startedAt }: { startedAt: number }): React.JSX.Element {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 100);
+    return () => clearInterval(timer);
+  }, []);
+  const elapsed = (now - startedAt) / 1000;
+  return <Text color="#555555">  {elapsed.toFixed(1)}s</Text>;
+}
+
 /** Get a short "verb" label for the tool call header */
 function toolVerb(toolName: string): string {
   const n = toolName.toLowerCase();
@@ -183,7 +243,7 @@ function toolVerb(toolName: string): string {
   return toolName;
 }
 
-function ToolCallLine({ tc, isLast, width }: { tc: TUIToolCall; isLast: boolean; width: number }): React.JSX.Element {
+const ToolCallLine = React.memo(function ToolCallLine({ tc, isLast, width }: { tc: TUIToolCall; isLast: boolean; width: number }): React.JSX.Element {
   const argsTruncated = truncateArgs(tc.argsSummary, 38);
 
   // Resolve diff
@@ -214,12 +274,13 @@ function ToolCallLine({ tc, isLast, width }: { tc: TUIToolCall; isLast: boolean;
       <Box>
         <Text dimColor>{connector}</Text>
         {tc.status === "running" ? (
-          // Running: blinking dot + bold tool verb + args
+          // Running: blinking dot + bold tool verb + args + live elapsed timer
           <>
             <Text> </Text>
             <BlinkingDot />
             <Text bold color="white"> {toolVerb(tc.toolName)}</Text>
             {argsTruncated ? <Text dimColor> {argsTruncated}</Text> : null}
+            {tc.startedAt != null ? <LiveElapsed startedAt={tc.startedAt} /> : null}
           </>
         ) : tc.status === "error" ? (
           // Error: red ✗ + dim tool verb + args
@@ -250,9 +311,9 @@ function ToolCallLine({ tc, isLast, width }: { tc: TUIToolCall; isLast: boolean;
       )}
     </Box>
   );
-}
+});
 
-export function MessageBubble({
+export const MessageBubble = React.memo(function MessageBubble({
   message,
   width,
   isLatest,
@@ -264,6 +325,47 @@ export function MessageBubble({
     msg.content.includes(BANNER_SUBTITLE);
 
   switch (msg.role) {
+    case "queued_user": {
+      // Same layout as user bubble, but dimmed: ▶ prefix + dark bg + gray text
+      const maxContentWidth = width - 5;
+      const lines: string[] = [];
+      const rawLines = msg.content.split("\n");
+      for (const rawLine of rawLines) {
+        if (!rawLine) { lines.push(""); continue; }
+        const words = rawLine.split(" ");
+        let currentLine = "";
+        let currentWidth = 0;
+        for (const word of words) {
+          const wordW = stringWidth(word);
+          if (currentWidth > 0 && currentWidth + 1 + wordW > maxContentWidth) {
+            lines.push(currentLine);
+            currentLine = word;
+            currentWidth = wordW;
+          } else {
+            currentLine = currentWidth > 0 ? `${currentLine} ${word}` : word;
+            currentWidth = currentWidth > 0 ? currentWidth + 1 + wordW : wordW;
+          }
+        }
+        if (currentLine) lines.push(currentLine);
+      }
+      if (lines.length === 0) lines.push("");
+      const fillWidth = width - 2;
+      return (
+        <Box flexDirection="column" marginBottom={1}>
+          {lines.map((line, i) => {
+            const prefix = i === 0 ? "> " : "  ";
+            const full = `${prefix}${line}`;
+            const dispW = stringWidth(full);
+            const pad = Math.max(0, fillWidth - dispW);
+            return (
+              <Text key={i} backgroundColor="#1a1a1a" color="#4b5563">{full}{" ".repeat(pad)}</Text>
+            );
+          })}
+          <Text dimColor>  ⏸ queued</Text>
+        </Box>
+      );
+    }
+
     case "user": {
       // Claude Code style: left-aligned, solid dark bg bar, > prefix
       // Use stringWidth for CJK-safe wrapping (Korean/Chinese chars = 2 terminal columns each)
@@ -311,6 +413,8 @@ export function MessageBubble({
       const hasTools = toolCalls.length > 0;
       const hasText = !!msg.content;
       const hasThinking = !!msg.thinkingContent;
+      const phaseEvents = msg.phaseEvents ?? [];
+      const hasPhaseEvents = phaseEvents.length > 0;
 
       // Split content: first line inline with ●, rest below with indent
       const contentLines = hasText ? msg.content.split("\n") : [];
@@ -353,6 +457,10 @@ export function MessageBubble({
                 />
               ))}
             </Box>
+          )}
+          {/* Phase 3: Autonomous event tree — inline below tools */}
+          {hasPhaseEvents && (
+            <PhaseEventTree events={phaseEvents} width={width - 2} />
           )}
         </Box>
       );
@@ -400,7 +508,7 @@ export function MessageBubble({
         return (
           <Box flexDirection="column" marginBottom={1} paddingLeft={0}>
             {/* Top border */}
-            <Text color={borderColor}>{B.topLeft}{B.horizontal.repeat(2)} {title} {B.horizontal.repeat(Math.max(0, width - title.length - 6))}{B.topRight}</Text>
+            <Text color={borderColor}>{B.topLeft}{B.horizontal.repeat(2)} {title} {B.horizontal.repeat(Math.max(0, width - stringWidth(title) - 6))}{B.topRight}</Text>
 
             {/* Content row: left (fox only) | right (info) */}
             <Box flexDirection="row">
@@ -444,7 +552,7 @@ export function MessageBubble({
             </Box>
 
             {/* Bottom border */}
-            <Text color={borderColor}>{B.bottomLeft}{B.horizontal.repeat(Math.max(0, width - 2))}{B.bottomRight}</Text>
+            <Text color={borderColor}>{B.bottomLeft}{B.horizontal.repeat(Math.max(0, width - stringWidth("") - 2))}{B.bottomRight}</Text>
           </Box>
         );
       }
@@ -458,4 +566,4 @@ export function MessageBubble({
     default:
       return <Box />;
   }
-}
+});

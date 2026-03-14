@@ -28,6 +28,7 @@ export interface YuanConfig {
 
 const YUAN_DIR = path.join(os.homedir(), ".yuan");
 const CONFIG_PATH = path.join(YUAN_DIR, "config.json");
+const MCP_CONFIG_PATH = path.join(YUAN_DIR, "mcp.json");
 
 const DEFAULT_MODELS: Record<Provider, string> = {
   openai: "gpt-4o-mini",
@@ -186,6 +187,33 @@ export class ConfigManager {
   /** Get the effective server URL */
   getServerUrl(): string {
     return this.config.serverUrl;
+  }
+
+  /**
+   * Load MCP server configs from ~/.yuan/mcp.json
+   * Format: { "servers": [ { "name": "github", "command": "npx", "args": [...], "env": {...} } ] }
+   * Returns empty array if file doesn't exist or is malformed.
+   */
+  loadMcpServers(): Array<{ name: string; command: string; args: string[]; env?: Record<string, string> }> {
+    try {
+      if (!fs.existsSync(MCP_CONFIG_PATH)) return [];
+      const raw = fs.readFileSync(MCP_CONFIG_PATH, "utf-8");
+      const parsed = JSON.parse(raw) as { servers?: unknown[] };
+      if (!Array.isArray(parsed.servers)) return [];
+      return parsed.servers.filter(
+        (s): s is { name: string; command: string; args: string[]; env?: Record<string, string> } =>
+          typeof s === "object" && s !== null &&
+          typeof (s as Record<string, unknown>).name === "string" &&
+          typeof (s as Record<string, unknown>).command === "string",
+      ).map((s) => ({
+        name: s.name,
+        command: s.command,
+        args: Array.isArray(s.args) ? s.args : [],
+        env: typeof s.env === "object" && s.env !== null ? s.env as Record<string, string> : undefined,
+      }));
+    } catch {
+      return [];
+    }
   }
 
   /** Display current config (masking API key) */

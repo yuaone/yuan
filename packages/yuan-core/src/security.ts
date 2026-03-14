@@ -223,6 +223,9 @@ export const ALLOWED_EXECUTABLES: string[] = [
   "wc",
   "find",
   "grep",
+  "rg",
+  "awk",
+  "sed",
   "which",
   "echo",
   // Node

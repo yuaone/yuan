@@ -8,6 +8,7 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import type {
   TUIMessage,
   TUIToolCall,
+  TUIPhaseEvent,
   AgentStreamState,
   AgentStatus,
   ReasoningNode,
@@ -20,6 +21,8 @@ export interface UseAgentStreamReturn {
   handleEvent: (event: AgentEventLike) => void;
   addUserMessage: (content: string) => void;
   addSystemMessage: (content: string) => void;
+  addQueuedMessage: (content: string, id: string) => void;
+  promoteQueuedMessage: (id: string) => void;
   startAgent: () => void;
   interrupt: () => void;
   clearMessages: () => void;
@@ -46,6 +49,8 @@ export function useAgentStream(): UseAgentStreamReturn {
   const [filesChangedCount, setFilesChangedCount] = useState(0);
   const [reasoningTree, setReasoningTree] = useState<ReasoningNode | undefined>(undefined);
   const [backgroundTasks, setBackgroundTasks] = useState<TUIBackgroundTask[]>([]);
+  const [progressLabel, setProgressLabel] = useState<string | undefined>(undefined);
+  const [currentPhase, setCurrentPhase] = useState<"explore" | "implement" | "verify" | "finalize" | undefined>(undefined);
 
   const currentMsgIdRef = useRef<string | null>(null);
   const tokenWindowRef = useRef<{ time: number; tokens: number }[]>([]);
@@ -119,6 +124,11 @@ export function useAgentStream(): UseAgentStreamReturn {
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const FLUSH_INTERVAL = 120;
 
+  // Debounce buffer for thinking/reasoning lines to avoid per-token re-renders
+  const pendingThinkingRef = useRef<string[]>([]);
+  const thinkingFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const THINKING_FLUSH_INTERVAL = 80;
+
   const flushPendingText = useCallback(() => {
     if (flushTimerRef.current) {
       clearTimeout(flushTimerRef.current);
@@ -133,16 +143,15 @@ export function useAgentStream(): UseAgentStreamReturn {
     }));
   }, [updateCurrentMessage]);
 
-  const appendThinkingLines = useCallback((raw: string) => {
-    const lines = raw
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => (line.startsWith("· ") ? line : `· ${line}`));
-
+  const flushThinkingLines = useCallback(() => {
+    if (thinkingFlushTimerRef.current) {
+      clearTimeout(thinkingFlushTimerRef.current);
+      thinkingFlushTimerRef.current = null;
+    }
+    const lines = pendingThinkingRef.current;
     if (lines.length === 0) return;
+    pendingThinkingRef.current = [];
 
-    const nextBlock = lines.join("\n");
     const currentId = currentThinkingMsgIdRef.current;
 
     if (!currentId) {
@@ -151,7 +160,7 @@ export function useAgentStream(): UseAgentStreamReturn {
       const msg: TUIMessage = {
         id,
         role: "system",
-        content: nextBlock,
+        content: lines.join("\n"),
         timestamp: Date.now(),
       };
       setMessages((prev) => [...prev, msg]);
@@ -174,9 +183,25 @@ export function useAgentStream(): UseAgentStreamReturn {
     );
   }, []);
 
+  const appendThinkingLines = useCallback((raw: string) => {
+    const lines = raw
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => (line.startsWith("· ") ? line : `· ${line}`));
+
+    if (lines.length === 0) return;
+
+    // Buffer lines and flush after a short debounce window to reduce re-renders
+    pendingThinkingRef.current.push(...lines);
+    if (thinkingFlushTimerRef.current) clearTimeout(thinkingFlushTimerRef.current);
+    thinkingFlushTimerRef.current = setTimeout(flushThinkingLines, THINKING_FLUSH_INTERVAL);
+  }, [flushThinkingLines]);
+
   useEffect(() => {
     return () => {
       if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
+      if (thinkingFlushTimerRef.current) clearTimeout(thinkingFlushTimerRef.current);
     };
   }, []);
 
@@ -200,6 +225,22 @@ export function useAgentStream(): UseAgentStreamReturn {
     setMessages((prev) => [...prev, msg]);
   }, []);
 
+  const addQueuedMessage = useCallback((content: string, id: string) => {
+    const msg: TUIMessage = {
+      id,
+      role: "queued_user",
+      content,
+      timestamp: Date.now(),
+    };
+    setMessages((prev) => [...prev, msg]);
+  }, []);
+
+  const promoteQueuedMessage = useCallback((id: string) => {
+    setMessages((prev) =>
+      prev.map((m) => (m.id === id ? { ...m, role: "user" } : m))
+    );
+  }, []);
+
   const startAgent = useCallback(() => {
     statusRef.current = "thinking";
     setStatus("thinking");
@@ -211,6 +252,7 @@ export function useAgentStream(): UseAgentStreamReturn {
     setLastError(null);
     setFilesChangedCount(0);
     setTokensPerSecond(0);
+    setCurrentPhase("explore");
     tokenWindowRef.current = [];
     currentThinkingMsgIdRef.current = null;
     activeToolBatchIdRef.current = null;
@@ -247,6 +289,13 @@ export function useAgentStream(): UseAgentStreamReturn {
           setCurrentToolName(null);
           setCurrentToolArgs(null);
           appendThinkingLines(String(event.content ?? ""));
+          break;
+        }
+
+        case "progress:status": {
+          // Fine-grained status from ReasoningProgressAdapter: analyzing/searching/coding/etc.
+          const label = String((event as unknown as { status?: string }).status ?? "");
+          if (label) setProgressLabel(label);
           break;
         }
 
@@ -400,6 +449,7 @@ export function useAgentStream(): UseAgentStreamReturn {
 
         case "agent:completed": {
           flushPendingText();
+          flushThinkingLines();
           stopTimer();
           statusRef.current = "completed";
           setStatus("completed");
@@ -407,12 +457,18 @@ export function useAgentStream(): UseAgentStreamReturn {
           setCurrentToolName(null);
           setCurrentToolArgs(null);
 
-          const summary = event.summary as string;
-          updateCurrentMessage((msg) => ({
-            ...msg,
-            content: msg.content || summary,
-            isStreaming: false,
-          }));
+          const summary = (event.summary as string) ?? "";
+          updateCurrentMessage((msg) => {
+            // When the agent only made tool calls (no text output), content is "".
+            // Emit a synthetic "Done." so the user sees a completion indication.
+            const hasText = msg.content && msg.content.trim().length > 0;
+            const hasSummary = summary && summary.trim().length > 0;
+            return {
+              ...msg,
+              content: hasText ? msg.content : hasSummary ? summary : "Done.",
+              isStreaming: false,
+            };
+          });
 
           isStreamingRef.current = false;
           currentMsgIdRef.current = null;
@@ -468,9 +524,80 @@ export function useAgentStream(): UseAgentStreamReturn {
           const passed = event.passed as boolean;
           const stage = event.stage as string;
           const issues = event.issues as string[];
-          const statusLabel = passed ? "passed" : `${issues.length} issue(s)`;
-          const lines = [`[QA ${stage}] ${statusLabel}`, ...issues.slice(0, 5)];
-          appendThinkingLines(lines.join("\n"));
+          const statusLabel = passed ? "✓ passed" : `✗ ${issues.length} issue(s)`;
+          const stepType: TUIBGStep["type"] = passed ? "success" : "warning";
+          const summary = issues.length > 0
+            ? `${statusLabel}: ${issues[0]?.slice(0, 60) ?? ""}${issues.length > 1 ? ` (+${issues.length - 1} more)` : ""}`
+            : statusLabel;
+          const now = Date.now();
+          const step: TUIBGStep = {
+            id: `qa-${now}-${Math.random().toString(36).slice(2, 6)}`,
+            label: `[QA ${stage}] ${summary}`,
+            type: stepType,
+            timestamp: now,
+          };
+          setBackgroundTasks((prev) => {
+            const existing = prev.find((t) => t.id === "qa-pipeline");
+            const newSteps = existing
+              ? [...existing.steps, step].slice(-20)
+              : [step];
+            if (existing) {
+              return prev.map((t) =>
+                t.id === "qa-pipeline"
+                  ? { ...t, status: passed ? "idle" : "running", steps: newSteps, lastUpdatedAt: now }
+                  : t,
+              );
+            }
+            return [...prev, {
+              id: "qa-pipeline",
+              label: "QA Pipeline",
+              status: passed ? "idle" : "running",
+              steps: newSteps,
+              lastUpdatedAt: now,
+            }];
+          });
+          break;
+        }
+
+        case "agent:evidence_report": {
+          const ev = event as unknown as {
+            filePath: string; tool: string;
+            syntax: "ok" | "error" | "skipped";
+            diffStats: { added: number; removed: number } | null;
+            timestamp: number;
+          };
+          const { filePath, syntax, diffStats } = ev;
+          const fileName = filePath.split("/").pop() ?? filePath;
+          const syntaxLabel = syntax === "ok" ? "✓ syntax" : syntax === "error" ? "✗ syntax err" : "";
+          const diffLabel = diffStats ? `+${diffStats.added}/-${diffStats.removed}` : "";
+          const parts = [syntaxLabel, diffLabel].filter(Boolean).join("  ");
+          const now = Date.now();
+          const step: TUIBGStep = {
+            id: `ev-${now}-${Math.random().toString(36).slice(2, 6)}`,
+            label: `[evidence] ${fileName}${parts ? "  " + parts : ""}`,
+            type: syntax === "error" ? "warning" : "success",
+            timestamp: now,
+          };
+          setBackgroundTasks((prev) => {
+            const existing = prev.find((t) => t.id === "evidence");
+            const newSteps = existing
+              ? [...existing.steps, step].slice(-20)
+              : [step];
+            if (existing) {
+              return prev.map((t) =>
+                t.id === "evidence"
+                  ? { ...t, steps: newSteps, lastUpdatedAt: now }
+                  : t,
+              );
+            }
+            return [...prev, {
+              id: "evidence",
+              label: "Evidence",
+              status: "idle" as const,
+              steps: newSteps,
+              lastUpdatedAt: now,
+            }];
+          });
           break;
         }
 
@@ -512,21 +639,221 @@ export function useAgentStream(): UseAgentStreamReturn {
           break;
         }
 
+        case "agent:phase_transition": {
+          const to = event.to as "explore" | "implement" | "verify" | "finalize";
+          setCurrentPhase(to);
+          // Append as a dim thinking line — no new message bubble, no status overlap
+          appendThinkingLines(`phase: ${event.from as string} → ${to} (${event.trigger as string})`);
+          break;
+        }
+
+        case "agent:subagent_phase": {
+          // Route to task panel, not main message stream
+          const taskId = event.taskId as string;
+          const phase = event.phase as string;
+          const now = Date.now();
+          const step: TUIBGStep = {
+            id: `step-${now}-${Math.random().toString(36).slice(2, 6)}`,
+            label: phase.length > 60 ? phase.slice(0, 57) + "…" : phase,
+            type: "info",
+            timestamp: now,
+          };
+          setBackgroundTasks((prev) => {
+            const existing = prev.find((t) => t.id === taskId);
+            if (existing) {
+              return prev.map((t) =>
+                t.id === taskId
+                  ? { ...t, status: "running" as const, steps: [...t.steps, step].slice(-20), lastUpdatedAt: now }
+                  : t
+              );
+            }
+            const newTask: TUIBackgroundTask = {
+              id: taskId,
+              label: taskId,
+              status: "running",
+              steps: [step],
+              lastUpdatedAt: now,
+            };
+            return [...prev, newTask];
+          });
+          break;
+        }
+
+        case "agent:subagent_done": {
+          const taskId = event.taskId as string;
+          const success = event.success as boolean;
+          const now = Date.now();
+          const step: TUIBGStep = {
+            id: `step-${now}-${Math.random().toString(36).slice(2, 6)}`,
+            label: success ? "done" : "failed",
+            type: success ? "success" : "error",
+            timestamp: now,
+          };
+          setBackgroundTasks((prev) =>
+            prev.map((t) =>
+              t.id === taskId
+                ? { ...t, status: success ? "idle" as const : "error" as const, steps: [...t.steps, step].slice(-20), lastUpdatedAt: now }
+                : t
+            )
+          );
+          break;
+        }
+
+        // ─── Phase 3: Autonomous Engineering Loop ───────────────────────
+        case "agent:research_result": {
+          const ev = event as unknown as {
+            taskId: string; summary: string;
+            sources: Array<{ title: string; url: string; snippet: string; source: string }>;
+            confidence: number; timestamp: number;
+          };
+          const repoCount = ev.sources.filter(s => s.source === "repo").length;
+          const webCount = ev.sources.filter(s => s.source !== "repo").length;
+          const pct = Math.round(ev.confidence * 100);
+          const phaseEvent: TUIPhaseEvent = {
+            id: `research-${ev.timestamp}`,
+            kind: "research",
+            title: `Research  confidence:${pct}%  ${ev.sources.length} sources`,
+            summary: ev.summary.split("\n")[0] ?? "",
+            items: [
+              `${repoCount} repo  ${webCount} web`,
+              ...ev.sources.slice(0, 5).map(s => `${s.title.slice(0, 40)}: ${s.snippet.slice(0, 60)}`),
+            ],
+            status: "done",
+            timestamp: ev.timestamp,
+          };
+          updateCurrentMessage((msg) => ({
+            ...msg,
+            phaseEvents: [...(msg.phaseEvents ?? []), phaseEvent],
+          }));
+          break;
+        }
+
+        case "agent:plan_generated": {
+          const ev = event as unknown as {
+            taskId: string;
+            steps: Array<{ index: number; description: string; dependsOn: number[] }>;
+            storedAt: string; timestamp: number;
+          };
+          const phaseEvent: TUIPhaseEvent = {
+            id: `plan-${ev.timestamp}`,
+            kind: "plan",
+            title: `Plan  ${ev.steps.length} steps`,
+            summary: ev.steps[0]?.description ?? "",
+            items: ev.steps.map((s, i) => {
+              const dep = s.dependsOn.length > 0 ? ` (after ${s.dependsOn.map(d => d + 1).join(",")})` : "";
+              return `${i + 1}. ${s.description.slice(0, 70)}${dep}`;
+            }),
+            status: "done",
+            timestamp: ev.timestamp,
+          };
+          updateCurrentMessage((msg) => ({
+            ...msg,
+            phaseEvents: [...(msg.phaseEvents ?? []), phaseEvent],
+          }));
+          break;
+        }
+
+        case "agent:tournament_result": {
+          const ev = event as unknown as {
+            taskId: string; winner: number; candidates: number;
+            qualityScore: number; timestamp: number;
+          };
+          const pct = Math.round(ev.qualityScore * 100);
+          const phaseEvent: TUIPhaseEvent = {
+            id: `tournament-${ev.timestamp}`,
+            kind: "tournament",
+            title: `Tournament  winner:patch${ev.winner + 1}  score:${pct}%`,
+            summary: `${ev.candidates} candidates evaluated`,
+            items: [
+              `Candidates: ${ev.candidates}`,
+              `Winner: patch ${ev.winner + 1} of ${ev.candidates}`,
+              `Quality score: ${pct}%`,
+            ],
+            status: ev.qualityScore > 0 ? "done" : "error",
+            timestamp: ev.timestamp,
+          };
+          updateCurrentMessage((msg) => ({
+            ...msg,
+            phaseEvents: [...(msg.phaseEvents ?? []), phaseEvent],
+          }));
+          break;
+        }
+
+        case "agent:task_memory_update": {
+          const ev = event as unknown as {
+            taskId: string; phase: string; status: string; timestamp: number;
+          };
+          const statusIcon = ev.status === "completed" ? "✓" : ev.status === "failed" ? "✗" : "●";
+          const phaseEvent: TUIPhaseEvent = {
+            id: `task-${ev.timestamp}`,
+            kind: "task",
+            title: `Task  ${statusIcon} ${ev.status}  phase:${ev.phase}`,
+            summary: `${ev.taskId.slice(0, 16)}…  ${ev.phase}`,
+            items: [
+              `Task: ${ev.taskId.slice(0, 32)}`,
+              `Phase: ${ev.phase}`,
+              `Status: ${ev.status}`,
+            ],
+            status: ev.status === "completed" ? "done" : ev.status === "failed" ? "error" : "running",
+            timestamp: ev.timestamp,
+          };
+          updateCurrentMessage((msg) => ({
+            ...msg,
+            phaseEvents: [...(msg.phaseEvents ?? []), phaseEvent],
+          }));
+          break;
+        }
+
+        case "agent:debug_report": {
+          const ev = event as unknown as {
+            taskId: string; rootCause: string; suspectedFiles: string[];
+            fixStrategy: string; confidence: number; timestamp: number;
+          };
+          const pct = Math.round(ev.confidence * 100);
+          const phaseEvent: TUIPhaseEvent = {
+            id: `debug-${ev.timestamp}`,
+            kind: "debug",
+            title: `Debug Report  confidence:${pct}%`,
+            summary: ev.rootCause.slice(0, 80),
+            items: [
+              `Root cause: ${ev.rootCause.slice(0, 80)}`,
+              `Suspected: ${ev.suspectedFiles.slice(0, 3).join(", ") || "none"}`,
+              `Fix: ${ev.fixStrategy.slice(0, 80)}`,
+            ],
+            status: ev.confidence > 0.3 ? "done" : "error",
+            timestamp: ev.timestamp,
+          };
+          updateCurrentMessage((msg) => ({
+            ...msg,
+            phaseEvents: [...(msg.phaseEvents ?? []), phaseEvent],
+          }));
+          break;
+        }
+
         default:
           break;
       }
+
+      // Clear progressLabel whenever agent goes to a terminal/non-thinking state
+      const k = event.kind;
+      if (k === "agent:done" || k === "agent:completed" || k === "agent:error" ||
+          k === "agent:tool_call" || k === "agent:text_delta") {
+        setProgressLabel(undefined);
+      }
     },
-    [appendThinkingLines, updateCurrentMessage, flushPendingText, stopTimer],
+    [appendThinkingLines, updateCurrentMessage, flushPendingText, flushThinkingLines, stopTimer],
   );
 
   const interrupt = useCallback(() => {
     flushPendingText();
+    flushThinkingLines();
     stopTimer();
     statusRef.current = "interrupted";
     setStatus("interrupted");
     setStalledMs(0);
     setCurrentToolName(null);
     setCurrentToolArgs(null);
+    setProgressLabel(undefined);
 
     updateCurrentMessage((msg) => ({
       ...msg,
@@ -556,12 +883,17 @@ export function useAgentStream(): UseAgentStreamReturn {
       clearTimeout(flushTimerRef.current);
       flushTimerRef.current = null;
     }
+    if (thinkingFlushTimerRef.current) {
+      clearTimeout(thinkingFlushTimerRef.current);
+      thinkingFlushTimerRef.current = null;
+    }
     if (timerRef.current) {
       clearInterval(timerRef.current);
       timerRef.current = null;
     }
 
     pendingTextRef.current = "";
+    pendingThinkingRef.current = [];
     startTimeRef.current = null;
     setMessages([]);
     isStreamingRef.current = false;
@@ -592,6 +924,8 @@ export function useAgentStream(): UseAgentStreamReturn {
     reasoningTree,
     stalledMs,
     backgroundTasks,
+    progressLabel,
+    currentPhase,
   };
 
   return {
@@ -599,6 +933,8 @@ export function useAgentStream(): UseAgentStreamReturn {
     handleEvent,
     addUserMessage,
     addSystemMessage,
+    addQueuedMessage,
+    promoteQueuedMessage,
     startAgent,
     interrupt,
     clearMessages,

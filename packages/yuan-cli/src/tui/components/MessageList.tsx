@@ -42,7 +42,7 @@ function estimateLines(msg: TUIMessage, columns: number): number {
   const contentWidth = Math.max(20, columns - 12); // extra 4-col margin vs prev
   const textLen = msg.content?.length ?? 0;
   // CJK chars can be 2x width → multiply by 1.3 to account for mixed CJK content
-  const contentLines = textLen === 0 ? 0 : Math.ceil((textLen * 1.3) / contentWidth);
+const contentLines = textLen === 0 ? 0 : Math.ceil(textLen / contentWidth) + 1;
 
   switch (msg.role) {
     case "user":
@@ -137,15 +137,21 @@ export const MessageList = memo(function MessageList({
     startIdx = i;
   }
 
-  const visibleMessages = messages.slice(startIdx, endIdx);
+ const visibleMessages = React.useMemo(
+   () => messages.slice(startIdx, endIdx),
+   [messages, startIdx, endIdx]
+ );
 
   // Claude Code–style layout: start from top when messages are few,
   // pin to bottom once they fill the viewport (feels natural, not floating in center)
   const totalVisibleLines = visibleMessages.reduce((sum, m) => sum + estimateLines(m, columns), 0);
-  const justifyContent = totalVisibleLines >= height - reservedLines ? "flex-end" : "flex-start";
+const justifyContent =
+  totalVisibleLines < height * 0.7
+    ? "flex-start"
+    : "flex-end";
 
   return (
-    <Box flexDirection="column" height={height} overflow="hidden" justifyContent={justifyContent}>
+    <Box flexDirection="column" height={height} overflow="hidden" justifyContent="flex-end" flexGrow={1}>
       {/* Empty state */}
       {visibleMessages.length === 0 && !isThinking && (
         <Box justifyContent="center" flexGrow={1}>

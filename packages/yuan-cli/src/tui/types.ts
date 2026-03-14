@@ -14,20 +14,39 @@ export interface TerminalDimensions {
   tier: LayoutTier;
 }
 
+/** Phase 3: Autonomous Engineering Loop — inline tree event */
+export interface TUIPhaseEvent {
+  id: string;
+  /** Which autonomous component produced this */
+  kind: "research" | "plan" | "tournament" | "task" | "debug";
+  /** Bold headline e.g. "Research  confidence:72%" */
+  title: string;
+  /** One-line summary shown collapsed */
+  summary: string;
+  /** Tree items shown expanded (each is one tree leaf) */
+  items: string[];
+  status: "running" | "done" | "error";
+  timestamp: number;
+}
+
 /** A message in the conversation */
 export interface TUIMessage {
   id: string;
-  role: "user" | "assistant" | "system" | "tool";
+  role: "user" | "assistant" | "system" | "tool" | "queued_user";
   content: string;
   timestamp?: number;
   /** Tool calls attached to this assistant message */
   toolCalls?: TUIToolCall[];
   /** Whether the assistant is still generating this message */
   isStreaming?: boolean;
+  /** Extended thinking / reasoning content (shown dimmed below the main content) */
+  thinkingContent?: string;
   /** Tool-specific fields */
   toolName?: string;
   toolSuccess?: boolean;
   toolDurationMs?: number;
+  /** Phase 3 autonomous events rendered as inline tree below message content */
+  phaseEvents?: TUIPhaseEvent[];
 }
 
 /** A tool call within an assistant message */
@@ -137,6 +156,10 @@ export interface AgentStreamState {
   stalledMs: number;
   /** Background agent tasks (type-checker, security-scan, etc.) */
   backgroundTasks: TUIBackgroundTask[];
+  /** Fine-grained progress label from progress:status events (analyzing/searching/coding/etc.) */
+  progressLabel?: string;
+  /** Current task phase: explore → implement → verify → finalize */
+  currentPhase?: "explore" | "implement" | "verify" | "finalize";
 }
 /** Hierarchical reasoning tree node */
 export interface ReasoningNode {

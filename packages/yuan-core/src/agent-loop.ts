@@ -67,6 +67,7 @@ import { ContinuationEngine } from "./continuation-engine.js";
 import { MemoryUpdater, type RunAnalysis } from "./memory-updater.js";
 import type { ContinuationCheckpoint, ToolDefinition } from "./types.js";
 import { MCPClient, type MCPServerConfig } from "./mcp-client.js";
+import { BOUNDS, cap, truncate, pushCapped } from "./safe-bounds.js";
 import { WorldStateCollector, type WorldStateSnapshot } from "./world-state.js";
 import { FailureRecovery, type RecoveryDecision } from "./failure-recovery.js";
 import { ExecutionPolicyEngine, type ExecutionPolicy } from "./execution-policy-engine.js";
@@ -96,6 +97,7 @@ import { ContextBudgetManager } from "./context-budget.js";
 import { QAPipeline, type QAPipelineResult } from "./qa-pipeline.js";
 import { PersonaManager } from "./persona.js";
 import { InMemoryVectorStore, OllamaEmbeddingProvider } from "./vector-store.js";
+import { OverheadGovernor, type OverheadGovernorConfig, type TriggerContext, type TaskPhase } from "./overhead-governor.js";
 import {
   StateStore,
   TransitionModel,
@@ -110,6 +112,28 @@ import {
   ReplanningEngine,
 } from "./planner/index.js";
 import type { Milestone, MilestoneStatus, RiskScore, PlanHealth, ProactiveReplanResult } from "./planner/index.js";
+import { TraceRecorder } from "./trace-recorder.js";
+import { ArchSummarizer } from "./arch-summarizer.js";
+import { FailureSignatureMemory } from "./failure-signature-memory.js";
+import { PlaybookLibrary } from "./playbook-library.js";
+import { ProjectExecutive } from "./project-executive.js";
+import { StallDetector } from "./stall-detector.js";
+import { SelfImprovementLoop } from "./self-improvement-loop.js";
+import { MetaLearningCollector } from "./meta-learning-collector.js";
+import { TrustEconomics, type ActionClass } from "./trust-economics.js";
+import { StrategyLearner } from "./strategy-learner.js";
+import { SkillRegistry } from "./skill-registry.js";
+import { TracePatternExtractor } from "./trace-pattern-extractor.js";
+import { MetaLearningEngine } from "./meta-learning-engine.js";
+import { ToolSynthesizer } from "./tool-synthesizer.js";
+import { BudgetGovernorV2 } from "./budget-governor-v2.js";
+import { CapabilityGraph } from "./capability-graph.js";
+import { CapabilitySelfModel } from "./capability-self-model.js";
+import { StrategyMarket } from "./strategy-market.js";
+import { recordBudgetUsage, checkBudgetShouldHalt } from "./extensions/budget-wiring.js";
+import { registerToolsInGraph, recordToolOutcomeInGraph } from "./extensions/cap-graph-wiring.js";
+import { getSelfWeaknessContext } from "./extensions/self-model-wiring.js";
+import { initMarketPlaybooks, selectMarketStrategy } from "./extensions/strategy-wiring.js";
 /** AgentLoop 설정 */
 export interface AgentLoopOptions {
   abortSignal?: AbortSignal
@@ -153,6 +177,8 @@ export interface AgentLoopOptions {
   enableSkillLearning?: boolean;
   /** Enable background agents (persistent monitors, default false — opt-in) */
   enableBackgroundAgents?: boolean;
+  /** OverheadGovernor config — per-subsystem OFF/SHADOW/BLOCKING policy */
+  overheadGovernorConfig?: OverheadGovernorConfig;
 }
 
 /**
@@ -224,6 +250,8 @@ export class AgentLoop extends EventEmitter {
   private costOptimizer: CostOptimizer;
   private impactAnalyzer: ImpactAnalyzer | null = null;
   private impactHintInjected = false;
+  private lastImpactReport: import("./impact-analyzer.js").ImpactReport | null = null;
+  private lastImpactFilesKey: string = "";
   private selfReflection: SelfReflection | null = null;
   private debateOrchestrator: DebateOrchestrator | null = null;
   private continuousReflection: ContinuousReflection | null = null;
@@ -267,6 +295,23 @@ export class AgentLoop extends EventEmitter {
   private iterationTsFilesModified: string[] = [];
   /** Task 3: Whether tsc was run in the previous iteration (skip cooldown) */
   private tscRanLastIteration = false;
+
+  // ─── OverheadGovernor — subsystem execution policy ──────────────────────
+  private readonly overheadGovernor: OverheadGovernor;
+  /** Writes since last verify ran (for QA/quickVerify trigger) */
+  private writeCountSinceVerify = 0;
+  /** Current task phase (explore → implement → verify → finalize) */
+  private taskPhase: TaskPhase = "explore";
+  /** Per-iteration: verify already ran this iteration (single-flight guard) */
+  private verifyRanThisIteration = false;
+  /** Per-iteration: summarize already ran this iteration */
+  private summarizeRanThisIteration = false;
+  /** Per-iteration: llmFixer run count */
+  private llmFixerRunCount = 0;
+  /** Repeated error signature (same error string seen 2+ times) */
+  private repeatedErrorSignature: string | undefined = undefined;
+  private _lastErrorSignature: string | undefined = undefined;
+  private _errorSignatureCount = 0;
   /** PersonaManager — learns user communication style, injects persona into system prompt */
   private personaManager: PersonaManager | null = null;
   /** InMemoryVectorStore — RAG: semantic code context retrieval for relevant snippets */
@@ -295,6 +340,28 @@ export class AgentLoop extends EventEmitter {
 private readonly reasoningAggregator = new ReasoningAggregator();
 private readonly reasoningTree = new ReasoningTree();
 private resumedFromSession = false;
+private traceRecorder: TraceRecorder | null = null;
+private archSummarizer: ArchSummarizer | null = null;
+  private failureSigMemory: FailureSignatureMemory | null = null;
+  private playbookLibrary: PlaybookLibrary | null = null;
+  private projectExecutive: ProjectExecutive | null = null;
+  private stallDetector: StallDetector | null = null;
+  private selfImprovementLoop: SelfImprovementLoop | null = null;
+  private metaLearningCollector: MetaLearningCollector | null = null;
+  private trustEconomics: TrustEconomics | null = null;
+  // Phase 5: Strategy Learner + Skill Registry
+  private strategyLearner: StrategyLearner | null = null;
+  private skillRegistry: SkillRegistry | null = null;
+  // Phase 5 extended: TracePatternExtractor, MetaLearningEngine, ToolSynthesizer
+  private tracePatternExtractor: TracePatternExtractor | null = null;
+  private metaLearningEngine: MetaLearningEngine | null = null;
+  private toolSynthesizer: ToolSynthesizer | null = null;
+  // Phase 6: BudgetGovernorV2, CapabilityGraph, CapabilitySelfModel, StrategyMarket
+  private budgetGovernorV2: BudgetGovernorV2 | null = null;
+  private capabilityGraph: CapabilityGraph | null = null;
+  private capabilitySelfModel: CapabilitySelfModel | null = null;
+  private strategyMarket: StrategyMarket | null = null;
+  private sessionRunCount: number = 0;
   /**
    * Restore AgentLoop state from persisted session (yuan resume)
    */
@@ -375,6 +442,15 @@ async restoreSession(data: SessionData): Promise<void> {
 
     // Governor 생성
     this.governor = new Governor(options.governorConfig);
+
+    // OverheadGovernor — subsystem execution policy
+    this.overheadGovernor = new OverheadGovernor(
+      options.overheadGovernorConfig,
+      (subsystem, reason) => {
+        // Shadow log — emit as thinking event so TUI can see it (dimmed)
+        this.emitEvent({ kind: "agent:thinking", content: `[shadow] ${subsystem}: ${reason}` });
+      },
+    );
 
     // ContextManager 생성
     this.contextManager = new ContextManager({
@@ -677,6 +753,12 @@ async restoreSession(data: SessionData): Promise<void> {
       }
     }
 
+    // Self-model weakness context injection
+    const weaknessCtx = getSelfWeaknessContext(this.capabilitySelfModel);
+    if (weaknessCtx) {
+      this.contextManager.addMessage({ role: "system", content: weaknessCtx });
+    }
+
     // SkillLearner 초기화 (경험에서 학습된 스킬 자동 로드)
     if (this.enableSkillLearning && projectPath) {
       try {
@@ -687,6 +769,66 @@ async restoreSession(data: SessionData): Promise<void> {
       }
     }
 
+    // Phase 4: FailureSignatureMemory, PlaybookLibrary, ProjectExecutive, StallDetector
+    if (projectPath) {
+      try {
+        this.failureSigMemory = new FailureSignatureMemory({ projectPath });
+        this.playbookLibrary = new PlaybookLibrary();
+        this.projectExecutive = new ProjectExecutive(projectPath);
+        // Estimated iterations from config or default 20
+        const estimatedIter = this.config.loop.maxIterations ?? 20;
+        this.stallDetector = new StallDetector(estimatedIter);
+        // Forward project executive events
+        this.projectExecutive.on("event", (ev) => this.emitEvent(ev));
+        // Phase 4 remaining: SelfImprovementLoop, MetaLearningCollector, TrustEconomics
+        this.selfImprovementLoop = new SelfImprovementLoop({ projectPath });
+        this.selfImprovementLoop.on("event", (ev) => this.emitEvent(ev as import("./types.js").AgentEvent));
+        this.metaLearningCollector = new MetaLearningCollector({ projectPath });
+        this.trustEconomics = new TrustEconomics({ projectPath });
+      } catch {
+        // Phase 4 init failure is non-fatal
+      }
+    }
+
+    // Phase 5: StrategyLearner + SkillRegistry
+    try {
+      this.strategyLearner = new StrategyLearner();
+      this.skillRegistry = new SkillRegistry();
+      // Forward Phase 5 events
+      this.strategyLearner.on("event", (ev) => this.emitEvent(ev as import("./types.js").AgentEvent));
+      this.skillRegistry.on("event", (ev) => this.emitEvent(ev as import("./types.js").AgentEvent));
+    } catch {
+      // Phase 5 init failure is non-fatal
+    }
+    // Phase 5 extended: TracePatternExtractor, MetaLearningEngine, ToolSynthesizer
+    try {
+      this.tracePatternExtractor = new TracePatternExtractor();
+      this.metaLearningEngine = new MetaLearningEngine({
+        collector: this.metaLearningCollector ?? undefined,
+        strategyLearner: this.strategyLearner ?? undefined,
+      });
+      this.toolSynthesizer = new ToolSynthesizer();
+      // Forward Phase 5 extended events
+      this.tracePatternExtractor.on("event", (ev) => this.emitEvent(ev as import("./types.js").AgentEvent));
+      this.metaLearningEngine.on("event", (ev) => this.emitEvent(ev as import("./types.js").AgentEvent));
+      this.toolSynthesizer.on("event", (ev) => this.emitEvent(ev as import("./types.js").AgentEvent));
+    } catch {
+      // Phase 5 extended init failure is non-fatal
+    }
+    // Phase 6: BudgetGovernorV2, CapabilityGraph, CapabilitySelfModel, StrategyMarket
+    try {
+      this.budgetGovernorV2 = new BudgetGovernorV2();
+      this.capabilityGraph = new CapabilityGraph();
+      this.capabilitySelfModel = new CapabilitySelfModel();
+      this.strategyMarket = new StrategyMarket();
+      this.budgetGovernorV2.on("event", (ev) => this.emitEvent(ev as import("./types.js").AgentEvent));
+      this.capabilityGraph.on("event", (ev) => this.emitEvent(ev as import("./types.js").AgentEvent));
+      this.capabilitySelfModel.on("event", (ev) => this.emitEvent(ev as import("./types.js").AgentEvent));
+      this.strategyMarket.on("event", (ev) => this.emitEvent(ev as import("./types.js").AgentEvent));
+      // Register known tools in capability graph
+      const toolNames = this.config.loop.tools.map((t) => t.name);
+      registerToolsInGraph(this.capabilityGraph, toolNames);
+    } catch { /* non-fatal */ }
     // HierarchicalPlanner 생성
     this.planner = new HierarchicalPlanner({ projectPath });
 
@@ -937,6 +1079,39 @@ this.checkpointSaved = false;
 
     // 첫 실행 시 메모리/프로젝트 컨텍스트 자동 로드
     await this.init();
+  if (!this.sessionId) {
+    this.sessionId = randomUUID();
+  }
+  // Phase 6: start task budget tracking
+  try {
+    this.budgetGovernorV2?.startTask(this.sessionId ?? "default");
+    initMarketPlaybooks(this.strategyMarket);
+  } catch { /* non-fatal */ }
+  // Initialize trace recorder (once per run)
+  if (!this.traceRecorder) {
+    this.traceRecorder = new TraceRecorder(this.sessionId);
+  }
+  // Initialize arch summarizer (once per run)
+  if (!this.archSummarizer && this.config.loop.projectPath) {
+    this.archSummarizer = new ArchSummarizer(this.config.loop.projectPath);
+    // Trigger refresh in background if dirty
+    this.archSummarizer.getSummary().catch(() => {/* non-fatal */});
+  }
+  // Phase 4: PlaybookLibrary — inject hint into system context based on goal
+  if (this.playbookLibrary) {
+    try {
+      const playbook = this.playbookLibrary.query(userMessage);
+      if (playbook) {
+        this.contextManager.addMessage({
+          role: "system",
+          content: `[Playbook: ${playbook.taskType} v${playbook.version}] ` +
+            `Phase order: ${playbook.phaseOrder.join(" → ")}. ` +
+            `Stop conditions: ${playbook.stopConditions.join(", ")}. ` +
+            `Evidence required: ${playbook.evidenceRequirements.join(", ")}.`,
+        });
+      }
+    } catch { /* non-fatal */ }
+  }
   if (this.sessionPersistence) {
     if (!this.sessionId) {
       this.sessionId = randomUUID();
@@ -1184,6 +1359,108 @@ this.checkpointSaved = false;
       }
       // 실행 완료 후 메모리 자동 업데이트
       await this.updateMemoryAfterRun(userMessage, result, Date.now() - runStartTime);
+
+      // Phase 4: FailureSignatureMemory promote + PlaybookLibrary outcome recording
+      if (result.reason === "GOAL_ACHIEVED") {
+        try {
+          if (this.failureSigMemory && this.repeatedErrorSignature) {
+            this.failureSigMemory.promote(
+              this.repeatedErrorSignature,
+              "resolved",
+              this.allToolResults.filter(r => r.success).map(r => r.name),
+              true,
+            );
+          }
+          if (this.playbookLibrary) {
+            const taskType = this.playbookLibrary.query(userMessage)?.taskType;
+            if (taskType) {
+              this.playbookLibrary.recordOutcome(taskType, true);
+            }
+          }
+        } catch { /* non-fatal */ }
+      }
+
+      // Phase 4 remaining: SelfImprovementLoop + MetaLearningCollector + TrustEconomics
+      try {
+        const taskType = this.playbookLibrary?.query(userMessage)?.taskType ?? "unknown";
+        const championPlaybook = selectMarketStrategy(this.strategyMarket, taskType);
+        if (championPlaybook) {
+          this.emitReasoning(`strategy champion for ${taskType}: ${championPlaybook}`);
+        }
+        const toolSeq = this.allToolResults.slice(-20).map((r) => r.name);
+        const runSuccess = result.reason === "GOAL_ACHIEVED";
+        const runDurationMs = Date.now() - runStartTime;
+
+        if (this.selfImprovementLoop) {
+          this.selfImprovementLoop.recordOutcome({
+            taskType,
+            strategy: "default",
+            toolSequence: toolSeq,
+            success: runSuccess,
+            iterationsUsed: this.iterationCount,
+            tokensUsed: this.tokenUsage.total,
+            durationMs: runDurationMs,
+            errorSignatures: this.repeatedErrorSignature ? [this.repeatedErrorSignature] : [],
+          });
+          this.selfImprovementLoop.generateProposals();
+        }
+
+        if (this.metaLearningCollector) {
+          this.metaLearningCollector.record({
+            taskType,
+            governorPolicies: {},
+            toolSequence: toolSeq,
+            latencyMs: runDurationMs,
+            tokensUsed: this.tokenUsage.total,
+            success: runSuccess,
+            iterationsUsed: this.iterationCount,
+          });
+        }
+
+        if (this.trustEconomics) {
+          for (const tr of this.allToolResults.slice(-20)) {
+            const ac = toolNameToActionClass(tr.name);
+            if (ac) this.trustEconomics.record(ac, tr.success);
+          }
+        }
+
+        // Phase 5: record strategy outcome
+        if (this.strategyLearner) {
+          const activePlaybookId = (this as unknown as { _activePlaybookId?: string })._activePlaybookId ?? "default";
+          if (runSuccess) {
+            this.strategyLearner.recordSuccess(activePlaybookId, taskType, this.iterationCount, this.tokenUsage.total);
+          } else {
+            this.strategyLearner.recordFailure(activePlaybookId, taskType, this.iterationCount, this.tokenUsage.total);
+          }
+        }
+
+        // Phase 5 extended: periodic pattern extraction (every 10 runs)
+        this.sessionRunCount += 1;
+        if (this.sessionRunCount % 10 === 0) {
+          if (this.tracePatternExtractor) {
+            this.tracePatternExtractor.extract().catch(() => {/* non-fatal */});
+          }
+          if (this.metaLearningEngine) {
+            this.metaLearningEngine.analyze().catch(() => {/* non-fatal */});
+          }
+        }
+
+        // Phase 6: record outcomes in capability self model and strategy market
+        try {
+          const env = (this as unknown as { _detectedEnvironment?: string })._detectedEnvironment ?? "general";
+          this.capabilitySelfModel?.recordOutcome(env, taskType, runSuccess);
+          this.strategyMarket?.recordResult(
+            (this as unknown as { _activePlaybookId?: string })._activePlaybookId ?? "default",
+            taskType,
+            {
+              success: runSuccess,
+              tokenCost: this.tokenUsage?.total ?? 0,
+              latencyMs: Date.now() - runStartTime,
+            },
+          );
+          this.budgetGovernorV2?.endTask(this.sessionId ?? "default");
+        } catch { /* non-fatal */ }
+      } catch { /* non-fatal */ }
 
       // SkillLearner: 성공적 에러 해결 시 새로운 스킬 학습
       if (this.skillLearner && result.reason === "GOAL_ACHIEVED") {
@@ -1931,8 +2208,24 @@ let iteration = this.iterationCount;
       iteration++;
       this.iterationCount = iteration;
       const iterationStart = Date.now();
+      // Phase 6: Budget governor halt check
+      if (checkBudgetShouldHalt(this.budgetGovernorV2, this.sessionId ?? "default")) {
+        return { reason: "BUDGET_EXHAUSTED", tokensUsed: this.tokenUsage.total };
+      }
+      // Reset per-iteration governor state
+      this.verifyRanThisIteration = false;
+      this.summarizeRanThisIteration = false;
+      this.llmFixerRunCount = 0;
+      this.iterationSystemMsgCount = 0;
+
+      // Message pruning — cap in-memory messages to prevent OOM (GPT recommendation)
+      this.pruneMessagesIfNeeded();
+
+      // Cap allToolResults (prevents unbounded memory growth)
+      this.allToolResults = cap(this.allToolResults, BOUNDS.allToolResults);
+      this.allToolResultsSinceLastReplan = cap(this.allToolResultsSinceLastReplan, BOUNDS.toolResultsSinceReplan);
+
       this.emitReasoning(`iteration ${iteration}: preparing context`);
-      this.iterationSystemMsgCount = 0; // Reset per-iteration (prevents accumulation across iterations)
 
       // Proactive replanning check (every 10 iterations when plan is active)
       if (
@@ -2010,10 +2303,10 @@ let iteration = this.iterationCount;
       // checkpoint first, then let ContextManager compact instead of aborting/throwing.
       const contextUsageRatio = this.contextManager.getUsageRatio();
 
-      // Task 1: ContextBudgetManager LLM summarization at 60-70% — runs BEFORE ContextCompressor
-      // Summarizes old "medium" priority conversation turns into a compact summary message,
-      // freeing tokens before the heavier ContextCompressor kicks in at 70%.
-      if (contextUsageRatio >= 0.60 && contextUsageRatio < 0.70 && this.contextBudgetManager && !this._contextSummarizationDone) {
+      // Task 1: ContextBudgetManager LLM summarization — Governor gated (default SHADOW)
+      const summarizeMode = this.overheadGovernor.shouldRunSummarize(this.buildTriggerContext());
+      if (summarizeMode === "BLOCKING") this.summarizeRanThisIteration = true;
+      if (contextUsageRatio >= 0.75 && this.contextBudgetManager && !this._contextSummarizationDone && summarizeMode === "BLOCKING") {
         this._contextSummarizationDone = true; // run at most once per agent turn
         // Non-blocking: fire-and-forget so the main iteration is not stalled
         this.contextBudgetManager.importMessages(this.contextManager.getMessages());
@@ -2148,6 +2441,7 @@ let iteration = this.iterationCount;
       this.tokenUsage.input += response.usage.input;
       this.tokenUsage.output += response.usage.output;
       this.tokenUsage.total += response.usage.input + response.usage.output;
+      recordBudgetUsage(this.budgetGovernorV2, response.usage.input, response.usage.output, this.sessionId ?? "default");
       this.governor.recordIteration(
         response.usage.input,
         response.usage.output,
@@ -2198,12 +2492,28 @@ let iteration = this.iterationCount;
         const content = response.content ?? "";
         let finalSummary = content || "Task completed.";
 
+        // Phase transition: implement → verify when LLM signals completion (no tool calls)
+        if (this.taskPhase === "implement" && this.changedFiles.length > 0) {
+          this.transitionPhase("verify", "LLM completion signal (no tool calls)");
+          // Run cheap checks — if they fail, stay in implement and continue loop
+          const cheapOk = await this.runCheapChecks();
+          if (cheapOk) {
+            this.transitionPhase("finalize", "cheap checks passed");
+          } else {
+            // cheap checks failed — stay in implement, let LLM fix
+            this.transitionPhase("implement", "cheap check failed, continuing");
+            continue;
+          }
+        }
+
         const finalImpactSummary = await this.buildFinalImpactSummary();
         if (finalImpactSummary) {
           finalSummary = `${finalSummary}\n\n${finalImpactSummary}`;
         }
-        // Level 2: Deep verification before declaring completion
-        if (this.selfReflection && this.changedFiles.length > 0) {
+        // Level 2: Deep verification before declaring completion — Governor gated (default OFF)
+        const deepVerifyMode = this.overheadGovernor.shouldRunDeepVerify(this.buildTriggerContext());
+        if (deepVerifyMode === "BLOCKING") this.verifyRanThisIteration = true;
+        if (this.selfReflection && this.changedFiles.length > 0 && deepVerifyMode === "BLOCKING") {
           try {
             const changedFilesMap = this.buildChangedFilesMap();
 
@@ -2246,11 +2556,13 @@ let iteration = this.iterationCount;
               continue; // Don't return GOAL_ACHIEVED, continue the loop
             }
 
-            // Level 3: Multi-agent debate for complex/massive tasks
+            // Level 3: Multi-agent debate — Governor gated (default OFF)
+            const debateMode = this.overheadGovernor.shouldRunDebate(this.buildTriggerContext());
             if (
               this.debateOrchestrator &&
               ["complex", "massive"].includes(this.currentComplexity) &&
-              deepResult.verdict !== "pass"
+              deepResult.verdict !== "pass" &&
+              debateMode === "BLOCKING"
             ) {
               try {
                 this.emitSubagent("reviewer", "start", `starting debate for ${this.currentComplexity} task verification`);
@@ -2400,6 +2712,10 @@ this.emitEvent({
 
       // Reflexion: 도구 결과 수집
       this.allToolResults.push(...toolResults);
+      // Phase 6: Record tool outcomes in capability graph
+      for (const tr of toolResults) {
+        recordToolOutcomeInGraph(this.capabilityGraph, tr.name, tr.success);
+      }
 
       // Accumulate tool results for proactive replanning evaluation
       this.allToolResultsSinceLastReplan.push(...toolResults);
@@ -2449,7 +2765,8 @@ this.emitEvent({
 
       // Task 2: QAPipeline — run "quick" (structural only) after any WRITE tool call this iteration
       const projectPath = this.config.loop.projectPath;
-      if (this.iterationWriteToolPaths.length > 0 && projectPath) {
+      const qaMode = this.overheadGovernor.shouldRunQaPipeline(this.buildTriggerContext());
+      if (this.iterationWriteToolPaths.length > 0 && projectPath && qaMode !== "OFF") {
         try {
           const qaPipeline = new QAPipeline({
             projectPath,
@@ -2464,7 +2781,6 @@ this.emitEvent({
           const qaResult = await qaPipeline.run(this.iterationWriteToolPaths);
           this.lastQAResult = qaResult;
 
-          // Surface QA issues as a system message so LLM sees them next iteration
           const failedChecks = qaResult.stages
             .flatMap((s) => s.checks)
             .filter((c) => c.status === "fail" || c.status === "warn");
@@ -2473,7 +2789,7 @@ this.emitEvent({
             .slice(0, 10)
             .map((c) => `[${c.severity}] ${c.name}: ${c.message}`);
 
-          // Emit structured qa_result event for TUI display
+          // Always emit event for TUI display (SHADOW + BLOCKING)
           this.emitEvent({
             kind: "agent:qa_result",
             stage: "quick",
@@ -2481,7 +2797,8 @@ this.emitEvent({
             issues: qaIssues,
           });
 
-          if (failedChecks.length > 0 && this.iterationSystemMsgCount < 5) {
+          // Only inject into LLM context in BLOCKING mode (SHADOW = observe only)
+          if (qaMode === "BLOCKING" && failedChecks.length > 0 && this.iterationSystemMsgCount < 5) {
             const checkSummary = failedChecks
               .slice(0, 5)
               .map((c) => `  - [${c.severity}] ${c.name}: ${c.message}`)
@@ -2499,6 +2816,27 @@ this.emitEvent({
       // Reset per-iteration write tool tracking
       this.iterationWriteToolPaths = [];
 
+      // Phase 4: StallDetector check (non-blocking observer)
+      if (this.stallDetector) {
+        try {
+          const stallResult = this.stallDetector.check(
+            this.iterationCount,
+            this.changedFiles,
+            this.repeatedErrorSignature,
+          );
+          if (stallResult.stalled && stallResult.reason) {
+            this.emitEvent({
+              kind: "agent:task_stalled",
+              taskId: this.sessionId ?? "unknown",
+              stallReason: stallResult.reason,
+              iterationsElapsed: stallResult.iterationsElapsed,
+              estimatedIterations: this.config.loop.maxIterations ?? 20,
+              timestamp: Date.now(),
+            });
+          }
+        } catch { /* non-fatal */ }
+      }
+
       // Task 3: Auto-run tsc --noEmit after 2+ TS files modified in this iteration
       // Skip if tsc was already run in the previous iteration (cooldown)
       const tscFilesThisIteration = [...this.iterationTsFilesModified];
@@ -2506,7 +2844,8 @@ this.emitEvent({
       const tscRanPrev = this.tscRanLastIteration;
       this.tscRanLastIteration = false; // will set to true below if we run it
 
-      if (tscFilesThisIteration.length >= 2 && projectPath && !tscRanPrev) {
+      const tscMode = this.overheadGovernor.shouldRunAutoTsc(this.buildTriggerContext());
+      if (tscFilesThisIteration.length >= 2 && projectPath && !tscRanPrev && tscMode !== "OFF") {
         try {
           const tscResult = await this.toolExecutor.execute({
             id: `auto-tsc-${Date.now()}`,
@@ -2519,26 +2858,27 @@ this.emitEvent({
           });
           this.tscRanLastIteration = true;
 
-          // Inject TypeScript errors into context so LLM sees them next iteration
           if (tscResult.success && tscResult.output && tscResult.output.trim().length > 0) {
             const tscOutput = tscResult.output.trim();
-            // Only inject if there are actual TS errors (output is non-empty)
             const hasErrors = tscOutput.includes(": error TS") || tscOutput.includes("error TS");
-            if (hasErrors && this.iterationSystemMsgCount < 5) {
-              // Truncate long tsc output to avoid context bloat
-              const truncated = tscOutput.length > 2000
-                ? tscOutput.slice(0, 2000) + "\n[...tsc output truncated]"
-                : tscOutput;
-              this.contextManager.addMessage({
-                role: "system",
-                content: `[Auto-TSC] TypeScript errors detected after modifying ${tscFilesThisIteration.length} files:\n\`\`\`\n${truncated}\n\`\`\`\nPlease fix these type errors.`,
-              });
-              this.iterationSystemMsgCount++;
+            if (hasErrors) {
+              // Always emit thinking event (SHADOW + BLOCKING)
               this.emitEvent({
                 kind: "agent:thinking",
                 content: `Auto-TSC: TypeScript errors found after editing ${tscFilesThisIteration.join(", ")}.`,
               });
-            } else if (!hasErrors) {
+              // Only inject into LLM context in BLOCKING mode
+              if (tscMode === "BLOCKING" && this.iterationSystemMsgCount < 5) {
+                const truncated = tscOutput.length > 2000
+                  ? tscOutput.slice(0, 2000) + "\n[...tsc output truncated]"
+                  : tscOutput;
+                this.contextManager.addMessage({
+                  role: "system",
+                  content: `[Auto-TSC] TypeScript errors detected after modifying ${tscFilesThisIteration.length} files:\n\`\`\`\n${truncated}\n\`\`\`\nPlease fix these type errors.`,
+                });
+                this.iterationSystemMsgCount++;
+              }
+            } else {
               this.emitEvent({
                 kind: "agent:thinking",
                 content: `Auto-TSC: No type errors after editing ${tscFilesThisIteration.length} file(s).`,
@@ -2608,8 +2948,9 @@ if (this.sessionPersistence && this.sessionId) {
         }
       }
 
-      // Level 1: Quick verification after every 3rd iteration
-      if (this.selfReflection && iteration % 3 === 0) {
+      // Level 1: Quick verification — Governor gated (default SHADOW = no LLM call)
+      const quickVerifyMode = this.overheadGovernor.shouldRunQuickVerify(this.buildTriggerContext());
+      if (this.selfReflection && iteration % 3 === 0 && quickVerifyMode === "BLOCKING") {
         try {
           this.emitSubagent("verifier", "start", "running quick verification");
           const changedFilesMap = this.buildChangedFilesMap();
@@ -2656,6 +2997,9 @@ if (this.sessionPersistence && this.sessionId) {
         const errorSummary = errorResults
           .map((r) => `${r.name}: ${r.output}`)
           .join("\n");
+
+        // Track repeated error signature for Governor
+        this.trackErrorSignature(errorSummary);
 
         // FailureRecovery: 근본 원인 분석 + 전략 선택
         const rootCause = this.failureRecovery.analyzeRootCause(
@@ -2711,7 +3055,8 @@ if (this.sessionPersistence && this.sessionId) {
 
           // SelfDebugLoop: merge debug strategy into recovery message (not separate system msg)
           let debugSuffix = "";
-          if (iteration >= 3) {
+          const llmFixerMode = this.overheadGovernor.shouldRunLlmFixer(this.buildTriggerContext());
+          if (iteration >= 3 && llmFixerMode === "BLOCKING") {
             const rootCauseAnalysis = this.selfDebugLoop.analyzeError(errorSummary);
             if (rootCauseAnalysis.confidence >= 0.5) {
               const debugStrategy = this.selfDebugLoop.selectStrategy(
@@ -2733,6 +3078,7 @@ if (this.sessionPersistence && this.sessionId) {
 
               // Bug 2 fix: wire a real llmFixer so selfDebugLoop.debug() can call LLM
               if (debugStrategy !== "escalate") {
+                this.llmFixerRunCount++;
                 this.selfDebugLoop.debug({
                   testCommand: testCmd,
                   errorOutput: errorSummary,
@@ -3155,18 +3501,28 @@ if (this.sessionPersistence && this.sessionId) {
 
     // MCP 도구 호출 확인
     if (this.mcpClient && this.isMCPTool(toolCall.name)) {
+      // Emit tool_start before execution (required for trace, QA pipeline, replay)
+      this.emitEvent({
+        kind: "agent:tool_start",
+        tool: toolCall.name,
+        input: args,
+        source: "mcp",
+      });
       const mcpResult = await this.executeMCPTool(toolCall);
+      // Normalize MCP result: wrap search tool output into structured JSON if applicable
+      const normalizedOutput = this.normalizeMcpResult(toolCall.name, mcpResult.output);
+      const finalResult: ToolResult = { ...mcpResult, output: normalizedOutput };
       this.emitEvent({
         kind: "agent:tool_result",
         tool: toolCall.name,
         output:
-          mcpResult.output.length > 200
-            ? mcpResult.output.slice(0, 200) + "..."
-            : mcpResult.output,
-        durationMs: mcpResult.durationMs,
+          finalResult.output.length > 200
+            ? finalResult.output.slice(0, 200) + "..."
+            : finalResult.output,
+        durationMs: finalResult.durationMs,
       });
       this.emitEvent({ kind: "agent:reasoning_delta", text: `tool finished: ${toolCall.name}` });
-      return { result: mcpResult, deferredFixPrompt: null };
+      return { result: finalResult, deferredFixPrompt: null };
     }
 
     // 도구 실행
@@ -3224,6 +3580,10 @@ if (this.sessionPersistence && this.sessionId) {
       this.reasoningTree.add("tool", `success: ${toolCall.name}`);
 
       if (["file_write", "file_edit"].includes(toolCall.name) && result.success) {
+        // Phase transition: explore → implement on first write
+        if (this.taskPhase === "explore") {
+          this.transitionPhase("implement", `first write: ${toolCall.name}`);
+        }
         const filePath =
           (args as Record<string, unknown>).path ??
           (args as Record<string, unknown>).file ??
@@ -3231,6 +3591,10 @@ if (this.sessionPersistence && this.sessionId) {
         const filePathStr = String(filePath);
         if (!this.changedFiles.includes(filePathStr)) {
           this.changedFiles.push(filePathStr);
+          // Cap changedFiles to prevent unbounded growth on massive refactors
+          if (this.changedFiles.length > BOUNDS.changedFiles) {
+            this.changedFiles = this.changedFiles.slice(-BOUNDS.changedFiles);
+          }
         }
         // Task 2: track write tool paths per-iteration for QA triggering
         if (!this.iterationWriteToolPaths.includes(filePathStr)) {
@@ -3241,6 +3605,11 @@ if (this.sessionPersistence && this.sessionId) {
           this.iterationTsFilesModified.push(filePathStr);
         }
         this.emitEvent({ kind: "agent:file_change", path: filePathStr, diff: result.output });
+        // Emit evidence report (async, fire-and-forget — no loop complexity added)
+        this.emitEvidenceReport(
+          filePathStr,
+          toolCall.name as "file_write" | "file_edit",
+        ).catch(() => {/* non-fatal */});
         // Update world state after file modification
         if (this.config.loop.projectPath) {
           const wsProjectPath = this.config.loop.projectPath;
@@ -3914,29 +4283,49 @@ if (this.sessionPersistence && this.sessionId) {
   // ─── Impact Analysis ───
 
   /**
+   * Returns a cached ImpactReport if the same files were already analyzed,
+   * otherwise computes and caches a fresh report.
+   */
+  private async getOrComputeImpact(
+    files: string[],
+  ): Promise<import("./impact-analyzer.js").ImpactReport | null> {
+    if (!this.impactAnalyzer || files.length === 0) return null;
+    const key = [...files].sort().join("|");
+    if (key === this.lastImpactFilesKey && this.lastImpactReport) {
+      return this.lastImpactReport;
+    }
+    try {
+      const report = await this.impactAnalyzer.analyzeChanges(files);
+      this.lastImpactFilesKey = key;
+      this.lastImpactReport = report;
+      return report;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * 파일 변경 후 영향 분석을 실행하고 결과를 컨텍스트에 주입.
    * 고위험 변경이면 경고를 emit.
    */
   private async analyzeFileImpact(filePath: string): Promise<void> {
     if (!this.impactAnalyzer) return;
 
-    try {
-      const report = await this.impactAnalyzer.analyzeChanges([filePath]);
-      if (report.riskLevel === "high" || report.riskLevel === "critical") {
-        this.emitEvent({
-          kind: "agent:thinking",
-          content: `Impact analysis: ${report.riskLevel} risk. ${report.affectedFiles.length} affected files, ${report.breakingChanges.length} breaking changes.`,
-        });
+    const report = await this.getOrComputeImpact([filePath]);
+    if (!report) return;
 
-        // 고위험 변경 정보를 LLM에 주입
-        const impactPrompt = this.impactAnalyzer.formatForPrompt(report);
-        this.contextManager.addMessage({
-          role: "system",
-          content: impactPrompt,
-        });
-      }
-    } catch {
-      // Impact analysis 실패는 치명적이지 않음
+    if (report.riskLevel === "high" || report.riskLevel === "critical") {
+      this.emitEvent({
+        kind: "agent:thinking",
+        content: `Impact analysis: ${report.riskLevel} risk. ${report.affectedFiles.length} affected files, ${report.breakingChanges.length} breaking changes.`,
+      });
+
+      // 고위험 변경 정보를 LLM에 주입
+      const impactPrompt = this.impactAnalyzer.formatForPrompt(report);
+      this.contextManager.addMessage({
+        role: "system",
+        content: impactPrompt,
+      });
     }
   }
   /**
@@ -3946,9 +4335,10 @@ if (this.sessionPersistence && this.sessionId) {
   private async maybeInjectAggregateImpactHint(): Promise<void> {
     if (!this.impactAnalyzer || this.changedFiles.length < 2) return;
 
-    try {
-      const report = await this.impactAnalyzer.analyzeChanges(this.changedFiles);
+    const report = await this.getOrComputeImpact(this.changedFiles);
+    if (!report) return;
 
+    try {
       const shouldInject =
         report.breakingChanges.length > 0 ||
         report.deadCodeCandidates.length > 0 ||
@@ -4002,7 +4392,8 @@ if (this.sessionPersistence && this.sessionId) {
     if (!this.impactAnalyzer || this.changedFiles.length === 0) return null;
 
     try {
-      const report = await this.impactAnalyzer.analyzeChanges(this.changedFiles);
+      const report = await this.getOrComputeImpact(this.changedFiles);
+      if (!report) return null;
 
       const lines: string[] = [];
       lines.push("Impact summary:");
@@ -4063,6 +4454,47 @@ if (this.sessionPersistence && this.sessionId) {
     const args = this.parseToolArgs(toolCall.arguments);
     return this.mcpClient!.callToolAsYuan(toolCall.name, args, toolCall.id);
   }
+
+  /**
+   * Normalize an MCP tool result for consistent downstream consumption.
+   *
+   * - Search tools (tool name contains "search"): if the output is unstructured text,
+   *   wrap it into a JSON array of `{ title, url, snippet, source }` objects.
+   *   Each non-empty line is treated as a snippet entry when structured data is absent.
+   * - All other tools: pass through unchanged.
+   */
+  private normalizeMcpResult(toolName: string, output: string): string {
+    const isSearch = /search/i.test(toolName);
+    if (!isSearch) return output;
+
+    // If already valid JSON, leave as-is
+    try {
+      JSON.parse(output);
+      return output;
+    } catch {
+      // Not JSON — wrap plain-text lines into structured objects
+    }
+
+    const lines = output
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+    if (lines.length === 0) return output;
+
+    const structured = lines.map((line) => {
+      // Attempt to extract a URL from the line
+      const urlMatch = line.match(/https?:\/\/\S+/);
+      return {
+        title: "",
+        url: urlMatch ? urlMatch[0] : "",
+        snippet: line,
+        source: toolName,
+      };
+    });
+
+    return JSON.stringify(structured, null, 2);
+  }
   /**
    * ContinuousReflection overflow signal을 soft rollover로 처리한다.
    * 절대 abort하지 않고, 체크포인트 저장 후 다음 iteration에서
@@ -4092,6 +4524,7 @@ if (this.sessionPersistence && this.sessionId) {
         // cleanup failure ignored
       }
     }
+    this.traceRecorder?.stop();
   }
 
   // ─── Helpers ───
@@ -4115,6 +4548,8 @@ if (this.sessionPersistence && this.sessionId) {
 
   private emitEvent(event: AgentEvent): void {
     this.emit("event", event);
+    // Trace recording — fire-and-forget, never blocks
+    this.traceRecorder?.record(event);
   }
   private emitReasoning(content: string): void {
     this.reasoningTree.add("reasoning", content);
@@ -4128,6 +4563,12 @@ if (this.sessionPersistence && this.sessionId) {
   private emitSubagent(name: string, phase: "start" | "done", content: string): void {
     this.reasoningTree.add(name, `[${phase}] ${content}`);
     this.emitReasoning(`[${name}:${phase}] ${content}`);
+    // Route subagent events to task panel via proper events
+    if (phase === "start") {
+      this.emitEvent({ kind: "agent:subagent_phase", taskId: name, phase: content });
+    } else {
+      this.emitEvent({ kind: "agent:subagent_done", taskId: name, success: !content.includes("failed") });
+    }
   }
   private handleFatalError(err: unknown): AgentTermination {
     const message = err instanceof Error ? err.message : String(err);
@@ -4142,4 +4583,237 @@ if (this.sessionPersistence && this.sessionId) {
 
     return { reason: "ERROR", error: message };
   }
+
+  // ─── Task phase transitions ───────────────────────────────────────────────
+
+  /**
+   * Deterministic phase transition — no LLM involved.
+   * Emits agent:phase_transition event for TUI trace.
+   */
+  private transitionPhase(to: TaskPhase, trigger: string): void {
+    if (this.taskPhase === to) return;
+    const from = this.taskPhase;
+    this.taskPhase = to;
+    this.emitEvent({
+      kind: "agent:phase_transition",
+      from,
+      to,
+      iteration: this.iterationCount,
+      trigger,
+    });
+    this.emitReasoning(`phase: ${from} → ${to} (${trigger})`);
+  }
+
+  /**
+   * Cheap local checks run in verify phase — no LLM.
+   * Returns true if all checks pass (safe to advance to finalize).
+   */
+  private async runCheapChecks(): Promise<boolean> {
+    const projectPath = this.config.loop.projectPath;
+
+    // 1. Diff size check — if nothing changed, skip
+    if (this.changedFiles.length === 0) return true;
+
+    // 2. File existence check — all changedFiles should exist
+    const { existsSync } = await import("node:fs");
+    for (const f of this.changedFiles) {
+      const abs = projectPath ? `${projectPath}/${f}` : f;
+      if (f.startsWith("/") ? !existsSync(f) : !existsSync(abs)) {
+        this.emitReasoning(`cheap check: file missing: ${f}`);
+        return false;
+      }
+    }
+
+    // 3. Fast syntax check — tsc --noEmit --skipLibCheck only on changed TS files
+    const tsFiles = this.changedFiles.filter(f => /\.[cm]?tsx?$/.test(f));
+    if (tsFiles.length > 0 && projectPath) {
+      try {
+        const result = await this.toolExecutor.execute({
+          id: `cheap-tsc-${Date.now()}`,
+          name: "shell_exec",
+          arguments: JSON.stringify({
+            command: `npx tsc --noEmit --skipLibCheck 2>&1 | head -20 || true`,
+            cwd: projectPath,
+            timeout: 30000,
+          }),
+        });
+        if (result.success && result.output) {
+          const hasErrors = result.output.includes(": error TS");
+          if (hasErrors) {
+            this.emitReasoning(`cheap check: tsc errors found, staying in verify`);
+            // Inject TS errors so LLM sees them and fixes them
+            if (this.iterationSystemMsgCount < 5) {
+              const truncated = result.output.length > 1000
+                ? result.output.slice(0, 1000) + "\n[truncated]"
+                : result.output;
+              this.contextManager.addMessage({
+                role: "system",
+                content: `[Verify Phase] TypeScript errors found:\n\`\`\`\n${truncated}\n\`\`\`\nPlease fix before completion.`,
+              });
+              this.iterationSystemMsgCount++;
+            }
+            return false;
+          }
+        }
+      } catch {
+        // cheap check failure is non-fatal — allow finalize
+      }
+    }
+
+    return true;
+  }
+
+  // ─── Evidence Report ───────────────────────────────────────────────────────
+
+  /**
+   * After a file write/edit, collect diff stats + syntax signal and emit
+   * `agent:evidence_report`. Runs async and never blocks the main loop.
+   */
+  private async emitEvidenceReport(
+    filePath: string,
+    tool: "file_write" | "file_edit",
+  ): Promise<void> {
+    const timestamp = Date.now();
+    const projectPath = this.config.loop.projectPath;
+
+    // 1. Diff stats via git diff --stat
+    let diffStats: { added: number; removed: number } | null = null;
+    try {
+      const diffResult = await this.toolExecutor.execute({
+        id: `evidence-diff-${timestamp}`,
+        name: "shell_exec",
+        arguments: JSON.stringify({
+          command: `git diff --numstat HEAD -- "${filePath}" 2>/dev/null || echo "0\t0\t${filePath}"`,
+          cwd: projectPath ?? ".",
+          timeout: 5000,
+        }),
+      });
+      if (diffResult.success && diffResult.output) {
+        const match = diffResult.output.match(/^(\d+)\s+(\d+)/m);
+        if (match) {
+          diffStats = { added: parseInt(match[1], 10), removed: parseInt(match[2], 10) };
+        }
+      }
+    } catch { /* non-fatal */ }
+
+    // 2. Syntax check — skipped here to avoid spawning a duplicate tsc process.
+    // runCheapChecks() already runs tsc at the implement→verify boundary and
+    // the result flows to the QA pipeline. Spawning tsc per-write would
+    // create N parallel tsc processes for bulk refactors.
+    const syntax: "ok" | "error" | "skipped" = "skipped";
+
+    this.emitEvent({
+      kind: "agent:evidence_report",
+      filePath,
+      tool,
+      syntax,
+      diffStats,
+      lintResult: "skipped",
+      timestamp,
+    });
+
+    // If a dep-graph file changed, invalidate arch summary cache
+    const isDepsChange = filePath.includes("package.json") || filePath.includes("tsconfig");
+    if (isDepsChange && this.archSummarizer) {
+      this.archSummarizer.regenerate().catch(() => {/* non-fatal */});
+    }
+  }
+
+  // ─── OverheadGovernor helpers ─────────────────────────────────────────────
+
+  /**
+   * 현재 런타임 상태로 TriggerContext 빌드.
+   */
+  private buildTriggerContext(): TriggerContext {
+    const totalBudget = this.config.loop.totalTokenBudget;
+    return {
+      changedFiles: this.changedFiles,
+      writeCountSinceVerify: this.writeCountSinceVerify,
+      failureCount: this.allToolResults.filter(r => !r.success).length,
+      repeatedErrorSignature: this.repeatedErrorSignature,
+      plannerConfidence: undefined,
+      contextUsageRatio: totalBudget > 0 ? this.tokenUsage.total / totalBudget : 0,
+      riskyWrite: this.changedFiles.some(f =>
+        f.includes("tsconfig") || f.includes("package.json") ||
+        f.endsWith("index.ts") || f.endsWith("index.tsx") || f.includes(".d.ts")
+      ),
+      taskPhase: this.taskPhase,
+      iteration: this.iterationCount,
+      verifyRanThisIteration: this.verifyRanThisIteration,
+      summarizeRanThisIteration: this.summarizeRanThisIteration,
+      llmFixerRunCount: this.llmFixerRunCount,
+    };
+  }
+
+  /**
+   * 반복 에러 시그니처 추적 — 같은 에러가 2번 이상 나오면 repeatedErrorSignature 세팅.
+   */
+  private trackErrorSignature(errorSummary: string): void {
+    const sig = errorSummary.slice(0, 120);
+    if (sig === this._lastErrorSignature) {
+      this._errorSignatureCount++;
+      if (this._errorSignatureCount >= 2) {
+        this.repeatedErrorSignature = sig;
+      }
+    } else {
+      this._lastErrorSignature = sig;
+      this._errorSignatureCount = 1;
+      this.repeatedErrorSignature = undefined;
+    }
+  }
+
+  // ─── Message pruning — GPT recommendation ────────────────────────────────
+
+  private static readonly MAX_MESSAGES = 40;
+  private static readonly PRUNE_KEEP_RECENT = 10;
+
+  /**
+   * 메시지 배열이 MAX_MESSAGES를 초과하면 prune.
+   * 구조: [system] + [task summary] + [last PRUNE_KEEP_RECENT turns]
+   *
+   * "turns" = user/assistant 쌍 (tool messages는 해당 assistant 메시지에 귀속)
+   */
+  private pruneMessagesIfNeeded(): void {
+    const msgs = this.contextManager.getMessages();
+    if (msgs.length <= AgentLoop.MAX_MESSAGES) return;
+
+    const system = msgs.filter(m => m.role === "system");
+    const nonSystem = msgs.filter(m => m.role !== "system");
+
+    // last N non-system messages 유지
+    const keep = nonSystem.slice(-AgentLoop.PRUNE_KEEP_RECENT);
+    // pruned 범위에서 task summary 추출 (user 메시지 첫 번째)
+    const pruned = nonSystem.slice(0, nonSystem.length - AgentLoop.PRUNE_KEEP_RECENT);
+    const userGoals = pruned
+      .filter(m => m.role === "user")
+      .map(m => typeof m.content === "string" ? m.content.slice(0, 200) : "")
+      .filter(Boolean)
+      .slice(0, 3);
+
+    const summaryContent = userGoals.length > 0
+      ? `[Context pruned — earlier goals: ${userGoals.join(" | ")}]`
+      : `[Context pruned — ${pruned.length} older messages removed]`;
+
+    const summary = [{ role: "system" as const, content: summaryContent }];
+
+    // contextManager 재구성 (system + summary + recent)
+    this.contextManager.clear();
+    for (const m of [...system, ...summary, ...keep]) {
+      this.contextManager.addMessage(m);
+    }
+  }
+}
+
+// ─── Phase 4: TrustEconomics helper ─────────────────────────────────────────
+
+function toolNameToActionClass(name: string): ActionClass | null {
+  if (name === "file_read") return "file_read";
+  if (name === "file_write") return "file_write";
+  if (name === "file_edit") return "file_edit";
+  if (name === "file_delete") return "file_delete";
+  if (name === "shell_exec") return "shell_exec_risky"; // conservative default
+  if (name === "git_read" || name === "git_log" || name === "git_blame") return "git_read";
+  if (name === "git_commit" || name === "git_push" || name === "git_stash") return "git_write";
+  if (name.startsWith("mcp_")) return "mcp_call";
+  return null;
 }

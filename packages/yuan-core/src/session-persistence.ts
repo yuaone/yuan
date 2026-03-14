@@ -168,7 +168,7 @@ export class SessionPersistence {
     // 병렬 저장 — 기본 데이터
     const writes: Promise<void>[] = [
       this.writeJson(path.join(sessionDir, "state.json"), data.snapshot),
-      this.writeJson(path.join(sessionDir, "messages.json"), data.messages),
+      this.writeJson(path.join(sessionDir, "messages.json"), SessionPersistence.trimMessagesForSave(data.messages)),
       this.writeJson(path.join(sessionDir, "plan.json"), data.plan),
     ];
 
@@ -441,7 +441,7 @@ if (checkpoint.changedFiles) {
     }
     if (partial.messages !== undefined) {
       writes.push(
-        this.writeJson(path.join(sessionDir, "messages.json"), partial.messages),
+        this.writeJson(path.join(sessionDir, "messages.json"), SessionPersistence.trimMessagesForSave(partial.messages)),
       );
     }
     if (partial.plan !== undefined) {
@@ -591,10 +591,24 @@ if (checkpoint.changedFiles) {
     const tmpPath = `${filePath}.${suffix}.tmp`;
     await fs.promises.writeFile(
       tmpPath,
-      JSON.stringify(data, null, 2),
+      JSON.stringify(data),  // no pretty-print — 3x smaller, prevents OOM on large message arrays
       "utf-8",
     );
     await fs.promises.rename(tmpPath, filePath);
+  }
+
+  /**
+   * Trim tool result messages before saving to disk.
+   * Tool outputs (file reads, grep, bash) can be hundreds of MB — cap at 4KB each.
+   */
+  static trimMessagesForSave(messages: Message[]): Message[] {
+    const MAX_TOOL_CONTENT = 4096;
+    return messages.map(msg => {
+      if (msg.role !== "tool") return msg;
+      const content = typeof msg.content === "string" ? msg.content : "";
+      if (content.length <= MAX_TOOL_CONTENT) return msg;
+      return { ...msg, content: content.slice(0, MAX_TOOL_CONTENT) + "\n[truncated for checkpoint]" };
+    });
   }
 
   private async readJson<T>(filePath: string): Promise<T | null> {

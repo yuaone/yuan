@@ -474,6 +474,11 @@ export class SandboxManager extends EventEmitter {
   /**
    * Check if reading a file is allowed under the current tier.
    *
+   * File reads are intentionally permissive: the agent needs to read files in
+   * sibling directories (e.g. `../other-package`) to understand monorepo context.
+   * Only system paths (/etc, /proc, /sys, /dev, /boot, /root) are blocked.
+   * Write operations remain project-scoped.
+   *
    * @param filePath - Absolute or relative file path
    * @returns true if the read is allowed
    */
@@ -485,13 +490,21 @@ export class SandboxManager extends EventEmitter {
       return false;
     }
 
-    // All tiers that allow reads can read any file in the project
-    const normalized = this.normalizePath(filePath);
-    if (!normalized.startsWith(this.config.projectPath)) {
+    // Resolve the path to check for system directory access
+    const normalized = path.isAbsolute(filePath)
+      ? path.resolve(filePath)
+      : path.resolve(this.config.projectPath, filePath);
+
+    // Block known dangerous system paths — but allow sibling directories
+    const BLOCKED_SYSTEM_DIRS = ["/etc", "/proc", "/sys", "/dev", "/boot", "/root"];
+    const isSystemPath = BLOCKED_SYSTEM_DIRS.some(
+      (dir) => normalized === dir || normalized.startsWith(dir + "/"),
+    );
+    if (isSystemPath) {
       this.recordViolation(
         "file_read",
         filePath,
-        "path is outside project directory",
+        `access to system path blocked: ${normalized}`,
         true,
       );
       return false;

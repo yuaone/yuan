@@ -113,15 +113,18 @@ const help: CommandHandler = (ctx) => {
     "  /exit       — Exit YUAN",
     "",
     "  Extended",
-    "  /cost       — Token usage & estimated cost",
-    "  /compact    — Compress context history",
+    "  /cost       — Show token usage and estimated cost breakdown",
+    "  /compact    — Compress context to save tokens (use when context > 80%)",
     "  /approve    — Approve pending action",
     "  /reject     — Reject pending action",
     "",
     "  Advanced",
     "  /tools      — List available tools",
-    "  /memory     — Show YUAN.md learnings",
+    "  /memory     — Show learned patterns from YUAN.md",
     "  /retry      — Retry last failed action",
+    "  /tip        — Show a rotating usage tip",
+    "  /mcp        — MCP server status and configuration",
+    "  /qa         — QA governor config and status",
     "",
     "  Plugin System",
     "  /plugins    — Plugin management (install/remove/search)",
@@ -1172,6 +1175,292 @@ const skills: CommandHandler = (ctx, args) => {
 };
 
 /* ──────────────────────────────────────────
+   /tip — Rotating usage tips
+────────────────────────────────────────── */
+
+const TIP_LIST: string[] = [
+  [
+    "Tip: What is YUAN?",
+    "  YUAN is an autonomous coding agent that runs in your terminal.",
+    "  It uses LLM tool-use to read/write/edit files, run shell commands,",
+    "  search code, manage git, and browse the web — all without leaving",
+    "  your terminal.",
+    "",
+    "  Key concepts:",
+    "  • BYOK  — bring your own API key (OpenAI, Claude, Gemini, YUA)",
+    "  • Tools — file_read, file_write, shell_exec, grep, glob, git_ops, …",
+    "  • Skills — 35 built-in skills auto-activate based on file types",
+    "  • MCP   — extend with external tools via ~/.yuan/mcp.json",
+    "  • Phases — explore → implement → verify → finalize (auto-tracked)",
+  ].join("\n"),
+
+  [
+    "Tip: YUAN agent phases",
+    "  YUAN automatically transitions between task phases:",
+    "    explore   ◎  reading files, understanding codebase",
+    "    implement ●  writing code, editing files",
+    "    verify    ◷  running checks, QA pipeline",
+    "    finalize  ✦  completing, summarising",
+    "",
+    "  Phase is shown in the footer bar during execution.",
+    "  QA runs automatically in SHADOW mode after each write.",
+    "  AutoTSC checks TypeScript after 2+ files modified.",
+  ].join("\n"),
+
+  [
+    "Tip: MCP server setup",
+    "  Extend YUAN with any MCP server via ~/.yuan/mcp.json:",
+    '  { "servers": [',
+    '    { "name": "fetch", "command": "uvx", "args": ["mcp-server-fetch"] },',
+    '    { "name": "github", "command": "npx",',
+    '      "args": ["-y", "@modelcontextprotocol/server-github"],',
+    '      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxx" } }',
+    "  ] }",
+    "",
+    "  Run /mcp to see all available servers and install commands.",
+  ].join("\n"),
+
+  [
+    "Tip: Slash commands overview",
+    "  /help      — full command list",
+    "  /status    — provider, model, tokens",
+    "  /model     — view or switch model",
+    "  /cost      — token usage & cost",
+    "  /compact   — compress context to save tokens",
+    "  /diff      — changes made this session",
+    "  /memory    — learned patterns (YUAN.md)",
+    "  /skills    — available skills tree",
+    "  /mcp       — MCP server status",
+    "  /tip       — show next tip",
+  ].join("\n"),
+
+  [
+    "Tip: Model switching",
+    "  Switch at any time without restarting:",
+    "  /model anthropic/claude-sonnet-4-6   — Anthropic (recommended)",
+    "  /model openai/gpt-4.1-mini           — Fast + cheap",
+    "  /model google/gemini-2.5-flash       — Google GA",
+    "  /model                               — Show full catalog",
+    "",
+    "  For cost savings: use cheaper models (gpt-4.1-mini, haiku-4.5)",
+    "  for simple tasks; reserve flagship models for complex work.",
+  ].join("\n"),
+
+  [
+    "Tip: Phase-aware workflow",
+    "  YUAN follows a structured 4-phase loop:",
+    "  1. Explore  — read & understand the codebase",
+    "  2. Implement — make changes (tools: write, edit, shell)",
+    "  3. Verify  — lint, build, test",
+    "  4. Finalize — summarize changes, update docs",
+    "",
+    "  Steer with: /mode plan | code | review | test | debug",
+  ].join("\n"),
+
+  [
+    "Tip: Skills system",
+    "  Skills are reusable agent behaviours (slash-invokable):",
+    "  /skills              — list all skills",
+    "  /skills enable <id>  — enable a skill",
+    "  /skills disable <id> — disable a skill",
+    "",
+    "  Built-in skills: code-review, security-scan, test-gen,",
+    "  refactor, debug, plan",
+    "  Plugin skills: install via /plugins install <name>",
+  ].join("\n"),
+
+  [
+    "Tip: Session resume",
+    "  Conversations are saved automatically.",
+    "  Resume the last session:",
+    "    yuan resume",
+    "  Resume a specific session by ID:",
+    "    yuan resume <session-id>",
+    "  List saved sessions:",
+    "    yuan sessions",
+  ].join("\n"),
+
+  [
+    "Tip: Cost saving",
+    "  Tokens cost money — save them with these habits:",
+    "  • /compact when context > 80% (compresses history)",
+    "  • Use cheaper models for simple questions",
+    "    (/model openai/gpt-4.1-mini or anthropic/claude-haiku-4-5-20251001)",
+    "  • Keep prompts focused and specific",
+    "  • /cost to monitor usage during a session",
+  ].join("\n"),
+
+  [
+    "Tip: Approval system",
+    "  Destructive actions (write, shell, git) require approval.",
+    "  During a prompt, you can respond:",
+    "    y       — approve this action once",
+    "    n       — reject this action",
+    "    always  — approve all actions of this type (session)",
+    "",
+    "  Slash commands: /approve  /reject",
+  ].join("\n"),
+
+  [
+    "Tip: Design mode",
+    "  YUAN can interact with a live browser for UI feedback:",
+    "    yuan design",
+    "  Design tools: snapshot, screenshot, navigate, resize,",
+    "  inspect, scroll — all driven by the AI.",
+    "  Requires Playwright (auto-installed on first use).",
+  ].join("\n"),
+
+  [
+    "Tip: Context management",
+    "  Monitor context usage with /status (totalTokens).",
+    "  When context gets large:",
+    "  • /compact  — summarise history (keeps recent messages)",
+    "  • /clear    — start fresh (loses history)",
+    "",
+    "  Auto-compaction triggers at ~60% by default.",
+    "  Use /compact manually when you notice slowdowns.",
+  ].join("\n"),
+];
+
+const tip: CommandHandler = (_ctx, _args) => {
+  const idx = Math.floor(Date.now() / 1000) % TIP_LIST.length;
+  const tipText = TIP_LIST[idx];
+  return {
+    output: [
+      tipText,
+      "",
+      `  (tip ${(idx + 1)}/${TIP_LIST.length} — run /tip again for the next one)`,
+    ].join("\n"),
+  };
+};
+
+/* ──────────────────────────────────────────
+   /mcp — MCP server status
+────────────────────────────────────────── */
+
+const MCP_AVAILABLE = [
+  // Free / no API key
+  { name: "fetch",            free: true,  install: "uvx mcp-server-fetch",                                   desc: "Fetch any URL → clean markdown" },
+  { name: "memory",           free: true,  install: "npx -y @modelcontextprotocol/server-memory",             desc: "Persistent knowledge graph across sessions" },
+  { name: "git",              free: true,  install: "uvx mcp-server-git",                                     desc: "Full git operations via MCP" },
+  { name: "sequentialthinking",free:true,  install: "npx -y @modelcontextprotocol/server-sequential-thinking",desc: "Structured multi-step reasoning" },
+  { name: "playwright",       free: true,  install: "npx -y @playwright/mcp",                                 desc: "Browser automation (Microsoft)" },
+  { name: "filesystem",       free: true,  install: "npx -y @modelcontextprotocol/server-filesystem",         desc: "Extended file ops with configurable paths" },
+  { name: "docker",           free: true,  install: "npx -y mcp-server-docker",                               desc: "Container + image management" },
+  { name: "kubernetes",       free: true,  install: "npx -y mcp-server-kubernetes",                           desc: "K8s cluster control" },
+  // Needs API key
+  { name: "github",           free: false, install: "npx -y @modelcontextprotocol/server-github",             desc: "PR/issue management, code search  (GITHUB_PERSONAL_ACCESS_TOKEN)" },
+  { name: "brave-search",     free: false, install: "npx -y @modelcontextprotocol/server-brave-search",       desc: "Web search  (BRAVE_API_KEY)" },
+  { name: "spider",           free: false, install: "npx -y @willbohn/spider-mcp",                            desc: "Web scraping + search  (SPIDER_API_KEY)" },
+  { name: "semgrep",          free: false, install: "npx -y semgrep-mcp",                                     desc: "SAST security scanning  (SEMGREP_APP_TOKEN)" },
+  { name: "e2b",              free: false, install: "npx -y @e2b/mcp-server",                                 desc: "Isolated cloud code execution  (E2B_API_KEY)" },
+  // Self-hosted
+  { name: "searxng",          free: true,  install: "docker run -p 8080:8080 searxng/searxng",                desc: "Self-hosted multi-engine search (no API key)" },
+];
+
+const mcp: CommandHandler = () => {
+  const mcpConfigPath = path.join(os.homedir(), ".yuan", "mcp.json");
+
+  // ── Loaded servers ──
+  const lines: string[] = ["MCP Servers", `  Config: ${mcpConfigPath.replace(os.homedir(), "~")}`, ""];
+
+  let loadedNames: string[] = [];
+  try {
+    const raw = fs.readFileSync(mcpConfigPath, "utf-8");
+    const parsed = JSON.parse(raw) as { servers?: Array<{ name: string; command?: string; args?: string[] }> };
+    const servers = parsed.servers ?? [];
+    loadedNames = servers.map((s) => s.name);
+    if (servers.length === 0) {
+      lines.push("  Loaded: (none — add servers to ~/.yuan/mcp.json)");
+    } else {
+      lines.push("  Loaded:");
+      servers.forEach((s, i) => {
+        const prefix = i === servers.length - 1 ? "  └──" : "  ├──";
+        const cmd = s.command ? `${s.command} ${(s.args ?? []).join(" ")}`.trim() : "";
+        lines.push(`${prefix} ${s.name}${cmd ? `  — ${cmd}` : ""}`);
+      });
+    }
+  } catch {
+    lines.push("  Loaded: (not configured)");
+  }
+
+  // ── Available to install ──
+  lines.push("", "  Available MCP servers:");
+  lines.push("  (★ = free/no API key)");
+  lines.push("");
+
+  const freeServers = MCP_AVAILABLE.filter((s) => s.free && !loadedNames.includes(s.name));
+  const paidServers = MCP_AVAILABLE.filter((s) => !s.free && !loadedNames.includes(s.name));
+
+  if (freeServers.length > 0) {
+    lines.push("  Free:");
+    freeServers.forEach((s) => {
+      lines.push(`    ★  ${s.name.padEnd(18)} ${s.desc}`);
+      lines.push(`       install: ${s.install}`);
+    });
+  }
+
+  if (paidServers.length > 0) {
+    lines.push("", "  Requires API key:");
+    paidServers.forEach((s) => {
+      lines.push(`       ${s.name.padEnd(18)} ${s.desc}`);
+      lines.push(`       install: ${s.install}`);
+    });
+  }
+
+  // ── Quick setup example ──
+  lines.push(
+    "",
+    "  Quick setup — add to ~/.yuan/mcp.json:",
+    '  { "servers": [',
+    '    { "name": "fetch",  "command": "uvx", "args": ["mcp-server-fetch"] },',
+    '    { "name": "github", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"],',
+    '      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxx" } }',
+    "  ] }",
+    "",
+    "  Restart YUAN after editing to load changes.",
+  );
+
+  return { output: lines.join("\n") };
+};
+
+/* ──────────────────────────────────────────
+   /qa — QA governor status
+────────────────────────────────────────── */
+
+const qa: CommandHandler = (_ctx) => {
+  const lines = [
+    "QA Governor Status",
+    "",
+    "  Subsystems (defaults):",
+    "  ├── lint          SHADOW    (runs, warns only)",
+    "  ├── type-check    SHADOW    (runs, warns only)",
+    "  ├── tests         SHADOW    (runs, warns only)",
+    "  ├── security-scan OFF       (disabled by default)",
+    "  └── build         BLOCKING  (hard-fails on error)",
+    "",
+    "  Mode definitions:",
+    "    BLOCKING  — failure blocks the agent from proceeding",
+    "    SHADOW    — failure logged but agent continues",
+    "    OFF       — subsystem not executed",
+    "",
+    "  To enable BLOCKING mode for a subsystem, add to .yuan/config.json:",
+    "  {",
+    '    "qa": {',
+    '      "lint": "BLOCKING",',
+    '      "type-check": "BLOCKING",',
+    '      "tests": "BLOCKING",',
+    '      "security-scan": "SHADOW"',
+    "    }",
+    "  }",
+    "",
+    "  For QA results from the last run, check .yuan/qa-report.json",
+    "  or run: yuan benchmark report",
+  ];
+  return { output: lines.join("\n") };
+};
+
+/* ──────────────────────────────────────────
    Benchmark
 ────────────────────────────────────────── */
 
@@ -1270,21 +1559,24 @@ export const COMMAND_DEFS: CommandDef[] = [
   { name: "/clear", description: "Clear conversation history", handler: (_ctx) => ({ clear: true }) },
   { name: "/config", description: "Show current configuration", handler: config },
   { name: "/session", description: "Session management", handler: session },
-  { name: "/diff", description: "Show file changes (git diff)", handler: diff },
+  { name: "/diff", description: "Show file changes made this session", handler: diff },
   { name: "/undo", description: "Undo last file change", handler: undo },
   { name: "/model", description: "Show or change model", handler: model },
   { name: "/mode", description: "Show or change agent mode", handler: mode },
   { name: "/settings", description: "Auto-update preferences", handler: settings },
   { name: "/exit", description: "Exit YUAN", aliases: ["/quit", "/q"], handler: () => ({ exit: true }) },
   // Extended (P2)
-  { name: "/cost", description: "Token usage & estimated cost", handler: cost },
-  { name: "/compact", description: "Compress context history", handler: compact },
+  { name: "/cost", description: "Show token usage and estimated cost breakdown", handler: cost },
+  { name: "/compact", description: "Compress context to save tokens (use when context > 80%)", handler: compact },
   { name: "/approve", description: "Approve pending action", handler: approve },
   { name: "/reject", description: "Reject pending action", handler: reject },
   // Advanced (P3)
   { name: "/tools", description: "List available tools", handler: tools },
-  { name: "/memory", description: "Show YUAN.md learnings", handler: memory },
+  { name: "/memory", description: "Show learned patterns from YUAN.md", handler: memory },
   { name: "/retry", description: "Retry last failed action", handler: retry },
+  { name: "/tip", description: "Show a rotating usage tip", handler: tip },
+  { name: "/mcp", description: "MCP server status and configuration", handler: mcp },
+  { name: "/qa", description: "QA governor config and how to enable BLOCKING mode", handler: qa },
   // Plugin System (P4)
   { name: "/plugins", description: "Plugin management (install/remove/search)", handler: plugins },
   { name: "/skills", description: "Available skills (tree view)", aliases: ["/skill"], handler: skills },

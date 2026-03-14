@@ -1,10 +1,17 @@
 /**
- * MarkdownRenderer — markdown to terminal rendering.
- * Handles: bold, italic, inline code, code blocks, headers, lists, tables.
+ * MarkdownRenderer — terminal markdown renderer with lightweight syntax highlighting.
+ * Supports:
+ * - headers
+ * - paragraphs
+ * - unordered / ordered lists
+ * - fenced code blocks
+ * - inline bold / italic / code
+ * - simple tables
  */
 
 import React from "react";
 import { Box, Text } from "ink";
+import stringWidth from "string-width";
 
 export interface MarkdownRendererProps {
   content: string;
@@ -16,18 +23,162 @@ interface RenderedBlock {
   content: string;
   language?: string;
   level?: number;
-  /** List: whether ordered */
   listOrdered?: boolean;
-  /** List: order number for ordered lists */
   listNumber?: string;
-  /** List: text content after marker */
   listText?: string;
-  /** List: nesting depth (0 = top level) */
   listDepth?: number;
-  /** Table data: rows of cells */
   tableRows?: string[][];
-  /** Table column alignments */
   tableAligns?: ("left" | "center" | "right")[];
+}
+
+interface CodeToken {
+  text: string;
+  color?: string;
+  dimColor?: boolean;
+  bold?: boolean;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function clipDisplay(text: string, maxWidth: number): string {
+  if (stringWidth(text) <= maxWidth) return text;
+
+  let out = "";
+  let width = 0;
+
+  for (const ch of text) {
+    const w = stringWidth(ch);
+    if (width + w >= maxWidth) break;
+    out += ch;
+    width += w;
+  }
+
+  return out + "…";
+}
+
+function padDisplay(text: string, width: number, align: "left" | "center" | "right"): string {
+  const textWidth = stringWidth(text);
+  const pad = Math.max(0, width - textWidth);
+
+  if (align === "right") return " ".repeat(pad) + text;
+  if (align === "center") {
+    const left = Math.floor(pad / 2);
+    return " ".repeat(left) + text + " ".repeat(pad - left);
+  }
+  return text + " ".repeat(pad);
+}
+
+function getKeywords(language?: string): string[] {
+  const lang = (language ?? "").toLowerCase();
+
+  if (["ts", "tsx", "js", "jsx", "javascript", "typescript"].includes(lang)) {
+    return [
+      "const", "let", "var", "function", "return", "if", "else", "switch", "case",
+      "for", "while", "break", "continue", "try", "catch", "finally", "throw",
+      "import", "from", "export", "default", "async", "await", "class", "extends",
+      "new", "typeof", "instanceof", "true", "false", "null", "undefined",
+      "interface", "type", "implements",
+    ];
+  }
+
+  if (["py", "python"].includes(lang)) {
+    return [
+      "def", "return", "if", "elif", "else", "for", "while", "break", "continue",
+      "try", "except", "finally", "raise", "class", "import", "from", "as",
+      "True", "False", "None", "async", "await", "with", "pass",
+    ];
+  }
+
+  if (["sh", "bash", "zsh", "shell"].includes(lang)) {
+    return [
+      "if", "then", "else", "fi", "for", "in", "do", "done", "case", "esac",
+      "function", "export", "local", "return",
+    ];
+  }
+
+  if (["json"].includes(lang)) {
+    return ["true", "false", "null"];
+  }
+
+  return [];
+}
+
+function tokenizeCodeLine(line: string, language?: string): CodeToken[] {
+  const keywords = getKeywords(language);
+  const keywordPattern = keywords.length
+    ? `\\b(?:${keywords.map(escapeRegExp).join("|")})\\b`
+    : "$^";
+
+  const tokenPattern = new RegExp(
+    "(//.*$|#.*$|\"(?:\\\\.|[^\"])*\"|'(?:\\\\.|[^'])*'|`(?:\\\\.|[^`])*`|" +
+      keywordPattern +
+      "|\\b\\d+(?:\\.\\d+)?\\b)",
+    "g",
+  );
+
+  const tokens: CodeToken[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = tokenPattern.exec(line)) !== null) {
+    if (match.index > lastIndex) {
+      tokens.push({ text: line.slice(lastIndex, match.index) });
+    }
+
+    const value = match[0];
+
+    if (value.startsWith("//") || value.startsWith("#")) {
+      tokens.push({ text: value, dimColor: true });
+    } else if (
+      value.startsWith("\"") ||
+      value.startsWith("'") ||
+      value.startsWith("`")
+    ) {
+      tokens.push({ text: value, color: "green" });
+    } else if (/^\d/.test(value)) {
+      tokens.push({ text: value, color: "yellow" });
+    } else {
+      tokens.push({ text: value, color: "cyan", bold: true });
+    }
+
+    lastIndex = match.index + value.length;
+  }
+
+  if (lastIndex < line.length) {
+    tokens.push({ text: line.slice(lastIndex) });
+  }
+
+  return tokens.length ? tokens : [{ text: line }];
+}
+
+function CodeLine({
+  line,
+  language,
+  width,
+}: {
+  line: string;
+  language?: string;
+  width: number;
+}): React.JSX.Element {
+  const clipped = clipDisplay(line, width);
+  const tokens = tokenizeCodeLine(clipped, language);
+
+  return (
+    <Text>
+      {tokens.map((token, i) => (
+        <Text
+          key={`${i}-${token.text}`}
+          color={token.color}
+          bold={token.bold}
+          dimColor={token.dimColor}
+        >
+          {token.text}
+        </Text>
+      ))}
+    </Text>
+  );
 }
 
 function parseBlocks(content: string): RenderedBlock[] {
@@ -36,51 +187,56 @@ function parseBlocks(content: string): RenderedBlock[] {
   let i = 0;
 
   while (i < lines.length) {
-    const line = lines[i];
+    const line = lines[i] ?? "";
 
-    // Code block (fenced)
     if (line.startsWith("```")) {
       const language = line.slice(3).trim();
       const codeLines: string[] = [];
-      i++;
-      while (i < lines.length && !lines[i].startsWith("```")) {
-        codeLines.push(lines[i]);
-        i++;
+      i += 1;
+
+      while (i < lines.length && !(lines[i] ?? "").startsWith("```")) {
+        codeLines.push(lines[i] ?? "");
+        i += 1;
       }
-      blocks.push({ type: "code", content: codeLines.join("\n"), language });
-      i++; // skip closing ```
+
+      blocks.push({
+        type: "code",
+        content: codeLines.join("\n"),
+        language,
+      });
+
+      i += 1;
       continue;
     }
 
-    // Table detection: current line has |, next line is separator (|---|)
-    if (line.includes("|") && i + 1 < lines.length && /^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(lines[i + 1])) {
-      const tableLines: string[] = [];
-      // Collect header
-      tableLines.push(line);
-      // Collect separator
-      tableLines.push(lines[i + 1]);
+    if (
+      line.includes("|") &&
+      i + 1 < lines.length &&
+      /^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(lines[i + 1] ?? "")
+    ) {
+      const tableLines: string[] = [line, lines[i + 1] ?? ""];
       i += 2;
-      // Collect body rows
-      while (i < lines.length && lines[i].includes("|") && lines[i].trim() !== "") {
-        tableLines.push(lines[i]);
-        i++;
+
+      while (i < lines.length && (lines[i] ?? "").includes("|") && (lines[i] ?? "").trim() !== "") {
+        tableLines.push(lines[i] ?? "");
+        i += 1;
       }
 
-      const parsedTable = parseTable(tableLines);
-      if (parsedTable) {
+      const parsed = parseTable(tableLines);
+      if (parsed) {
         blocks.push({
           type: "table",
           content: tableLines.join("\n"),
-          tableRows: parsedTable.rows,
-          tableAligns: parsedTable.aligns,
+          tableRows: parsed.rows,
+          tableAligns: parsed.aligns,
         });
       } else {
         blocks.push({ type: "paragraph", content: tableLines.join("\n") });
       }
+
       continue;
     }
 
-    // Header
     const headerMatch = line.match(/^(#{1,6})\s+(.+)/);
     if (headerMatch) {
       blocks.push({
@@ -88,105 +244,119 @@ function parseBlocks(content: string): RenderedBlock[] {
         content: headerMatch[2],
         level: headerMatch[1].length,
       });
-      i++;
+      i += 1;
       continue;
     }
 
-    // List item (unordered)
     const ulMatch = line.match(/^(\s*)[-*+]\s(.*)$/);
     if (ulMatch) {
-      const depth = Math.floor(ulMatch[1].length / 2);
-      blocks.push({ type: "list", content: line, listOrdered: false, listText: ulMatch[2], listDepth: depth });
-      i++;
+      blocks.push({
+        type: "list",
+        content: line,
+        listOrdered: false,
+        listText: ulMatch[2],
+        listDepth: Math.floor(ulMatch[1].length / 2),
+      });
+      i += 1;
       continue;
     }
 
-    // List item (ordered)
     const olMatch = line.match(/^(\s*)(\d+)\.\s(.*)$/);
     if (olMatch) {
-      const depth = Math.floor(olMatch[1].length / 2);
-      blocks.push({ type: "list", content: line, listOrdered: true, listNumber: olMatch[2], listText: olMatch[3], listDepth: depth });
-      i++;
+      blocks.push({
+        type: "list",
+        content: line,
+        listOrdered: true,
+        listNumber: olMatch[2],
+        listText: olMatch[3],
+        listDepth: Math.floor(olMatch[1].length / 2),
+      });
+      i += 1;
       continue;
     }
 
-    // Blank line
     if (line.trim() === "") {
       blocks.push({ type: "blank", content: "" });
-      i++;
+      i += 1;
       continue;
     }
 
-    // Paragraph — collect consecutive non-special lines
     const paraLines: string[] = [line];
-    i++;
+    i += 1;
+
     while (
       i < lines.length &&
-      lines[i].trim() !== "" &&
-      !lines[i].startsWith("```") &&
-      !lines[i].match(/^#{1,6}\s/) &&
-      !/^\s*[-*+]\s/.test(lines[i]) &&
-      !/^\s*\d+\.\s/.test(lines[i]) &&
-      // Don't eat table rows into paragraph
-      !(lines[i].includes("|") && i + 1 < lines.length && /^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(lines[i + 1]))
+      (lines[i] ?? "").trim() !== "" &&
+      !(lines[i] ?? "").startsWith("```") &&
+      !/^#{1,6}\s/.test(lines[i] ?? "") &&
+      !/^\s*[-*+]\s/.test(lines[i] ?? "") &&
+      !/^\s*\d+\.\s/.test(lines[i] ?? "") &&
+      !(
+        (lines[i] ?? "").includes("|") &&
+        i + 1 < lines.length &&
+        /^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(lines[i + 1] ?? "")
+      )
     ) {
-      paraLines.push(lines[i]);
-      i++;
+      paraLines.push(lines[i] ?? "");
+      i += 1;
     }
-    blocks.push({ type: "paragraph", content: paraLines.join("\n") });
+
+    blocks.push({
+      type: "paragraph",
+      content: paraLines.join("\n"),
+    });
   }
 
-  // Post-process: insert blank line before top-level ordered list items (section headers)
-  // so sections like "1. foo ... 2. bar ... 3. baz" get breathing room
   const processed: RenderedBlock[] = [];
-  for (let i = 0; i < blocks.length; i++) {
-    const block = blocks[i];
+  for (let j = 0; j < blocks.length; j += 1) {
+    const block = blocks[j]!;
     const prev = processed[processed.length - 1];
+
     if (
       block.type === "list" &&
       block.listOrdered &&
       (block.listDepth ?? 0) === 0 &&
-      i > 0 &&
       prev &&
       prev.type !== "blank"
     ) {
       processed.push({ type: "blank", content: "" });
     }
+
     processed.push(block);
   }
+
   return processed;
 }
 
-/** Parse markdown table lines into rows and alignments */
-function parseTable(lines: string[]): { rows: string[][]; aligns: ("left" | "center" | "right")[] } | null {
+function parseTable(
+  lines: string[],
+): { rows: string[][]; aligns: ("left" | "center" | "right")[] } | null {
   if (lines.length < 2) return null;
 
   const parseRow = (line: string): string[] => {
-    // Strip leading/trailing pipes and split
     const trimmed = line.replace(/^\|/, "").replace(/\|$/, "");
     return trimmed.split("|").map((cell) => cell.trim());
   };
 
-  const header = parseRow(lines[0]);
-  const separatorCells = parseRow(lines[1]);
+  const header = parseRow(lines[0] ?? "");
+  const separator = parseRow(lines[1] ?? "");
 
-  // Parse alignments from separator row
-  const aligns: ("left" | "center" | "right")[] = separatorCells.map((cell) => {
-    const s = cell.trim();
-    if (s.startsWith(":") && s.endsWith(":")) return "center";
-    if (s.endsWith(":")) return "right";
+  if (header.length === 0 || separator.length === 0) return null;
+
+  const aligns: ("left" | "center" | "right")[] = separator.map((cell) => {
+    if (cell.startsWith(":") && cell.endsWith(":")) return "center";
+    if (cell.endsWith(":")) return "right";
     return "left";
   });
 
   const rows: string[][] = [header];
-  for (let i = 2; i < lines.length; i++) {
-    rows.push(parseRow(lines[i]));
+  for (let i = 2; i < lines.length; i += 1) {
+    rows.push(parseRow(lines[i] ?? ""));
   }
 
   return { rows, aligns };
 }
 
-/** Render inline formatting: **bold**, *italic*, `code` */
 function InlineText({ text }: { text: string }): React.JSX.Element {
   const parts: React.JSX.Element[] = [];
   const regex = /(\*\*(.+?)\*\*|\*(.+?)\*|`([^`]+)`)/g;
@@ -200,11 +370,25 @@ function InlineText({ text }: { text: string }): React.JSX.Element {
     }
 
     if (match[2]) {
-      parts.push(<Text key={key++} bold>{match[2]}</Text>);
+      parts.push(
+        <Text key={key++} bold color="white">
+          {match[2]}
+        </Text>,
+      );
     } else if (match[3]) {
-      parts.push(<Text key={key++} dimColor>{match[3]}</Text>);
+      parts.push(
+        <Text key={key++} dimColor>
+          {match[3]}
+        </Text>,
+      );
     } else if (match[4]) {
-      parts.push(<Text key={key++} color="white" backgroundColor="#1a1a1a"> {match[4]} </Text>);
+      parts.push(
+        <Text key={key++} color="white" backgroundColor="#1f2937">
+          {" "}
+          {match[4]}
+          {" "}
+        </Text>,
+      );
     }
 
     lastIndex = match.index + match[0].length;
@@ -214,72 +398,58 @@ function InlineText({ text }: { text: string }): React.JSX.Element {
     parts.push(<Text key={key++}>{text.slice(lastIndex)}</Text>);
   }
 
-  if (parts.length === 0) {
-    return <Text>{text}</Text>;
-  }
-
   return <Text>{parts}</Text>;
 }
 
-/** Render a markdown table with box-drawing borders */
-function TableBlock({ rows, aligns, width }: { rows: string[][]; aligns: ("left" | "center" | "right")[]; width: number }): React.JSX.Element {
+function TableBlock({
+  rows,
+  aligns,
+  width,
+}: {
+  rows: string[][];
+  aligns: ("left" | "center" | "right")[];
+  width: number;
+}): React.JSX.Element {
   if (rows.length === 0) return <Box />;
 
-  const numCols = Math.max(...rows.map((r) => r.length));
-  // Compute column widths: max content width per column, capped by available space
+  const numCols = Math.max(...rows.map((row) => row.length));
+  const usableWidth = Math.max(20, width - (numCols + 1));
   const colWidths: number[] = [];
-  for (let c = 0; c < numCols; c++) {
-    let maxW = 0;
+
+  for (let c = 0; c < numCols; c += 1) {
+    let maxW = 3;
     for (const row of rows) {
-      const cell = row[c] || "";
-      maxW = Math.max(maxW, cell.length);
+      maxW = Math.max(maxW, stringWidth(row[c] ?? ""));
     }
-    colWidths.push(Math.min(maxW, Math.max(6, Math.floor((width - numCols * 3 - 1) / numCols))));
+    colWidths.push(Math.min(maxW, Math.max(6, Math.floor(usableWidth / numCols) - 2)));
   }
 
-  // Pad/truncate cell content
-  const padCell = (text: string, colIdx: number): string => {
-    const w = colWidths[colIdx] || 6;
-    if (text.length > w) return text.slice(0, w - 1) + "…";
-    const align = aligns[colIdx] || "left";
-    if (align === "right") return text.padStart(w);
-    if (align === "center") {
-      const pad = w - text.length;
-      const left = Math.floor(pad / 2);
-      return " ".repeat(left) + text + " ".repeat(pad - left);
-    }
-    return text.padEnd(w);
+  const top = `┌${colWidths.map((w) => "─".repeat(w + 2)).join("┬")}┐`;
+  const mid = `├${colWidths.map((w) => "─".repeat(w + 2)).join("┼")}┤`;
+  const bot = `└${colWidths.map((w) => "─".repeat(w + 2)).join("┴")}┘`;
+
+  const renderRow = (row: string[]) => {
+    const cells = colWidths.map((colWidth, idx) => {
+      const clipped = clipDisplay(row[idx] ?? "", colWidth);
+      const padded = padDisplay(clipped, colWidth, aligns[idx] ?? "left");
+      return ` ${padded} `;
+    });
+
+    return `│${cells.join("│")}│`;
   };
 
-  // Build border lines
-  const hLine = colWidths.map((w) => "─".repeat(w + 2)).join("┼");
-  const topBorder = "┌" + colWidths.map((w) => "─".repeat(w + 2)).join("┬") + "┐";
-  const midBorder = "├" + hLine + "┤";
-  const botBorder = "└" + colWidths.map((w) => "─".repeat(w + 2)).join("┴") + "┘";
-
-  const renderRow = (row: string[], rowIdx: number): string => {
-    const cells = [];
-    for (let c = 0; c < numCols; c++) {
-      cells.push(` ${padCell(row[c] || "", c)} `);
-    }
-    return "│" + cells.join("│") + "│";
-  };
-
-  const outputLines: string[] = [];
-  outputLines.push(topBorder);
-  // Header row
-  outputLines.push(renderRow(rows[0], 0));
-  outputLines.push(midBorder);
-  // Body rows
-  for (let r = 1; r < rows.length; r++) {
-    outputLines.push(renderRow(rows[r], r));
+  const out: string[] = [top, renderRow(rows[0] ?? []), mid];
+  for (let i = 1; i < rows.length; i += 1) {
+    out.push(renderRow(rows[i] ?? []));
   }
-  outputLines.push(botBorder);
+  out.push(bot);
 
   return (
-    <Box flexDirection="column" marginBottom={0}>
-      {outputLines.map((line, i) => (
-        <Text key={i} dimColor>{line}</Text>
+    <Box flexDirection="column" marginBottom={1}>
+      {out.map((line, i) => (
+        <Text key={i} dimColor>
+          {line}
+        </Text>
       ))}
     </Box>
   );
@@ -288,45 +458,37 @@ function TableBlock({ rows, aligns, width }: { rows: string[][]; aligns: ("left"
 function renderBlock(block: RenderedBlock, idx: number, width: number): React.JSX.Element {
   switch (block.type) {
     case "header": {
-      const level = block.level || 1;
-      if (level === 1) {
-        return (
-          <Box key={idx} flexDirection="column" marginBottom={1}>
-            <Text bold color="white">
-              {block.content}
-            </Text>
-          </Box>
-        );
-      } else if (level === 2) {
-        return (
-          <Box key={idx} marginTop={1} marginBottom={0}>
-            <Text bold color="white">
-              {block.content}
-            </Text>
-          </Box>
-        );
-      } else {
-        return (
-          <Box key={idx} marginTop={1} marginBottom={0}>
-            <Text bold dimColor>
-              {block.content}
-            </Text>
-          </Box>
-        );
-      }
+      const level = block.level ?? 1;
+      const color = level <= 2 ? "white" : "gray";
+
+      return (
+        <Box
+          key={idx}
+          flexDirection="column"
+          marginTop={level === 1 ? 1 : 0}
+          marginBottom={1}
+        >
+          <Text bold color={color}>
+            {block.content}
+          </Text>
+        </Box>
+      );
     }
 
     case "code": {
-      const maxW = Math.max(10, width - 6);
+      const maxW = Math.max(10, width - 4);
+      const lines = block.content.split("\n");
+
       return (
-        <Box key={idx} flexDirection="column" marginLeft={2} marginBottom={0}>
-          {block.language && (
+        <Box key={idx} flexDirection="column" marginLeft={1} marginBottom={1}>
+          {block.language ? (
             <Text dimColor>{block.language}</Text>
-          )}
-          {block.content.split("\n").map((line, i) => (
+          ) : null}
+
+          {lines.map((line, i) => (
             <Text key={i}>
-              <Text dimColor>{"│ "}</Text>
-              <Text color="white">{line.length > maxW ? line.slice(0, maxW - 1) + "…" : line}</Text>
+              <Text dimColor>│ </Text>
+              <CodeLine line={line} language={block.language} width={maxW} />
             </Text>
           ))}
         </Box>
@@ -335,53 +497,49 @@ function renderBlock(block: RenderedBlock, idx: number, width: number): React.JS
 
     case "table":
       return (
-        <Box key={idx}>
-          <TableBlock
-            rows={block.tableRows || []}
-            aligns={block.tableAligns || []}
-            width={width}
-          />
-        </Box>
+        <TableBlock
+          key={idx}
+          rows={block.tableRows ?? []}
+          aligns={block.tableAligns ?? []}
+          width={width}
+        />
       );
 
     case "list": {
-      const depth = block.listDepth || 0;
-      const indent = "  " + "  ".repeat(depth);
-      if (block.listOrdered) {
-        return (
-          <Box key={idx}>
-            <Text>
-              {indent}<Text dimColor>{block.listNumber}.</Text>{" "}
-            </Text>
-            <InlineText text={block.listText || ""} />
-          </Box>
-        );
-      } else {
-        return (
-          <Box key={idx}>
-            <Text>
-              {indent}<Text dimColor>{"─"}</Text>{" "}
-            </Text>
-            <InlineText text={block.listText || ""} />
-          </Box>
-        );
-      }
+      const depth = block.listDepth ?? 0;
+      const indent = "  ".repeat(depth);
+
+      return (
+        <Box key={idx} marginBottom={0}>
+          <Text>
+            {indent}
+            <Text dimColor>{block.listOrdered ? `${block.listNumber}.` : "─"}</Text>
+            {" "}
+          </Text>
+          <InlineText text={block.listText ?? ""} />
+        </Box>
+      );
     }
 
     case "blank":
       return <Box key={idx} height={1} />;
 
     case "paragraph":
-    default:
+    default: {
+      const lines = block.content.split("\n");
+
       return (
-        <Box key={idx} marginBottom={1}>
-          <InlineText text={block.content} />
+        <Box key={idx} flexDirection="column" marginBottom={1}>
+          {lines.map((line, lineIdx) => (
+            <InlineText key={lineIdx} text={line} />
+          ))}
         </Box>
       );
+    }
   }
 }
 
-export function MarkdownRenderer({
+export const MarkdownRenderer = React.memo(function MarkdownRenderer({
   content,
   width,
 }: MarkdownRendererProps): React.JSX.Element {
@@ -392,4 +550,4 @@ export function MarkdownRenderer({
       {blocks.map((block, i) => renderBlock(block, i, width))}
     </Box>
   );
-}
+});

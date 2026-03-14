@@ -343,6 +343,9 @@ ${toolList}
 - **Know a string in the file?** → Use \`grep\` with the pattern.
 - **Know a function/class name?** → Use \`code_search\` with mode "definition" or "reference".
 - **Exploring an unfamiliar codebase?** → Start with \`glob("**/*.{ts,tsx}")\` then \`file_read\` key files.
+- **Exploring a sibling/parent directory?** → Use \`glob\` with the \`path\` parameter (e.g., \`glob(pattern="**", path="../other-package")\`).
+
+> **CRITICAL: Never use \`find\` as a shell command.** The \`find\` Unix binary is unreliable in this environment — it may complete in 0.0s with no output or silently fail. For ALL file discovery and listing tasks, use the \`glob\` tool instead. It is faster, sandboxed, and works correctly with sibling directories via the \`path\` parameter.
 
 ## Anti-Patterns (Avoid These)
 - Don't edit a file without reading it first.

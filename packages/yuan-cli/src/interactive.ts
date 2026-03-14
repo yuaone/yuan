@@ -7,6 +7,9 @@
  */
 
 import * as readline from "node:readline";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import { execSync } from "node:child_process";
 import { TerminalRenderer, colors } from "./renderer.js";
 import { SessionManager, type SessionData } from "./session.js";
 import { ConfigManager } from "./config.js";
@@ -14,11 +17,14 @@ import {
   AgentLoop,
   BYOKClient,
   DEFAULT_LOOP_CONFIG,
+  OverheadGovernor,
+  PatchTournamentExecutor,
   type AgentEvent,
   type AgentConfig,
   type BYOKConfig,
   type ApprovalRequest,
   type ApprovalResponse,
+  type RunAgentCallback,
 } from "@yuaone/core";
 import { createDefaultRegistry } from "@yuaone/tools";
 import { CloudClient, type AgentEvent as CloudAgentEvent } from "./cloud-client.js";
@@ -43,6 +49,8 @@ export class InteractiveSession {
   private isStreaming = false;
   /** Track files changed during the session for /diff and /undo */
   private changedFiles: string[] = [];
+  /** MCP search tool names discovered from mcp.json (for ResearchAgent) */
+  private mcpSearchToolNames: string[] = [];
 
   constructor(
     renderer: TerminalRenderer,
@@ -421,13 +429,34 @@ export class InteractiveSession {
       },
     };
 
+    // Load optional MCP servers from ~/.yuan/mcp.json
+    const mcpServers = this.configManager.loadMcpServers();
+
+    // Load policy overrides from ~/.yuan/policy.json (e.g. enable research/tournament)
+    const policyPath = join(homedir(), ".yuan", "policy.json");
+    const policyOverrides = OverheadGovernor.loadFromFile(policyPath);
+
+    // Extract MCP search tool names for ResearchAgent (stored for external use).
+    // mcp.json may optionally include a "tools" array per server (not in the base type).
+    this.mcpSearchToolNames = mcpServers
+      .flatMap(s => ((s as unknown as { tools?: string[] }).tools) ?? [])
+      .filter(name => /search|fetch|web|browse/i.test(name));
+
     // Create and run AgentLoop with approval handler
     const loop = new AgentLoop({
       config: agentConfig,
       toolExecutor,
       governorConfig: { planTier: "LOCAL" },
+      overheadGovernorConfig: Object.keys(policyOverrides).length > 0 ? policyOverrides : undefined,
       approvalHandler: (request) => this.promptApproval(request),
       autoFixConfig: { maxRetries: 3, autoLint: true, autoBuild: true, autoTest: false },
+      ...(mcpServers.length > 0 ? { mcpServerConfigs: mcpServers.map(s => ({
+        name: s.name,
+        transport: "stdio" as const,
+        command: s.command,
+        args: s.args,
+        env: s.env,
+      })) } : {}),
     });
     process.once("SIGINT", () => loop.abort());
     // Restore agent session state if available (yuan resume)
@@ -669,6 +698,136 @@ export class InteractiveSession {
         },
       );
     });
+  }
+
+  /**
+   * Run a patch tournament: git stash → N agent runs → pick winner → apply.
+   * Called externally (e.g. /tournament slash command) or by OverheadGovernor wiring.
+   *
+   * @param goal The high-level goal description
+   * @param taskId Unique task ID for tracking
+   * @param candidateCount Number of candidate patches to generate (default 3)
+   */
+  async runTournament(goal: string, taskId: string, candidateCount = 3): Promise<void> {
+    const config = this.configManager.get();
+    if (!config.apiKey) {
+      this.renderer.error("No API key for tournament — configure API key first.");
+      return;
+    }
+
+    const workDir = this.session.workDir;
+    const policyPath = join(homedir(), ".yuan", "policy.json");
+    const policyOverrides = OverheadGovernor.loadFromFile(policyPath);
+
+    // Stash any current working-tree changes so each candidate starts clean
+    let stashCreated = false;
+    try {
+      const out = execSync("git stash push -m 'yuan-tournament-stash'", {
+        cwd: workDir,
+        stdio: "pipe",
+      }).toString().trim();
+      stashCreated = out.startsWith("Saved");
+    } catch {
+      // no-op if nothing to stash or git unavailable
+    }
+
+    /**
+     * RunAgentCallback: re-creates a fresh AgentLoop per candidate, collects changed
+     * files via agent:file_change events, then returns them after run completes.
+     */
+    const runAgent: RunAgentCallback = async (
+      candidateGoal: string,
+      _strategy: string,
+      _candidateIndex: number,
+    ): Promise<string[]> => {
+      const registry = createDefaultRegistry();
+      const executor = registry.toExecutor(workDir);
+      const byokConfig: BYOKConfig = {
+        provider: config.provider as "openai" | "anthropic" | "yua" | "google",
+        apiKey: config.apiKey!,
+        model: this.configManager.getModel(),
+        baseUrl: config.baseUrl,
+      };
+      const agentCfg: AgentConfig = {
+        byok: byokConfig,
+        loop: {
+          model: "coding",
+          maxIterations: DEFAULT_LOOP_CONFIG.maxIterations,
+          maxTokensPerIteration: DEFAULT_LOOP_CONFIG.maxTokensPerIteration,
+          totalTokenBudget: DEFAULT_LOOP_CONFIG.totalTokenBudget,
+          tools: executor.definitions,
+          systemPrompt:
+            "You are YUAN, an autonomous coding agent. Complete the task efficiently.",
+          projectPath: workDir,
+        },
+      };
+      const candidateLoop = new AgentLoop({
+        config: agentCfg,
+        toolExecutor: executor,
+        governorConfig: { planTier: "LOCAL" },
+        overheadGovernorConfig: Object.keys(policyOverrides).length > 0 ? policyOverrides : undefined,
+        approvalHandler: (req) => this.promptApproval(req),
+        autoFixConfig: { maxRetries: 2, autoLint: true, autoBuild: true, autoTest: false },
+      });
+
+      // Collect changed files via events
+      const changedFiles: string[] = [];
+      candidateLoop.on("event", (ev: AgentEvent) => {
+        if (ev.kind === "agent:file_change" && !changedFiles.includes(ev.path)) {
+          changedFiles.push(ev.path);
+        }
+      });
+
+      await candidateLoop.run(candidateGoal);
+      await candidateLoop.dispose();
+
+      // Reset working-tree for next candidate: stash pop then re-stash baseline
+      try {
+        execSync("git checkout -- .", { cwd: workDir, stdio: "pipe" });
+      } catch { /* not a git repo or no changes */ }
+
+      return changedFiles;
+    };
+
+    const tournament = new PatchTournamentExecutor({
+      candidates: candidateCount,
+      projectPath: workDir,
+    });
+
+    this.renderer.info(
+      `Starting tournament: ${candidateCount} candidates for "${goal.slice(0, 60)}"`
+    );
+
+    try {
+      const result = await tournament.run(goal, runAgent, taskId);
+      const winnerCandidate = result.candidates[result.winner];
+
+      this.renderer.success(
+        `Tournament complete: candidate #${result.winner + 1} wins ` +
+        `(score ${result.qualityScore.toFixed(2)}) — ` +
+        `${winnerCandidate?.filesChanged.length ?? 0} file(s) changed`
+      );
+
+      this.sessionManager.addMessage(
+        this.session,
+        "assistant",
+        `[tournament] winner #${result.winner + 1}, score=${result.qualityScore.toFixed(2)}`
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.renderer.error(`Tournament failed: ${msg}`);
+
+      // Restore stash on failure so working-tree is clean
+      if (stashCreated) {
+        try {
+          execSync("git stash pop", { cwd: workDir, stdio: "pipe" });
+        } catch {
+          this.renderer.warn(
+            "Could not restore git stash — manual `git stash pop` may be needed."
+          );
+        }
+      }
+    }
   }
 
   /** Stop the interactive session */

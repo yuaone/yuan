@@ -16,15 +16,21 @@
 
 import { useEffect, useRef } from "react";
 
-const MOUSE_ENABLE  = "\x1b[?1000h"; // X10 basic mouse tracking
-const MOUSE_DISABLE = "\x1b[?1000l";
+const MOUSE_ENABLE  = "\x1b[?1002h\x1b[?1006h"; // button tracking + SGR encoding
+const MOUSE_DISABLE = "\x1b[?1006l\x1b[?1002l";
 
-// Button codes after the 32-offset encoding
+// Button codes after the 32-offset encoding (X10 protocol)
 const SCROLL_UP_BTN   = 96; // button 64 + 32
 const SCROLL_DOWN_BTN = 97; // button 65 + 32
 
 // Matches a complete X10 mouse sequence: ESC [ M + 3 bytes
 const MOUSE_PATTERN = /\x1b\[M[\s\S]{3}/g;
+
+// Matches SGR mouse sequences: ESC [ < digits ; digits ; digits M/m
+const SGR_MOUSE_PATTERN = /\x1b\[<\d+;\d+;\d+[Mm]/g;
+
+// Matches orphaned SGR tails (when \x1b was consumed by partial buffer in prior chunk)
+const ORPHANED_SGR_TAIL = /\[<\d+;\d+;\d+[Mm]/g;
 
 type StdinEmit = typeof process.stdin.emit;
 
@@ -62,16 +68,48 @@ export function useMouseScroll(
             ? raw
             : "";
 
-        if (str.includes("\x1b[M")) {
+        const hasMouse =
+          str.includes("\x1b[M") ||
+          str.includes("\x1b[<") ||
+          // orphaned SGR tails (missing \x1b prefix)
+          /\[<\d+;\d+;\d+[Mm]/.test(str);
+
+        if (hasMouse) {
           let ups   = 0;
           let downs = 0;
 
-          const stripped = str.replace(MOUSE_PATTERN, (match) => {
+          // First pass: strip X10 sequences and detect scroll direction
+          let stripped = str.replace(MOUSE_PATTERN, (match) => {
             // byte index 3 = button byte
             const btn = match.charCodeAt(3);
             if (btn === SCROLL_UP_BTN)   ups++;
             else if (btn === SCROLL_DOWN_BTN) downs++;
             return ""; // remove from stream
+          });
+
+          // Second pass: strip SGR mouse sequences (ESC[<...M/m)
+          // SGR button 64 = scroll up, 65 = scroll down
+          stripped = stripped.replace(SGR_MOUSE_PATTERN, (match) => {
+            // extract button number from ESC[<BTN;COL;ROWm
+            const m = match.match(/\[<(\d+);/);
+            if (m) {
+              const btn = parseInt(m[1], 10);
+              if (btn === 64) ups++;
+              else if (btn === 65) downs++;
+            }
+            return "";
+          });
+
+          // Third pass: orphaned SGR mouse tails (when \x1b was consumed by
+          // partial buffer in a prior chunk and only the tail arrived here)
+          stripped = stripped.replace(ORPHANED_SGR_TAIL, (match) => {
+            const m = match.match(/\[<(\d+);/);
+            if (m) {
+              const btn = parseInt(m[1], 10);
+              if (btn === 64) ups++;
+              else if (btn === 65) downs++;
+            }
+            return "";
           });
 
           // Fire scroll callbacks

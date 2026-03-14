@@ -194,6 +194,7 @@ export type AgentEvent =
   | { kind: "agent:start"; goal: string }
   | { kind: "agent:thinking"; content: string }
   | { kind: "agent:tool_call"; tool: string; input: unknown }
+  | { kind: "agent:tool_start"; tool: string; input: unknown; source: "builtin" | "mcp" | "plugin" }
   | { kind: "agent:tool_result"; tool: string; output: string; durationMs: number }
   | {
       kind: "agent:reasoning_tree";
@@ -239,6 +240,19 @@ export type AgentEvent =
   | { kind: "agent:token_usage"; input: number; output: number }
   | { kind: "agent:qa_result"; stage: "quick" | "thorough"; passed: boolean; issues: string[] }
   | {
+      kind: "agent:evidence_report";
+      filePath: string;
+      tool: "file_write" | "file_edit";
+      /** Syntax check result — "skipped" for non-TS files */
+      syntax: "ok" | "error" | "skipped";
+      /** git diff stats for this file */
+      diffStats: { added: number; removed: number } | null;
+      /** Lint result — "skipped" if no linter configured */
+      lintResult: "ok" | "error" | "skipped";
+      /** Timestamp (unix ms) */
+      timestamp: number;
+    }
+  | {
       kind: "agent:bg_update";
       /** Background agent ID */
       agentId: string;
@@ -250,7 +264,193 @@ export type AgentEvent =
       message: string;
       /** Unix timestamp */
       timestamp: number;
-    };
+    }
+  | {
+      kind: "agent:phase_transition";
+      from: string;
+      to: string;
+      iteration: number;
+      trigger: string;
+    }
+  // ─── Phase 3: Autonomous Engineering Loop ───────────────────────────────
+  | {
+      kind: "agent:research_result";
+      taskId: string;
+      summary: string;
+      sources: Array<{ title: string; url: string; snippet: string; source: string }>;
+      confidence: number;
+      timestamp: number;
+    }
+  | {
+      kind: "agent:plan_generated";
+      taskId: string;
+      steps: Array<{ index: number; description: string; dependsOn: number[] }>;
+      storedAt: string;
+      timestamp: number;
+    }
+  | {
+      kind: "agent:tournament_result";
+      taskId: string;
+      /** 0-based index of the winning candidate */
+      winner: number;
+      candidates: number;
+      qualityScore: number;
+      timestamp: number;
+    }
+  | {
+      kind: "agent:task_memory_update";
+      taskId: string;
+      phase: string;
+      status: "running" | "completed" | "failed" | "paused";
+      timestamp: number;
+    }
+  | {
+      kind: "agent:debug_report";
+      taskId: string;
+      rootCause: string;
+      suspectedFiles: string[];
+      fixStrategy: string;
+      confidence: number;
+      timestamp: number;
+    }
+  | {
+      kind: "agent:failure_sig_hit";
+      signatureId: string;
+      similarity: number;
+      suggestedStrategy: string;
+      timestamp: number;
+    }
+  | {
+      kind: "agent:failure_sig_update";
+      signatureId: string;
+      action: "created" | "updated";
+      errorType: string;
+      timestamp: number;
+    }
+  | {
+      kind: "agent:playbook_activated";
+      playbookId: string;
+      taskType: string;
+      confidence: number;
+      timestamp: number;
+    }
+  | {
+      kind: "agent:playbook_proposed";
+      playbookId: string;
+      taskType: string;
+      confidence: number;
+      timestamp: number;
+    }
+  | {
+      kind: "agent:project_state_update";
+      projectId: string;
+      goals: number;
+      activeTasks: number;
+      stalledTasks: number;
+      timestamp: number;
+    }
+  | {
+      kind: "agent:task_stalled";
+      taskId: string;
+      stallReason: string;
+      iterationsElapsed: number;
+      estimatedIterations: number;
+      timestamp: number;
+    }
+  | {
+      kind: "agent:milestone_reached";
+      milestoneId: string;
+      goalId: string;
+      description: string;
+      timestamp: number;
+    }
+  // ─── Phase 4: Remaining ──────────────────────────────────────────────────
+  | {
+      kind: "agent:improvement_proposal";
+      proposalId: string;
+      title: string;
+      confidence: number;
+      affectedTaskTypes: string[];
+      timestamp: number;
+    }
+  | {
+      kind: "agent:meta_learning_report";
+      totalSamples: number;
+      recommendations: number;
+      timestamp: number;
+    }
+  | {
+      kind: "agent:trust_update";
+      actionClass: string;
+      trustScore: number;
+      recommendation: string;
+      timestamp: number;
+    }
+  // ─── Phase 5: Autonomous Capability Evolution ─────────────────────────────
+  | {
+      kind: "agent:strategy_metric_update";
+      playbookId: string;
+      taskType: string;
+      confidence: number;
+      avgIterations: number;
+      timestamp: number;
+    }
+  | {
+      kind: "agent:skill_discovered";
+      skillId: string;
+      name: string;
+      taskType: string;
+      isNew: boolean;
+      successRate: number;
+      timestamp: number;
+    }
+  | {
+      kind: "agent:playbook_learned";
+      proposalId: string;
+      taskType: string;
+      toolSequence: string[];
+      successRate: number;
+      sessionCount: number;
+      timestamp: number;
+    }
+  | {
+      kind: "agent:tool_proposed";
+      proposalId: string;
+      toolName: string;
+      templateUsed: string;
+      sandboxResult: "pending" | "pass" | "fail" | "skipped";
+      timestamp: number;
+    }
+  | {
+      kind: "agent:policy_recommendation";
+      recommendations: Array<{ type: string; description: string; confidence: number }>;
+      reportId: string;
+      timestamp: number;
+    }
+  // ─── Phase 6: Budget Governor V2 ─────────────────────────────────────────
+  | { kind: "agent:budget_degraded"; budgetType: string; id: string; percentUsed: number; suggestedTier: string; timestamp: number }
+  | { kind: "agent:budget_exhausted"; budgetType: string; id: string; percentUsed: number; timestamp: number }
+  | { kind: "agent:budget_status"; taskId: string; recommendation: "continue" | "degrade" | "halt"; timestamp: number }
+  // Phase 6 — Evidence Chain
+  | { kind: "agent:evidence_chain_recorded"; recordId: string; sessionId: string; decisionType: string; evidenceCount: number; outcome: string; timestamp: number }
+  // Phase 6 — Capability Graph
+  | { kind: "agent:capability_graph_updated"; nodeId: string; action: "added" | "updated"; nodeType: string; timestamp: number }
+  // Phase 6 — Checkpoint Manager
+  | { kind: "agent:checkpoint_saved"; checkpointId: string; taskId: string; label: string; iteration: number; timestamp: number }
+  | { kind: "agent:checkpoint_restored"; checkpointId: string; taskId: string; label: string; gitRestored: boolean; timestamp: number }
+  // Phase 6 — Capability Self Model
+  | { kind: "agent:self_model_updated"; action: "tool_registered" | "outcome_recorded"; toolName?: string; environment?: string; timestamp: number }
+  // Phase 6 — Strategy Market
+  | { kind: "agent:champion_elected"; taskType: string; playbookId: string; score: number; timestamp: number }
+  | { kind: "agent:playbook_retired"; taskType: string; playbookId: string; retirementScore: number; timestamp: number }
+  // Phase 6 — Agent Reputation
+  | { kind: "agent:reputation_updated"; agentType: string; taskType: string; reputationScore: number; successes: number; failures: number; timestamp: number }
+  // Phase 6 — Agent Coordinator
+  | { kind: "agent:coordinator_task_started"; taskId: string; role: string; goal: string; timestamp: number }
+  | { kind: "agent:coordinator_task_complete"; taskId: string; role: string; outcome: string; tokenUsed: number; latencyMs: number; timestamp: number }
+  | { kind: "agent:coordinator_conflict"; taskId: string; conflictedWith: string; resourceId: string; timestamp: number }
+  // Phase 6 — Research Loop
+  | { kind: "agent:research_session_complete"; sessionId: string; problem: string; conclusion: string; recommendedStrategy: string; confidence: number; iterations: number; timestamp: number };
 
 // ─── Session ───
 

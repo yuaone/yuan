@@ -23,6 +23,20 @@ import type { AgentStreamState } from "../types.js";
 // Spinner frames for thinking state
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+// Progress-state icon + color map
+const PROGRESS_ICON: Record<string, { icon: string; color: string }> = {
+  planning:  { icon: "◈", color: "#60a5fa" }, // blue
+  searching: { icon: "◎", color: "#c084fc" }, // purple
+  reading:   { icon: "◷", color: "#94a3b8" }, // slate
+  analyzing: { icon: "◉", color: "#22d3ee" }, // cyan
+  coding:    { icon: "●", color: "#4ade80" }, // green
+  fixing:    { icon: "◆", color: "#fb923c" }, // orange
+  reviewing: { icon: "◈", color: "#7dd3fc" }, // light blue
+  testing:   { icon: "◎", color: "#facc15" }, // yellow
+  running:   { icon: "▶", color: "#fde047" }, // bright yellow
+  waiting:   { icon: "◌", color: "#475569" }, // dim slate
+};
+
 export interface FooterBarProps {
   agentState: AgentStreamState;
   slashMenuOpen?: boolean;
@@ -56,8 +70,15 @@ function getToolVerb(toolName: string): string {
   return "tool";
 }
 
+const PHASE_ICON: Record<string, string> = {
+  explore:   "◎",
+  implement: "●",
+  verify:    "◷",
+  finalize:  "✦",
+};
+
 function Indicator({ agentState }: { agentState: AgentStreamState }): React.JSX.Element {
-  const { status, elapsedMs, lastElapsedMs, currentToolName, currentToolArgs, lastError, totalTokensUsed, filesChangedCount } = agentState;
+  const { status, elapsedMs, lastElapsedMs, currentToolName, lastError, totalTokensUsed, filesChangedCount, progressLabel, currentPhase } = agentState;
   const elapsed = formatElapsed(elapsedMs);
 
   // Spinner frame — derived from elapsed seconds (stable with 1s timer tick)
@@ -98,9 +119,26 @@ function Indicator({ agentState }: { agentState: AgentStreamState }): React.JSX.
           </Text>
         );
       }
+      // Show fine-grained progress label with blinking icon (700ms cycle, not too fast)
+      // Phase prefix replaces generic label when available — no overlap
+      const phasePrefix = currentPhase && currentPhase !== "explore"
+        ? `${PHASE_ICON[currentPhase] ?? "◈"} ${currentPhase}  `
+        : "";
+      const label = phasePrefix + (progressLabel ?? "thinking");
+      const prog = progressLabel ? PROGRESS_ICON[progressLabel] : undefined;
+      // Blink: bright on even 700ms ticks, dim on odd — uses existing elapsedMs timer
+      const blinkOn = Math.floor(elapsedMs / 700) % 2 === 0;
+      if (prog) {
+        return (
+          <Text dimColor>
+            <Text color={blinkOn ? prog.color : "#334155"}>{prog.icon}</Text>
+            {" "}{label}  {elapsed}
+          </Text>
+        );
+      }
       return (
         <Text dimColor>
-          <Text color="yellow">{spinner}</Text> thinking  {elapsed}
+          <Text color="yellow">{spinner}</Text> {label}  {elapsed}
         </Text>
       );
     }
@@ -115,12 +153,12 @@ function Indicator({ agentState }: { agentState: AgentStreamState }): React.JSX.
 
     case "tool_running": {
       const verb = currentToolName ? getToolVerb(currentToolName) : "tool";
-      const detail = currentToolArgs || currentToolName || "";
-      // Truncate detail to 40 chars
-      const truncDetail = detail.length > 40 ? detail.slice(0, 39) + "…" : detail;
+      const phaseTag = currentPhase && currentPhase !== "explore"
+        ? ` [${currentPhase}]`
+        : "";
       return (
         <Text dimColor>
-          <Text color="cyan">⚙</Text> {verb}  {truncDetail}  {elapsed}
+          <Text color="cyan">⚙</Text> {verb}{phaseTag}  {elapsed}
         </Text>
       );
     }

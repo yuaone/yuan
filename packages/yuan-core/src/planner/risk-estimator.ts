@@ -46,6 +46,7 @@ export class RiskEstimator {
     changedFiles: string[],
     tokensUsed: number,
     tokenBudget: number,
+    cachedImpact?: import("../impact-analyzer.js").ImpactReport,
   ): Promise<RiskScore> {
     const factors: string[] = [];
     const mitigations: string[] = [];
@@ -77,7 +78,21 @@ export class RiskEstimator {
     const avgDepsPerTask =
       remainingTasks.reduce((s, t) => s + t.dependsOn.length, 0) /
       Math.max(remainingTasks.length, 1);
-    const dependencyRisk = Math.min(avgDepsPerTask * 15, 60);
+    let dependencyRisk = Math.min(avgDepsPerTask * 15, 60);
+
+    // If a pre-computed ImpactReport is provided, use it to refine dependency/build risk
+    const impact = cachedImpact ?? await this.impactAnalyzer.analyzeChanges(changedFiles).catch(() => null);
+    if (impact) {
+      // Cascade file count raises dependency risk
+      dependencyRisk = Math.min(dependencyRisk + impact.affectedFiles.length * 2, 80);
+      if (impact.riskLevel === "critical" || impact.riskLevel === "high") {
+        buildRisk = Math.min(buildRisk + 20, 100);
+        factors.push(`Impact analysis: ${impact.riskLevel} risk, ${impact.breakingChanges.length} breaking changes`);
+        if (impact.breakingChanges.length > 0) {
+          mitigations.push("Review breaking changes before merging");
+        }
+      }
+    }
 
     // 5. Token risk: extrapolate current usage to completion
     const completionRatio =
