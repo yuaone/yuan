@@ -849,10 +849,31 @@ export class BYOKClient {
     }
 
     // Build Gemini tool declarations
+    // Strip JSON Schema fields unsupported by Gemini API (additionalProperties, $schema, etc.)
+    const stripGeminiUnsupported = (schema: Record<string, unknown>): Record<string, unknown> => {
+      const UNSUPPORTED = new Set(["additionalProperties", "$schema", "$defs", "definitions", "default", "examples", "$id", "$ref"]);
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(schema)) {
+        if (UNSUPPORTED.has(k)) continue;
+        if (k === "properties" && v && typeof v === "object") {
+          const stripped: Record<string, unknown> = {};
+          for (const [pk, pv] of Object.entries(v as Record<string, unknown>)) {
+            stripped[pk] = pv && typeof pv === "object" ? stripGeminiUnsupported(pv as Record<string, unknown>) : pv;
+          }
+          out[k] = stripped;
+        } else if (k === "items" && v && typeof v === "object") {
+          out[k] = stripGeminiUnsupported(v as Record<string, unknown>);
+        } else {
+          out[k] = v;
+        }
+      }
+      return out;
+    };
+
     const functionDeclarations = tools?.map((t) => ({
       name: t.name,
       description: t.description,
-      parameters: t.parameters as Record<string, unknown>,
+      parameters: stripGeminiUnsupported(t.parameters as Record<string, unknown>),
     }));
 
     const body: Record<string, unknown> = {
