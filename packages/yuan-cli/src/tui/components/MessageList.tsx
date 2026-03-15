@@ -72,8 +72,31 @@ export const MessageList = memo(function MessageList({
   // Line-based scroll offset: 0 = pinned to bottom (latest), N = scrolled up N lines
   const [lineOffset, setLineOffset] = useState(0);
   const [pinned, setPinned] = useState(true);
-  const prevMsgCountRef = useRef(messages.length);
+const velocityRef = useRef(0);
+const inertiaTimerRef = useRef<NodeJS.Timeout | null>(null);
 
+// scroll inertia (Ink / Node safe)
+const runInertia = useCallback(function runInertia() {
+  if (Math.abs(velocityRef.current) < 0.2) {
+    velocityRef.current = 0;
+    if (inertiaTimerRef.current) {
+      clearTimeout(inertiaTimerRef.current);
+      inertiaTimerRef.current = null;
+    }
+    return;
+  }
+
+  setLineOffset((prev) => Math.max(0, prev + velocityRef.current));
+
+  velocityRef.current *= 0.85; // friction
+
+inertiaTimerRef.current = setTimeout(() => runInertia(), 16);
+}, []);
+
+  const prevMsgCountRef = useRef(messages.length);
+// anchor scroll
+const anchorMsgIdRef = useRef<string | null>(null);
+const anchorOffsetRef = useRef<number>(0);
   // Auto-scroll when new messages arrive (only if pinned)
   useEffect(() => {
     if (messages.length > prevMsgCountRef.current && pinned) {
@@ -88,57 +111,76 @@ export const MessageList = memo(function MessageList({
     [messages],
   );
 
-  // Line counts: FROZEN during streaming to prevent startIdx jitter.
-  // Streaming message gets a fixed 30-line estimate.
-  // Recomputed only when: message count changes, streaming stops, or columns changes.
+  // Line counts: track actual content size for streaming messages too.
+  // Uses content length so the viewport doesn't over-reserve space and jump.
+  // Streaming messages get a minimum of 4 lines to avoid a too-small reservation.
   const lineCounts = useMemo(
-    () => messages.map((m) => (m.isStreaming ? 30 : estimateLines(m, columns))),
+    () => messages.map((m) => {
+      const est = estimateLines(m, columns);
+      return m.isStreaming ? Math.max(est, 4) : est;
+    }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [messages.length, isStreaming, columns],
+    [messages, columns],
   );
 
   const totalLines = useMemo(
     () => lineCounts.reduce((a, b) => a + b, 0),
     [lineCounts],
   );
+// restore anchor scroll: keep anchor message at same relative position when not pinned
+// lineOffset is "lines from bottom", so offset = totalLines - linesBefore - anchorMsgLines
+useEffect(() => {
+  if (pinned) return;
 
+  const anchorId = anchorMsgIdRef.current;
+  if (!anchorId) return;
+
+  const idx = messages.findIndex(m => m.id === anchorId);
+  if (idx === -1) return;
+
+  let linesBefore = 0;
+  for (let i = 0; i < idx; i++) {
+    linesBefore += lineCounts[i] ?? 2;
+  }
+
+  // Convert top-based position to bottom-based offset
+  const linesAfterAnchor = totalLines - linesBefore - (lineCounts[idx] ?? 2);
+  const newOffset = Math.max(0, linesAfterAnchor);
+  setLineOffset(newOffset);
+
+}, [messages, lineCounts, pinned, totalLines]);
   // Viewport budget (reserve 2 lines for indicators)
   const budget = Math.max(4, height - 2);
 
-  // Compute visible message indices from line-based offset
-  // lineOffset=0: show last `budget` lines; lineOffset=N: scroll up N lines
+  // Compute visible message indices from line-based offset.
+  // Walk newest→oldest (posFromBottom accumulates upward from 0).
+  // Visible window: [lineOffset, lineOffset+budget) lines from bottom.
   const visibleIndices = useMemo(() => {
+
     const maxOffset = Math.max(0, totalLines - budget);
     const clampedOffset = Math.min(lineOffset, maxOffset);
 
-    // Window in "lines from bottom" coordinates
-    // windowStart = bottom of visible window (closest to end of chat)
-    // windowEnd = top of visible window
-    const windowStart = clampedOffset;
-    const windowEnd = clampedOffset + budget;
+    const windowStart = clampedOffset;       // bottom edge of visible area
+    const windowEnd = clampedOffset + budget; // top edge of visible area
 
     const indices: number[] = [];
     let posFromBottom = 0;
 
     for (let i = messages.length - 1; i >= 0; i--) {
       const msgLines = lineCounts[i] ?? 2;
-      const msgBottom = posFromBottom;
-      const msgTop = posFromBottom + msgLines;
+      const msgBottom = posFromBottom;          // distance of msg start from chat bottom
+      const msgTop    = posFromBottom + msgLines; // distance of msg end from chat bottom
 
-      // Message entirely above visible window → stop walking
-      if (msgBottom >= windowEnd) {
-        posFromBottom += msgLines;
-        continue;
-      }
-
-      // Message entirely below visible window → stop
-      if (msgTop <= windowStart) {
-        break;
-      }
-
-      // Message overlaps → include
-      indices.unshift(i);
       posFromBottom += msgLines;
+
+      // Message is entirely BELOW the visible window → skip (keep walking up)
+      if (msgTop <= windowStart) continue;
+
+      // Message is entirely ABOVE the visible window → we've passed the window → stop
+      if (msgBottom >= windowEnd) break;
+
+      // Message overlaps the window → include
+      indices.unshift(i);
     }
 
     return indices;
@@ -150,15 +192,29 @@ export const MessageList = memo(function MessageList({
     () => visibleIndices.map((i) => messages[i]!),
     [visibleIndices, messages],
   );
+// capture anchor
+useEffect(() => {
+  if (!visibleIndices.length) return;
 
+  const firstVisibleIdx = visibleIndices[0];
+  const msg = messages[firstVisibleIdx];
+
+  if (msg) {
+    anchorMsgIdRef.current = msg.id;
+    anchorOffsetRef.current = lineOffset;
+  }
+
+}, [visibleIndices, messages, lineOffset]);
   // Compute visible line total for top-spacer decision
   const visibleLineTotal = useMemo(
     () => visibleIndices.reduce((sum, i) => sum + (lineCounts[i] ?? 2), 0),
     [visibleIndices, lineCounts],
   );
 
-  // Bottom-aligned chat: add top spacer when pinned and content doesn't fill viewport
-  const addTopSpacer = pinned && lineOffset === 0 && visibleLineTotal < budget;
+  // Bottom-aligned chat: add spacer only when actual conversation messages exist
+  // (avoids banner appearing at bottom on fresh start)
+  const hasConversationMessages = messages.some(m => m.role === "user" || m.role === "assistant");
+  const addTopSpacer = pinned && totalLines < budget && hasConversationMessages;
 
   // Keyboard scroll
   useInput((_input, key) => {
@@ -177,19 +233,31 @@ export const MessageList = memo(function MessageList({
   // Mouse wheel: 3 lines per tick
   const handleMouseUp = useCallback(() => {
     setPinned(false);
-    setLineOffset((prev) => prev + 3);
-  }, []);
+  velocityRef.current += 3;
+
+  if (!inertiaTimerRef.current) {
+    inertiaTimerRef.current = setTimeout(runInertia, 16);
+  }
+  },[runInertia]);
 
   const handleMouseDown = useCallback(() => {
-    setLineOffset((prev) => {
-      const next = Math.max(0, prev - 3);
-      if (next === 0) setPinned(true);
-      return next;
-    });
-  }, []);
+  velocityRef.current -= 3;
+
+  if (!inertiaTimerRef.current) {
+    inertiaTimerRef.current = setTimeout(runInertia, 16);
+  }
+}, [runInertia]);
+
+
 
   useMouseScroll(handleMouseUp, handleMouseDown);
-
+useEffect(() => {
+  return () => {
+    if (inertiaTimerRef.current) {
+      clearTimeout(inertiaTimerRef.current);
+    }
+  };
+}, []);
   const hasScrolledUp = lineOffset > 0;
 
   return (

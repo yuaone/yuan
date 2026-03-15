@@ -89,7 +89,7 @@ export function useAgentStream(): UseAgentStreamReturn {
       if (startTimeRef.current) {
         setElapsedMs(Date.now() - startTimeRef.current);
       }
-    }, 1000);
+    }, 200);
   }, []);
 
   const stopTimer = useCallback(() => {
@@ -120,6 +120,50 @@ export function useAgentStream(): UseAgentStreamReturn {
     [],
   );
 
+  /** Append one sentence to thinkingContent of the current assistant message */
+  const appendReasoningSentence = useCallback((sentence: string) => {
+    updateCurrentMessage((msg) => ({
+      ...msg,
+      thinkingContent: msg.thinkingContent
+        ? `${msg.thinkingContent}\n${sentence}`
+        : sentence,
+    }));
+  }, [updateCurrentMessage]);
+
+  /** Schedule next sentence from the queue (1.5-3s random delay) */
+  const scheduleReasoningDrain = useCallback(() => {
+    if (reasoningDrainTimerRef.current) return;
+    if (reasoningSentenceQRef.current.length === 0) return;
+    const delay = 1500 + Math.random() * 1500;
+    reasoningDrainTimerRef.current = setTimeout(() => {
+      reasoningDrainTimerRef.current = null;
+      const sentence = reasoningSentenceQRef.current.shift();
+      if (sentence) appendReasoningSentence(sentence);
+      if (reasoningSentenceQRef.current.length > 0) scheduleReasoningDrain();
+    }, delay);
+  }, [appendReasoningSentence]);
+
+  /** Flush all remaining queued reasoning immediately (on complete/error) */
+  const flushReasoningQueue = useCallback(() => {
+    if (reasoningDrainTimerRef.current) {
+      clearTimeout(reasoningDrainTimerRef.current);
+      reasoningDrainTimerRef.current = null;
+    }
+    const remaining = [
+      ...reasoningSentenceQRef.current.splice(0),
+      reasoningRawBufRef.current.trim(),
+    ].filter(Boolean).join("\n");
+    reasoningRawBufRef.current = "";
+    if (remaining) {
+      updateCurrentMessage((msg) => ({
+        ...msg,
+        thinkingContent: msg.thinkingContent
+          ? `${msg.thinkingContent}\n${remaining}`
+          : remaining,
+      }));
+    }
+  }, [updateCurrentMessage]);
+
   const pendingTextRef = useRef("");
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastChunkRef = useRef<string>(""); // for dedup: track previous chunk
@@ -129,6 +173,23 @@ export function useAgentStream(): UseAgentStreamReturn {
   const pendingThinkingRef = useRef<string[]>([]);
   const thinkingFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const THINKING_FLUSH_INTERVAL = 80; // 80ms batch — fast thinking display, minimal flicker
+
+  // ── Reasoning sentence pacing ─────────────────────────────────────────────
+  // reasoning_delta tokens arrive fast; we drip them out sentence-by-sentence
+  // at a natural 1.5-3s interval so the "thinking" feels deliberate.
+  const reasoningRawBufRef = useRef(""); // incoming raw token accumulator
+  const reasoningSentenceQRef = useRef<string[]>([]); // sentences ready to show
+  const reasoningDrainTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /** Extract complete sentences from text, returning {sentences, remainder} */
+  const extractSentences = (text: string): { sentences: string[]; remainder: string } => {
+    // Match up to and including a sentence-terminator (. ! ? \n)
+    const re = /[^.!?\n]*[.!?\n]+\s*/g;
+    const matches = text.match(re);
+    if (!matches) return { sentences: [], remainder: text };
+    const matched = matches.join("");
+    return { sentences: matches.map((s) => s.trim()).filter(Boolean), remainder: text.slice(matched.length) };
+  };
 
   const flushPendingText = useCallback(() => {
     if (flushTimerRef.current) {
@@ -258,6 +319,13 @@ export function useAgentStream(): UseAgentStreamReturn {
     currentThinkingMsgIdRef.current = null;
     activeToolBatchIdRef.current = null;
     lastToolCallAtRef.current = 0;
+    // Reset reasoning pacing state
+    reasoningRawBufRef.current = "";
+    reasoningSentenceQRef.current = [];
+    if (reasoningDrainTimerRef.current) {
+      clearTimeout(reasoningDrainTimerRef.current);
+      reasoningDrainTimerRef.current = null;
+    }
     startTimer();
 
     const msgId = `assistant-${Date.now()}`;
@@ -281,8 +349,15 @@ export function useAgentStream(): UseAgentStreamReturn {
 
       switch (event.kind) {
   case "agent:reasoning_delta": {
-    // LLM reasoning goes ONLY to ReasoningPanel (via App.tsx), not chat bubbles.
-    // Agent-internal reasoning_delta is ignored here entirely.
+    const rText = String((event as { text?: string }).text ?? "");
+    if (!rText) break;
+    reasoningRawBufRef.current += rText;
+    const { sentences, remainder } = extractSentences(reasoningRawBufRef.current);
+    if (sentences.length > 0) {
+      reasoningSentenceQRef.current.push(...sentences);
+      reasoningRawBufRef.current = remainder;
+      scheduleReasoningDrain();
+    }
     break;
   }
         case "agent:thinking": {
@@ -438,6 +513,7 @@ export function useAgentStream(): UseAgentStreamReturn {
         }
 
         case "agent:error": {
+          flushReasoningQueue();
           const errMsg = event.message as string;
           setLastError(errMsg);
           stopTimer();
@@ -464,6 +540,7 @@ export function useAgentStream(): UseAgentStreamReturn {
         }
 
         case "agent:completed": {
+          flushReasoningQueue();
           flushPendingText();
           flushThinkingLines();
           stopTimer();

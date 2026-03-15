@@ -19,31 +19,7 @@ export interface MessageBubbleProps {
   width: number;
   isLatest?: boolean;
 }
-const BANNER_TITLE_PREFIX = "YUAN v";
-const BANNER_SUBTITLE = "Autonomous Coding Agent";
-const BANNER_META_SEP = "---META---";
 
-const FOX_PIXEL_PALETTE: Record<string, string | null> = {
-  ".": null,
-  "O": "#f97316",   // orange body
-  "D": "#c2410c",   // dark orange (ears/outline)
-  "W": "#f8fafc",   // white (face/chest)
-  "N": "#1c1917",   // dark (eyes/nose)
-  "T": "#fcd34d",   // tan/yellow (inner ear)
-};
-
-const FOX_PIXEL_SPRITE = [
-  "....DOODD..DDOOD....",
-  "...DOOOTD.DTOOD....",
-  "...DOOOOOOOOOOOD...",
-  "..DOOOOOOOOOOOOOD..",
-  "..DOOWWWWWWWWWOOD..",
-  "..DOOWNNOONNWOOD...",
-  "..DOOWWWWWWWWWOOD..",
-  "..DOOOWWNNWWWOOOD..",
-  "...DOOOOOOOOOOOD...",
-  "....DDDDDDDDDDDD...",
-];
 
 const DIFF_TOOL_NAMES = new Set(["file_write", "file_edit", "edit_file", "write_file"]);
 const MAX_DIFF_LINES = 20;
@@ -179,36 +155,7 @@ function truncateArgs(args: string | undefined, maxLen: number): string {
   return args.length > maxLen ? args.slice(0, maxLen) + "…" : args;
 }
 
-function PixelFoxSprite(): React.JSX.Element {
-  return (
-    <Box flexDirection="column">
-      {FOX_PIXEL_SPRITE.map((row, rowIndex) => (
-        <Box key={`fox-row-${rowIndex}`}>
-          {row.split("").map((cell, colIndex) => {
-            const color = FOX_PIXEL_PALETTE[cell] ?? null;
 
-            if (!color) {
-              return (
-                <Text key={`fox-px-${rowIndex}-${colIndex}`}>
-                  {"  "}
-                </Text>
-              );
-            }
-
-            return (
-              <Text
-                key={`fox-px-${rowIndex}-${colIndex}`}
-                color={color}
-              >
-                {"██"}
-              </Text>
-            );
-          })}
-        </Box>
-      ))}
-    </Box>
-  );
-}
 /** White↔gray blinking dot for running tool calls */
 function BlinkingDot(): React.JSX.Element {
   const [bright, setBright] = useState(true);
@@ -319,10 +266,7 @@ export const MessageBubble = React.memo(function MessageBubble({
   isLatest,
 }: MessageBubbleProps): React.JSX.Element {
   const msg = message;
-  const isBannerMessage =
-    msg.role === "system" &&
-    msg.content.includes(BANNER_TITLE_PREFIX) &&
-    msg.content.includes(BANNER_SUBTITLE);
+
 
   switch (msg.role) {
     case "queued_user": {
@@ -361,7 +305,6 @@ export const MessageBubble = React.memo(function MessageBubble({
               <Text key={i} backgroundColor="#1a1a1a" color="#4b5563">{full}{" ".repeat(pad)}</Text>
             );
           })}
-          <Text dimColor>  ⏸ queued</Text>
         </Box>
       );
     }
@@ -393,7 +336,7 @@ export const MessageBubble = React.memo(function MessageBubble({
       if (lines.length === 0) lines.push("");
       const fillWidth = width - 2; // leave 2-col right margin
       return (
-        <Box flexDirection="column" marginBottom={1}>
+        <Box flexDirection="column" marginBottom={2}>
           {lines.map((line, i) => {
             const prefix = i === 0 ? "> " : "  ";
             const full = `${prefix}${line}`;
@@ -416,33 +359,28 @@ export const MessageBubble = React.memo(function MessageBubble({
       const phaseEvents = msg.phaseEvents ?? [];
       const hasPhaseEvents = phaseEvents.length > 0;
 
-      // Split content: first line inline with ●, rest below with indent
-      const contentLines = hasText ? msg.content.split("\n") : [];
-      const firstLine = contentLines[0] ?? "";
-      const restContent = contentLines.slice(1).join("\n");
-      const hasRest = restContent.length > 0;
+      // Reasoning: only show while streaming, max 3 lines (keeps it out of the way)
+      const showThinking = hasThinking && msg.isStreaming;
+      const thinkingLines = showThinking
+        ? msg.thinkingContent!.split("\n").filter(Boolean).slice(-3)
+        : [];
 
       return (
-        <Box flexDirection="column" marginBottom={1}>
-          {/* ● <first line inline> */}
-          <Box>
-            <Text dimColor>● </Text>
-            {hasText ? (
-              <MarkdownRenderer content={firstLine} width={width - 4} />
-            ) : null}
-          </Box>
-          {/* Remaining lines — indented */}
-          {hasRest && (
-            <Box paddingLeft={2}>
-              <MarkdownRenderer content={restContent} width={width - 4} />
+        <Box flexDirection="column" marginBottom={2}>
+          {/* Inline reasoning — dim, before main content, only while thinking */}
+          {thinkingLines.map((line, i) => (
+            <Box key={`think-${i}`} paddingLeft={2}>
+              <Text dimColor color="#555555">~ {line}</Text>
             </Box>
-          )}
-          {/* Thinking content — dim */}
-          {hasThinking && (
-            <Box paddingLeft={2} flexDirection="column">
-              {msg.thinkingContent!.split("\n").map((line, i) => (
-                <Text key={i} dimColor color="#555555">{line}</Text>
-              ))}
+          ))}
+          {/* ● dot — single row header */}
+          <Box marginTop={thinkingLines.length > 0 ? 1 : 0}>
+            <Text dimColor>● </Text>
+          </Box>
+          {/* Full content below — no firstLine/restContent split (breaks Korean particles) */}
+          {hasText && (
+            <Box paddingLeft={2}>
+              <MarkdownRenderer content={msg.content} width={width - 4} />
             </Box>
           )}
           {/* Tool call tree */}
@@ -483,79 +421,6 @@ export const MessageBubble = React.memo(function MessageBubble({
         </Box>
       );
     }
-
-    case "system":
-      if (isBannerMessage) {
-        // Parse metadata embedded in banner content
-        const metaIdx = msg.content.indexOf(BANNER_META_SEP);
-        let meta: { model?: string; provider?: string; cwd?: string; version?: string } = {};
-        let baseContent = msg.content;
-        if (metaIdx >= 0) {
-          try {
-            meta = JSON.parse(msg.content.slice(metaIdx + BANNER_META_SEP.length + 1).trim()) as typeof meta;
-          } catch { /* ignore */ }
-          baseContent = msg.content.slice(0, metaIdx);
-        }
-        const lines = baseContent.split("\n");
-        const title = lines.find((l) => l.startsWith(BANNER_TITLE_PREFIX)) ?? `YUAN v${meta.version ?? ""}`;
-        const help = lines.find((l) => l.includes("/help")) ?? "Type /help for commands";
-        const site = lines.find((l) => l.includes("yuaone.com")) ?? "yuaone.com";
-
-        // What's new items for current version
-        const borderColor = "#334155";
-        const B = TOKENS.box;
-
- return (
-   <Box flexDirection="column" paddingLeft={0}>
-            {/* Top border */}
-            <Text color={borderColor}>{B.topLeft}{B.horizontal.repeat(2)} {title} {B.horizontal.repeat(Math.max(0, width - stringWidth(title) - 6))}{B.topRight}</Text>
-
-            {/* Content row: left (fox only) | right (info) */}
-            <Box flexDirection="row">
-              {/* Left column — pixel fox only */}
-              <Box flexDirection="column" paddingLeft={2} flexGrow={0}>
-                <PixelFoxSprite />
-              </Box>
-
-              {/* Vertical divider */}
-              <Box flexDirection="column" paddingLeft={1} paddingRight={1}>
-                {Array.from({ length: FOX_PIXEL_SPRITE.length }).map((_, i) => (
-                  <Text key={i} color={borderColor}>{B.vertical}</Text>
-                ))}
-              </Box>
-
-              {/* Right column — info */}
-              <Box flexDirection="column" flexGrow={1} paddingRight={2} justifyContent="center">
-                <Box height={1} />
-                {meta.model && (
-                  <Box>
-                    <Text dimColor>model  </Text>
-                    <Text color="white">{meta.model}</Text>
-                  </Box>
-                )}
-                {meta.provider && (
-                  <Box>
-                    <Text dimColor>via    </Text>
-                    <Text dimColor>{meta.provider}</Text>
-                  </Box>
-                )}
-                {meta.cwd && (
-                  <Box>
-                    <Text dimColor>dir    </Text>
-                    <Text dimColor>{meta.cwd}</Text>
-                  </Box>
-                )}
-                <Box height={1} />
-                <Text dimColor>{help}</Text>
-                <Text dimColor>{site}</Text>
-              </Box>
-            </Box>
-
-            {/* Bottom border */}
-            <Text color={borderColor}>{B.bottomLeft}{B.horizontal.repeat(Math.max(0, width - stringWidth("") - 2))}{B.bottomRight}</Text>
-          </Box>
-        );
-      }
 
       return (
         <Box marginBottom={1}>

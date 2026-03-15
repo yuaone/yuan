@@ -105,16 +105,33 @@ function getKeywords(language?: string): string[] {
   return [];
 }
 
+// File-like string detection: contains a known extension or path separator
+const FILE_EXT_RE = /\.(ts|tsx|js|jsx|mjs|cjs|json|css|scss|html|py|go|rs|sh|yaml|yml|md|sql|env)\b/i;
+
+function isFileString(quoted: string): boolean {
+  const inner = quoted.slice(1, -1);
+  return FILE_EXT_RE.test(inner) || (inner.includes("/") && inner.length > 3);
+}
+
 function tokenizeCodeLine(line: string, language?: string): CodeToken[] {
   const keywords = getKeywords(language);
-  const keywordPattern = keywords.length
+  const keywordSet = new Set(keywords);
+  const kwPat = keywords.length
     ? `\\b(?:${keywords.map(escapeRegExp).join("|")})\\b`
     : "$^";
 
-  const tokenPattern = new RegExp(
-    "(//.*$|#.*$|\"(?:\\\\.|[^\"])*\"|'(?:\\\\.|[^'])*'|`(?:\\\\.|[^`])*`|" +
-      keywordPattern +
-      "|\\b\\d+(?:\\.\\d+)?\\b)",
+  // Groups (in order):
+  //  1 → comment  (// or #)
+  //  2 → string   ("…", '…', `…`)
+  //  3 → fn call  (word immediately before `(`)
+  //  4 → keyword
+  //  5 → number
+  const pat = new RegExp(
+    "(//.*$|#.*$)" +
+    "|(\"(?:\\\\.|[^\"])*\"|'(?:\\\\.|[^'])*'|`(?:\\\\.|[^`])*`)" +
+    "|(\\b\\w+(?=\\s*\\())" +
+    "|(" + kwPat + ")" +
+    "|(\\b\\d+(?:\\.\\d+)?\\b)",
     "g",
   );
 
@@ -122,28 +139,28 @@ function tokenizeCodeLine(line: string, language?: string): CodeToken[] {
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
-  while ((match = tokenPattern.exec(line)) !== null) {
+  while ((match = pat.exec(line)) !== null) {
     if (match.index > lastIndex) {
       tokens.push({ text: line.slice(lastIndex, match.index) });
     }
 
-    const value = match[0];
+    const full = match[0];
 
-    if (value.startsWith("//") || value.startsWith("#")) {
-      tokens.push({ text: value, dimColor: true });
-    } else if (
-      value.startsWith("\"") ||
-      value.startsWith("'") ||
-      value.startsWith("`")
-    ) {
-      tokens.push({ text: value, color: "green" });
-    } else if (/^\d/.test(value)) {
-      tokens.push({ text: value, color: "yellow" });
+    if (match[1]) {
+      // Comment → dim
+      tokens.push({ text: full, dimColor: true });
+    } else if (match[2]) {
+      // String → orange if file path/name, else white
+      tokens.push({ text: full, color: isFileString(full) ? "#f97316" : undefined });
+    } else if (match[3]) {
+      // Function call name → orange (unless it's a keyword like `if`, `for`)
+      tokens.push({ text: full, color: keywordSet.has(full) ? undefined : "#f97316" });
     } else {
-      tokens.push({ text: value, color: "cyan", bold: true });
+      // Keyword or number → plain white (no color override)
+      tokens.push({ text: full });
     }
 
-    lastIndex = match.index + value.length;
+    lastIndex = match.index + full.length;
   }
 
   if (lastIndex < line.length) {
@@ -310,19 +327,37 @@ function parseBlocks(content: string): RenderedBlock[] {
   const processed: RenderedBlock[] = [];
   for (let j = 0; j < blocks.length; j += 1) {
     const block = blocks[j]!;
+    const next = blocks[j + 1];
     const prev = processed[processed.length - 1];
 
+    // Blank before headers (section breathing room), skip if already blank or first block
+    if (block.type === "header" && prev && prev.type !== "blank") {
+      processed.push({ type: "blank", content: "" });
+    }
+
+    // Blank before the FIRST item in a top-level list group (not between items)
     if (
       block.type === "list" &&
-      block.listOrdered &&
       (block.listDepth ?? 0) === 0 &&
       prev &&
+      prev.type !== "list" &&
       prev.type !== "blank"
     ) {
       processed.push({ type: "blank", content: "" });
     }
 
     processed.push(block);
+
+    // Blank after the LAST item in a top-level list group (before next non-list content)
+    if (
+      block.type === "list" &&
+      (block.listDepth ?? 0) === 0 &&
+      next &&
+      next.type !== "list" &&
+      next.type !== "blank"
+    ) {
+      processed.push({ type: "blank", content: "" });
+    }
   }
 
   return processed;
@@ -465,8 +500,8 @@ function renderBlock(block: RenderedBlock, idx: number, width: number): React.JS
         <Box
           key={idx}
           flexDirection="column"
-          marginTop={level <= 2 ? 1 : 0}
-          marginBottom={1}
+          marginTop={1}
+          marginBottom={level <= 2 ? 1 : 0}
         >
           <Text bold color={color}>
             {block.content}
@@ -506,6 +541,9 @@ function renderBlock(block: RenderedBlock, idx: number, width: number): React.JS
       );
 
     case "list": {
+      // Skip empty list items — streaming artifact when LLM outputs "- " with no text yet
+      if (!block.listText?.trim()) return <Box key={idx} flexShrink={0} />;
+
       const depth = block.listDepth ?? 0;
       const indent = "  ".repeat(depth);
 
@@ -522,7 +560,7 @@ function renderBlock(block: RenderedBlock, idx: number, width: number): React.JS
     }
 
     case "blank":
-      return <Box key={idx} height={1} />;
+      return <Box key={idx} height={1} flexShrink={0} />;
 
     case "paragraph":
     default: {

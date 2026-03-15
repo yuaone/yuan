@@ -95,7 +95,7 @@ function Indicator({ agentState }: { agentState: AgentStreamState }): React.JSX.
         const files = filesChangedCount > 0 ? `  ${filesChangedCount} files` : "";
         return (
           <Text dimColor>
-            <Text color="green">✓</Text> done{files}  {tokens} tok  {frozenTime}
+            <Text color="green">✓</Text> done{files}  {tokens} tokens  {frozenTime}
           </Text>
         );
       }
@@ -249,6 +249,13 @@ function KeybindHints({ agentState, slashMenuOpen, hasReasoning }: { agentState:
       <Box>
         <Text bold>esc</Text>
         <Text dimColor> interrupt</Text>
+        {hasReasoning && (
+          <>
+            <Text dimColor>  </Text>
+            <Text bold>r</Text>
+            <Text dimColor> reasoning</Text>
+          </>
+        )}
       </Box>
     );
   }

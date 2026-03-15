@@ -30,6 +30,11 @@ export interface InputBoxProps {
   onQueueMessage?: (value: string) => void;
   /** Queued pending message to display while agent is running */
   pendingMessage?: string;
+  pendingCount?: number;
+  queuedMessages?: string[];
+  onQueueEdit?: (index:number)=>string|null;
+  onQueueDelete?: (index:number)=>void;
+  onQueueMove?: (from:number,to:number)=>void;
   /** Task panel is open — ↑↓ navigate tasks, enter expand, esc close */
   taskPanelOpen?: boolean;
   onTaskNavigate?: (direction: "up" | "down") => void;
@@ -53,6 +58,11 @@ export function InputBox({
   disabled,
   onQueueMessage,
   pendingMessage,
+  pendingCount,
+  queuedMessages,
+  onQueueEdit,
+  onQueueDelete,
+  onQueueMove,
   taskPanelOpen,
   onTaskNavigate,
   onTaskExpand,
@@ -65,7 +75,7 @@ export function InputBox({
   // Combine value+cursor into single state → guaranteed single re-render per keypress
   const [inputState, setInputState] = useState({ value: "", cursor: 0 });
   const { value, cursor: cursorPos } = inputState;
-
+   const [queueCursor,setQueueCursor]=useState<number>(0)
   const [pasteBadge, setPasteBadge] = useState<string | null>(null);
   const pasteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Debounce onInputChange to reduce parent re-renders while typing
@@ -273,7 +283,15 @@ export function InputBox({
       if (key.upArrow) {
         if (taskPanelOpen && onTaskNavigate) {
           onTaskNavigate("up");
-        } else if (slashMenuOpen && onSlashNavigate) {
+        } 
+       else if (isRunning && queuedMessages?.length) {
+    const next = (queueCursor+1) % queuedMessages.length
+    setQueueCursor(next)
+    const msg = onQueueEdit?.(next)
+    if(msg) updateValue(msg)
+    return
+  }
+else if (slashMenuOpen && onSlashNavigate) {
           onSlashNavigate("up");
         } else if (isRunning && pendingMessage && !value) {
           updateValue(pendingMessage);
@@ -374,7 +392,7 @@ const separator = useMemo(() => {
   const cmdToken = isSlash ? displayValue.split(" ")[0] : "";
   const cmdRest = isSlash ? displayValue.slice(cmdToken.length) : "";
   const cmdRecognized = isSlash && isKnownCommand(cmdToken);
-
+  
   // Show cursor only when not running and not in slash menu
   const showCursor = !isRunning && !slashMenuOpen;
 
@@ -444,8 +462,16 @@ const separator = useMemo(() => {
       <Box height={1}>
         {isRunning && pendingMessage ? (
           <>
-            <Text dimColor>  ⏸ </Text>
-            <Text dimColor color="yellow" wrap="truncate">{pendingMessage.length > columns - 8 ? pendingMessage.slice(0, columns - 11) + "…" : pendingMessage}</Text>
+            <Text dimColor color="yellow" wrap="truncate">
+              {pendingMessage.length > columns - 18
+                ? pendingMessage.slice(0, columns - 21) + "…"
+                : pendingMessage}
+            </Text>
+            <Text dimColor>
+              {pendingCount && pendingCount > 1
+                ? ` (+${pendingCount - 1} more queued)`
+                : " (queued)"}
+            </Text>
             <Text dimColor> (queued)</Text>
           </>
         ) : null}

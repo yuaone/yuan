@@ -936,6 +936,7 @@ export class BYOKClient {
         maxOutputTokens: 8192,
         thinkingConfig: {
           thinkingBudget: 8192,
+          includeThoughts: true,
         },
       },
     };

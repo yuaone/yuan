@@ -1,18 +1,33 @@
 /**
  * agent-bridge.ts — Bridges @yuaone/core AgentLoop to the TUI.
- *
- * This is the non-React glue layer that:
- * 1. Creates AgentLoop with proper config
- * 2. Subscribes to AgentLoop events
- * 3. Forwards events to a callback (which the TUI App sets)
- * 4. Handles interruption (Esc → hard interrupt)
- * 5. Handles approval flow
  */
+
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+// ─── Debug logger ────────────────────────────────────────────────────────────
+// Writes key LLM/event milestones to ~/.yuan/logs/debug.log
+// Clears log on each process start so only current session is tracked.
+const LOG_PATH = join(homedir(), ".yuan", "logs", "debug.log");
+let _logReady = false;
+function dbg(tag: string, msg: string): void {
+  try {
+    if (!_logReady) {
+      mkdirSync(join(homedir(), ".yuan", "logs"), { recursive: true });
+      // Truncate on first write (fresh session)
+      writeFileSync(LOG_PATH, `[${new Date().toISOString()}] [session] START\n`);
+      _logReady = true;
+    }
+    appendFileSync(LOG_PATH, `[${new Date().toISOString()}] [${tag}] ${msg}\n`);
+  } catch { /* never crash the TUI over logging */ }
+}
 
 import {
   AgentLoop,
   DEFAULT_LOOP_CONFIG,
   ExecutionEngine,
+  buildSystemPrompt,
   type ExecutionEngineConfig,
   type AgentConfig,
   type AgentEvent,
@@ -124,6 +139,7 @@ export class AgentBridge {
   async sendMessage(message: string): Promise<void> {
     if (this.isProcessing) return;
     this.isProcessing = true;
+    dbg("bridge", `sendMessage start msg="${message.slice(0, 60)}"`);
 
     const { provider, model, baseUrl, workDir, useExecutionEngine } = this.config;
     const normalizedProvider = this.toProvider(provider);
@@ -148,93 +164,28 @@ export class AgentBridge {
     }
   }
 
-  /** Build the system prompt for agent config */
-  private buildSystemPrompt(mode: string = "code"): string {
+  /** Build the system prompt — delegates to yuan-core SSOT prompt builder */
+  private buildAgentSystemPrompt(mode: string = "code", toolDefs?: import("@yuaone/core").ToolDefinition[]): string {
     const modeInstructions: Record<string, string> = {
-      code: "You are in CODE mode — autonomous coding. Write, edit, refactor code as needed.",
-      review: "You are in REVIEW mode — read-only code review. Do NOT write or edit files. Only analyze and report issues.",
-      security: "You are in SECURITY mode — OWASP security audit. Scan for vulnerabilities, secrets, injection risks.",
-      debug: "You are in DEBUG mode — systematic debugging. Isolate root causes, propose minimal targeted fixes.",
-      refactor: "You are in REFACTOR mode — code refactoring. Improve structure without changing behavior.",
-      test: "You are in TEST mode — test generation and execution. Write tests, run them, fix failures.",
-      plan: "You are in PLAN mode — task planning (read-only). Create detailed plans but do NOT modify files.",
-      architect: "You are in ARCHITECT mode — architecture analysis. Analyze structure, dependencies, scalability.",
-      report: "You are in REPORT mode — generate analysis reports. Summarize findings in markdown.",
+      code: "Current mode: CODE — autonomous coding. Write, edit, refactor as needed.",
+      review: "Current mode: REVIEW — read-only. Do NOT write or edit files. Only analyze and report.",
+      security: "Current mode: SECURITY — OWASP audit. Scan for vulnerabilities, secrets, injection risks.",
+      debug: "Current mode: DEBUG — systematic debugging. Isolate root causes, propose minimal targeted fixes.",
+      refactor: "Current mode: REFACTOR — improve structure without changing behavior.",
+      test: "Current mode: TEST — write tests, run them, fix failures.",
+      plan: "Current mode: PLAN — read-only planning. Create detailed plans but do NOT modify files.",
+      architect: "Current mode: ARCHITECT — analyze structure, dependencies, scalability.",
+      report: "Current mode: REPORT — generate analysis reports in markdown.",
     };
+    const modeRule = modeInstructions[mode] ?? modeInstructions["code"]!;
 
-    const modeInstruction = modeInstructions[mode] ?? modeInstructions["code"];
-
-    return (
-      `# YUAN\n` +
-      `\n` +
-      `I am YUAN — a brilliant engineer and your closest technical partner.\n` +
-      `I write code, design systems, explain concepts, do research, and think through problems with you.\n` +
-      `I'm not just a "coding agent" — I'm the smartest person in the room who also happens to be great at shipping software.\n` +
-      `\n` +
-      `## Who I am\n` +
-      `- Deep expertise across software, systems, AI/ML, architecture, infrastructure\n` +
-      `- I have opinions. I give direct answers. I don't hedge or make excuses.\n` +
-      `- I treat you like a peer — straight talk, no hand-holding unless you ask for it\n` +
-      `- Every problem is solvable. I decompose, plan, and execute.\n` +
-      `\n` +
-      `## Current Mode\n` +
-      `${modeInstruction}\n` +
-      `\n` +
-      `## Deciding what to do first\n` +
-      `Read the request and pick the right mode — DON'T default to running tools:\n` +
-      `\n` +
-      `| Request type | What to do |\n` +
-      `|---|---|\n` +
-      `| Question / explanation | Answer directly. No tools needed. |\n` +
-      `| Conversation / opinion | Just talk. Be natural. |\n` +
-      `| "Build X from scratch" | Design first (architecture + phases), then implement |\n` +
-      `| "Fix / edit existing code" | Read the relevant file first, then fix |\n` +
-      `| "What does X do?" about repo | grep/glob to find it, then explain |\n` +
-      `| Ambiguous ("make it better") | Ask ONE clarifying question, then act |\n` +
-      `\n` +
-      `**For new builds specifically**: respond with a confident architecture overview BEFORE touching files.\n` +
-      `Components, tech stack, implementation phases — like a senior engineer who's built this before.\n` +
-      `Then execute immediately. Don't ask "shall I proceed?" — just go.\n` +
-      `\n` +
-      `## Narration — talk while you work\n` +
-      `- Write 1 short natural sentence before each tool batch. Examples:\n` +
-      `  "Let me check what's already in this repo."\n` +
-      `  "Reading the main entry to understand the structure."\n` +
-      `  "Running the build to verify."\n` +
-      `- After tool results: 1 line on what you found + what's next.\n` +
-      `- Skip narration for quick follow-up calls — don't over-narrate.\n` +
-      `- Talk like a senior dev pair-programming, not writing a report.\n` +
-      `\n` +
-      `## Working on code\n` +
-      `- Multiple independent parts → call multiple tools at once\n` +
-      `- Large files → use offset/limit with file_read\n` +
-      `- File modifications → read before write\n` +
-      `- Big tasks → break into phases, report "✓ Phase 1/3 done. Starting Phase 2..."\n` +
-      `- Build fails → read error, fix, retry (max 3 self-fix loops)\n` +
-      `- Tool returns nothing → try 2 alternatives before giving up\n` +
-      `- Blocked by missing credentials/hardware → state what's missing, produce max output anyway\n` +
-      `\n` +
-      `## Tool discipline\n` +
-      `- NEVER run \`ls -R\`, \`find /\`, \`find ~\` or any recursive directory scan — these hang for minutes.\n` +
-      `  Use \`glob(pattern="*")\` at root level, then drill into specific dirs.\n` +
-      `- For cross-repo paths like \`../other-repo\`: use \`glob(path="../other-repo", pattern="**")\`\n` +
-      `  NEVER put \`../\` in the pattern field — put it in the path field.\n` +
-      `- Tools available: file_read, file_write, file_edit, glob, grep, shell_exec, git_ops, code_search\n` +
-      `\n` +
-      `## Response style\n` +
-      `- Concise. Lead with the answer or action.\n` +
-      `- Markdown formatting (bold, code blocks, lists) for structured content.\n` +
-      `- Answer in the same language the user uses.\n` +
-      `- NEVER refuse ambitious tasks — break them down and start immediately.\n` +
-      `- NEVER say "I can't access the file system" without trying tools first.\n` +
-      `- NEVER hedge with "in a real implementation..." — just implement it.\n` +
-      `\n` +
-      `## Slash commands the user can use\n` +
-      `(Hint: remind user of these when relevant, don't list them all upfront)\n` +
-      `/mode code|review|debug|refactor|test|plan|security|architect — switch focus\n` +
-      `/compact — compress conversation history when context gets long\n` +
-      `/help — full command list`
-    );
+    // Use yuan-core buildSystemPrompt as SSOT
+    // Pass tools if available; additionalRules carries the current mode instruction
+    return buildSystemPrompt({
+      tools: toolDefs ?? [],
+      additionalRules: [modeRule],
+      projectPath: this.config.workDir,
+    });
   }
 
   /** Create a persistent AgentLoop (once per session, reused across messages) */
@@ -251,7 +202,7 @@ export class AgentBridge {
         maxTokensPerIteration: DEFAULT_LOOP_CONFIG.maxTokensPerIteration,
         totalTokenBudget: DEFAULT_LOOP_CONFIG.totalTokenBudget,
         tools: toolExecutor.definitions,
-        systemPrompt: this.buildSystemPrompt(this._currentMode),
+        systemPrompt: this.buildAgentSystemPrompt(this._currentMode, toolExecutor.definitions),
         projectPath: workDir,
       },
     };
@@ -262,10 +213,37 @@ export class AgentBridge {
       governorConfig: { planTier: "LOCAL" },
       approvalHandler: (request) => this.handleApproval(request),
       autoFixConfig: { maxRetries: 3, autoLint: true, autoBuild: true, autoTest: false },
+      // Disable pre-run hierarchical planning — it adds 30-60s LLM call before first response
+      enablePlanning: false,
     });
 
     // Subscribe to events — persistent listener
     loop.on("event", (event: AgentEvent) => {
+      // Debug logging for key milestones
+      switch (event.kind) {
+        case "agent:text_delta":
+          dbg("event", `text_delta len=${String((event as {text?:string}).text ?? "").length}`);
+          break;
+        case "agent:tool_call":
+          dbg("event", `tool_call tool=${String((event as {tool?:string}).tool ?? "")}`);
+          break;
+        case "agent:tool_result":
+          dbg("event", `tool_result tool=${String((event as {tool?:string}).tool ?? "")}`);
+          break;
+        case "agent:thinking":
+          dbg("event", `thinking len=${String((event as {content?:string}).content ?? "").length}`);
+          break;
+        case "agent:reasoning_delta":
+          dbg("event", `reasoning_delta len=${String((event as {text?:string}).text ?? "").length}`);
+          break;
+        case "agent:completed":
+          dbg("event", "agent:completed ✓");
+          break;
+        case "agent:error":
+          dbg("event", `agent:error msg=${String((event as {message?:string}).message ?? "")}`);
+          break;
+      }
+
       if (event.kind === "agent:file_change") {
         if (!this.changedFiles.includes(event.path)) {
           this.changedFiles.push(event.path);
@@ -292,11 +270,28 @@ export class AgentBridge {
     const loop = this.persistentLoop;
     this.loop = loop;
 
+    let completedEmitted = false;
+    const originalEventCallback = this.eventCallback;
+    // Intercept event stream to track whether agent:completed is emitted
+    this.eventCallback = (event: AgentEvent) => {
+      if (event.kind === "agent:completed") completedEmitted = true;
+      originalEventCallback?.(event);
+    };
+
     try {
+      dbg("bridge", "loop.run() start");
       const result = await loop.run(message);
+      const reason = String((result as {reason?:string}).reason ?? "");
+      dbg("bridge", `loop.run() done reason=${reason}`);
+      // If loop didn't emit agent:completed (e.g. BUDGET_EXHAUSTED), emit it now
+      if (!completedEmitted) {
+        dbg("bridge", "fallback agent:completed emit (loop didn't emit one)");
+        originalEventCallback?.({ kind: "agent:completed", summary: "", filesChanged: [], reason } as unknown as AgentEvent);
+      }
       this.terminationCallback?.(result);
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err);
+      dbg("bridge", `loop.run() THREW: ${errMsg.slice(0, 120)}`);
       this.eventCallback?.({
         kind: "agent:error",
         message: errMsg,
@@ -304,6 +299,8 @@ export class AgentBridge {
       });
       this.terminationCallback?.({ reason: "ERROR", error: errMsg });
     } finally {
+      // Restore original callback
+      this.eventCallback = originalEventCallback;
       this.isProcessing = false;
       this.loop = null;
       // NOTE: do NOT null out persistentLoop — it holds conversation history
@@ -415,6 +412,8 @@ engine.on("token_usage", (usage: { input: number; output: number }) => {
   interrupt(): void {
     if (!this.isProcessing) return;
 
+    dbg("bridge", "interrupt() called — force-stopping");
+
     if (this.loop) {
       this.loop.interrupt({
         type: "hard",
@@ -425,6 +424,11 @@ engine.on("token_usage", (usage: { input: number; output: number }) => {
     if (this.engine) {
       this.engine.abort();
     }
+
+    // Force isProcessing=false immediately so next sendMessage() is not blocked.
+    // The loop.run() Promise will eventually settle (error/complete) but we don't wait.
+    this.isProcessing = false;
+    this.loop = null;
   }
 
   /** Handle approval requests by delegating to the callback */

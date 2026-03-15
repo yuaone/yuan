@@ -284,6 +284,8 @@ export class AgentLoop extends EventEmitter {
   private readonly enableBackgroundAgents: boolean;
   private currentToolPlan: ToolPlan | null = null;
   private executedToolNames: string[] = [];
+  /** Unfulfilled-intent continuation counter — reset each run(), max 3 nudges */
+  private _unfulfilledContinuations = 0;
   /** Context Budget: max 3 active skills at once */
   private activeSkillIds: string[] = [];
   private static readonly MAX_ACTIVE_SKILLS = 3;
@@ -572,7 +574,10 @@ async restoreSession(data: SessionData): Promise<void> {
           projectPath,
           embeddingProvider: new OllamaEmbeddingProvider(),
         });
-        await this.vectorStore.load().catch(() => {});
+        await Promise.race([
+          this.vectorStore.load(),
+          new Promise<void>(resolve => setTimeout(resolve, 1_500)),
+        ]).catch(() => {});
 
         // Background indexing — non-blocking, fires and forgets
         const vectorStoreRef = this.vectorStore;
@@ -1105,6 +1110,7 @@ async restoreSession(data: SessionData): Promise<void> {
       this.tscRanLastIteration = false;
       // Task 1: reset context summarization guard per run
       this._contextSummarizationDone = false;
+      this._unfulfilledContinuations = 0;
     }
 
 this.checkpointSaved = false;
@@ -1117,7 +1123,11 @@ this.checkpointSaved = false;
     this.emitEvent({ kind: "agent:start", goal: userMessage });
 
     // 첫 실행 시 메모리/프로젝트 컨텍스트 자동 로드
-    await this.init();
+    // init은 최대 2초만 블로킹 — Ollama/analyzeProject 등 느린 작업은 백그라운드 계속
+    await Promise.race([
+      this.init(),
+      new Promise<void>(resolve => setTimeout(resolve, 2_000)),
+    ]);
   if (!this.sessionId) {
     this.sessionId = randomUUID();
   }
@@ -2667,6 +2677,30 @@ let iteration = this.iterationCount;
       if (response.toolCalls.length === 0) {
         const content = response.content ?? "";
         let finalSummary = content || "Task completed.";
+
+        // Unfulfilled-intent guard: if LLM previously used tools AND this response has
+        // no tool calls but clearly states future actions, nudge it to proceed (max 3x).
+        const prevHadTools = this.allToolResults.length > 0;
+        const looksIncomplete = prevHadTools && content && (
+          // Korean future-tense "I will do X" patterns
+          /[읽확살분체검수]\w*(?:볼게|할게|보겠어|하겠어|겠습니다)/.test(content) ||
+          /(?:읽어볼게|확인해볼게|살펴볼게|분석할게|체크해볼게|검토할게|수정할게)/.test(content) ||
+          // Generic Korean "will do" trailing verbs on last line
+          /(?:볼게|할게|겠어)[.!]?\s*$/.test(content.trim()) ||
+          // English intent patterns
+          /\b(?:I'll|I will|let me|going to|will now)\s+\w+/i.test(content)
+        );
+        if (looksIncomplete && this._unfulfilledContinuations < 3) {
+          this._unfulfilledContinuations++;
+          this.contextManager.addMessage({ role: "assistant", content });
+          this.contextManager.addMessage({
+            role: "user",
+            content: "Please proceed with the actions you mentioned. Use the available tools to complete them now.",
+          });
+          this.emitEvent({ kind: "agent:thinking", content: `[continuation ${this._unfulfilledContinuations}/3] nudging LLM to execute stated intent` });
+          continue;
+        }
+        this._unfulfilledContinuations = 0;
 
         // Phase transition: implement → verify when LLM signals completion (no tool calls)
         if (this.taskPhase === "implement" && this.changedFiles.length > 0) {

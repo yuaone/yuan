@@ -16,8 +16,8 @@
 
 import { useEffect, useRef } from "react";
 
-const MOUSE_ENABLE  = "\x1b[?1002h\x1b[?1006h"; // button tracking + SGR encoding
-const MOUSE_DISABLE = "\x1b[?1006l\x1b[?1002l";
+const MOUSE_ENABLE  = "\x1b[?1000h\x1b[?1006h"; // basic click tracking + SGR encoding (no drag)
+const MOUSE_DISABLE = "\x1b[?1006l\x1b[?1000l";
 
 // Button codes after the 32-offset encoding (X10 protocol)
 const SCROLL_UP_BTN   = 96; // button 64 + 32
@@ -115,6 +115,11 @@ export function useMouseScroll(
           // Fire scroll callbacks
           for (let i = 0; i < ups;   i++) upRef.current();
           for (let i = 0; i < downs; i++) downRef.current();
+
+          // Drop lone ESC — split TCP packet: \x1b arrived before [<...;...;...m
+          // A lone ESC byte inside the hasMouse branch is always a mouse prefix fragment,
+          // not a real ESC keypress (real ESC wouldn't land here alongside a mouse seq).
+          if (stripped === "\x1b") return true;
 
           // Swallow event entirely if nothing left after stripping
           if (stripped.length === 0) return true;

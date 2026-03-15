@@ -25,7 +25,7 @@ import { ApprovalPrompt, type ApprovalChoice } from "./components/ApprovalPrompt
 import { useSlashCommands } from "./hooks/useSlashCommands.js";
 import { useTaskPanel } from "./hooks/useTaskPanel.js";
 import { TaskPanel } from "./components/TaskPanel.js";
-import { ReasoningPanel } from "./components/ReasoningPanel.js";
+import { WelcomeBanner, WELCOME_BANNER_ROWS } from "./components/WelcomeBanner.js";
 import { AgentBridge } from "./agent-bridge.js";
 import type { AgentEvent, ApprovalResponse } from "@yuaone/core";
 import { checkForUpdate, loadSettings, saveSettings } from "./lib/update-checker.js";
@@ -69,12 +69,15 @@ function App({
   const [approvalToolName, setApprovalToolName] = useState<string | null>(null);
   const [approvalToolArgs, setApprovalToolArgs] = useState<string | null>(null);
 
-  // Pending message queue — typed while agent is running
-  const [pendingMessage, setPendingMessage] = useState<string | null>(null);
+  // Multi-queue — preserve all queued messages in order
+  const [queuedMessageIds, setQueuedMessageIds] = useState<string[]>([]);
+  const dequeueInFlightRef = useRef(false);
+  const [queueEditIndex, setQueueEditIndex] = useState<number | null>(null);
 
-  // Reasoning panel state
-  const [reasoningOpen, setReasoningOpen] = useState(false);
+  // Reasoning content — streamed into ReasoningPanel (R key), inline shown in bubble
   const [reasoningContent, setReasoningContent] = useState("");
+
+const cwd = useMemo(() => process.cwd().replace(os.homedir(), "~"), []);
 
   // Slash command state
   const [slashState, slashActions] = useSlashCommands();
@@ -154,17 +157,39 @@ function App({
   );
 
   // Pending message handler — called when user submits while agent is running
-  // Stores the queued message ID (not content) so we can promote the bubble in-place
-  const pendingMessageRef = useRef<string | null>(null);
+  // Appends queued message IDs in FIFO order so multiple queued prompts are preserved
   const handleQueueMessage = useCallback(
     (value: string) => {
-      const id = `queued-${Date.now()}`;
-      agentStream.addQueuedMessage(value, id);  // ghost bubble immediately visible
-      pendingMessageRef.current = id;            // store id, not content
-      setPendingMessage(value);                  // InputBox hint text
+      const id = `queued-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
+      agentStream.addQueuedMessage(value, id);
+      setQueuedMessageIds((prev) => [...prev, id]);                 // InputBox hint text
     },
     [agentStream],
   );
+  const pendingMessage = useMemo(() => {
+    const nextId = queuedMessageIds[0];
+    if (!nextId) return null;
+    return agentStream.state.messages.find((m) => m.id === nextId)?.content ?? null;
+  }, [queuedMessageIds, agentStream.state.messages]);
+
+  const pendingMessageCount = queuedMessageIds.length;
+const getQueuedContent = useCallback(
+  (id: string) =>
+    agentStream.state.messages.find((m) => m.id === id)?.content ?? "",
+  [agentStream.state.messages],
+);
+const deleteQueued = useCallback((index: number) => {
+  setQueuedMessageIds((prev) => prev.filter((_, i) => i !== index));
+}, []);
+const moveQueued = useCallback((from: number, to: number) => {
+  setQueuedMessageIds((prev) => {
+    if (to < 0 || to >= prev.length) return prev;
+    const next = [...prev];
+    const [item] = next.splice(from, 1);
+    next.splice(to, 0, item);
+    return next;
+  });
+}, []);
 
   // Auto-send pending message when agent becomes idle/completed/interrupted
   const prevStatusRef = useRef(agentStream.state.status);
@@ -176,30 +201,48 @@ function App({
     const wasRunning = prev === "thinking" || prev === "streaming" || prev === "tool_running" || prev === "completed" || prev === "interrupted";
     const isNowIdle = curr === "idle";
 
-    if (wasRunning && isNowIdle && pendingMessageRef.current) {
-      const queuedId = pendingMessageRef.current;
-      pendingMessageRef.current = null;
-      setPendingMessage(null);
+    if (!wasRunning || !isNowIdle) return;
+    if (dequeueInFlightRef.current) return;
+    if (queuedMessageIds.length === 0) return;
 
-      // Find content from the already-existing queued bubble
-      const queuedMsg = agentStream.state.messages.find((m) => m.id === queuedId);
-      if (!queuedMsg) return;
-      const content = queuedMsg.content;
+    const queuedId = queuedMessageIds[0];
+    const queuedMsg = agentStream.state.messages.find((m) => m.id === queuedId);
 
-      // Small delay so the "idle" state is fully settled
-      setTimeout(() => {
-        // Promote ghost bubble (queued_user → user) in-place, then start agent
-        agentStream.promoteQueuedMessage(queuedId);
-        agentStream.startAgent();
-        setTokensPerSec(undefined);
-        lastMessageRef.current = content;
-        bridgeRef.current.sendMessage(content).catch((err: Error) => {
-          agentStream.handleEvent({ kind: "agent:error", message: err.message, retryable: false });
-        });
-      }, 100);
+    // Queue and transcript got out of sync — drop the missing id and continue
+    if (!queuedMsg) {
+      setQueuedMessageIds((prevIds) => prevIds.filter((id) => id !== queuedId));
+      return;
     }
-  }, [agentStream.state.status, agentStream]);
 
+    const content = queuedMsg.content;
+    dequeueInFlightRef.current = true;
+
+    const timer = setTimeout(() => {
+      // Remove from queue first so the next queued item becomes visible immediately
+      setQueuedMessageIds((prevIds) => prevIds.filter((id) => id !== queuedId));
+
+      // Promote ghost bubble (queued_user → user) in-place, then start agent
+      agentStream.promoteQueuedMessage(queuedId);
+      agentStream.startAgent();
+      setTokensPerSec(undefined);
+      setReasoningContent("");
+      lastMessageRef.current = content;
+
+      Promise.resolve(bridgeRef.current.sendMessage(content))
+        .catch((err: Error) => {
+          agentStream.handleEvent({
+            kind: "agent:error",
+            message: err.message,
+            retryable: false,
+          });
+        })
+        .finally(() => {
+          dequeueInFlightRef.current = false;
+        });
+    }, 100);
+
+    return () => clearTimeout(timer);
+  }, [agentStream.state.status, agentStream.state.messages, agentStream, queuedMessageIds]);
   // Interruption
   const handleInterrupt = useCallback(() => {
     bridgeRef.current.interrupt();
@@ -359,14 +402,6 @@ function App({
     return () => clearTimeout(timer);
   }, [version, agentStream]);
 
-  // Insert welcome banner as system message (scrollable like chat)
-  useEffect(() => {
-    if (agentStream.state.messages.length === 0) {
-      const cwd = process.cwd().replace(os.homedir(), "~");
-      const meta = JSON.stringify({ model: currentModel, provider, cwd, version });
-      agentStream.addSystemMessage(`YUAN v${version}\nAutonomous Coding Agent\nType /help for commands\nyuaone.com\n---META---\n${meta}`);
-    }
-  }, []);
   // Input change → open/close slash menu
   const handleInputChange = useCallback(
     (value: string) => {
@@ -470,26 +505,51 @@ function App({
     return Math.min(bgTasks.length + 3, 8); // header + rows + footer padding
   }, [taskPanel.isOpen, taskPanel.mode, taskPanel.detailTaskId, bgTasks]);
 
-  // Content area height = total rows - input(4: queued+border+input+border) - footer(1) - slashMenu(N) - taskPanel(N) - reasoningPanel(N when open)
-  const reasoningPanelHeight = reasoningOpen && !!reasoningContent.trim()
-    ? Math.max(6, Math.floor(rows / 3))
-    : 0;
+  const hasConversation = useMemo(
+    () =>
+      agentStream.state.messages.some(
+        (m) =>
+          m.role === "user" ||
+          m.role === "assistant" ||
+          m.role === "queued_user" ||
+          m.role === "tool",
+      ),
+    [agentStream.state.messages],
+  );
+
+  const showWelcomeBanner = !hasConversation;
+
   const contentHeight = useMemo(
-    () => Math.max(3, rows - 5 - slashMenuRows - taskPanelRows - reasoningPanelHeight),
-    [rows, slashMenuRows, taskPanelRows, reasoningPanelHeight],
+    () =>
+      Math.max(
+        3,
+        rows
+          - 5
+          - slashMenuRows
+          - taskPanelRows
+          - (showWelcomeBanner ? WELCOME_BANNER_ROWS + 1 : 0),
+      ),
+    [rows, slashMenuRows, taskPanelRows, showWelcomeBanner],
   );
 
 const messages = agentStream.state.messages;
 
   return (
     <Box flexDirection="column" width={columns} height={rows}>
+     {showWelcomeBanner && (
+        <WelcomeBanner
+          width={columns}
+          version={version}
+          model={currentModel}
+          provider={provider}
+          cwd={cwd}
+        />
+      )}
 
-      {/* Message area — shrinks when slash menu opens below input */}
      <MessageList
         messages={messages}
         isThinking={isRunning}
         maxHeight={contentHeight}
-        pendingMessage={pendingMessage ?? undefined}
       />
 
       {/* Approval prompt — shown when agent needs user approval for a tool call */}
@@ -514,6 +574,22 @@ const messages = agentStream.state.messages;
         isRunning={isRunning}
         onQueueMessage={handleQueueMessage}
         pendingMessage={pendingMessage ?? undefined}
+        pendingCount={pendingMessageCount}
+      queuedMessages={queuedMessageIds.map(id=>getQueuedContent(id))}
+
+  onQueueEdit={(index)=>{
+    const id = queuedMessageIds[index];
+    if(!id) return null;
+    return getQueuedContent(id);
+  }}
+
+  onQueueDelete={(index)=>{
+    deleteQueued(index);
+  }}
+
+  onQueueMove={(from,to)=>{
+    moveQueued(from,to);
+  }}
         taskPanelOpen={taskPanel.isOpen}
         onTaskNavigate={(dir) => {
           if (dir === "up") taskPanel.navigateUp();
@@ -526,18 +602,7 @@ const messages = agentStream.state.messages;
       />
 
       {/* Status indicator — below input */}
-      <FooterBar agentState={agentStream.state} slashMenuOpen={slashState.isOpen} hasReasoning={!!reasoningContent.trim()} />
-
-      {/* Reasoning panel — below footer, same level as TaskPanel */}
-      {reasoningContent.trim() && (
-        <ReasoningPanel
-          content={reasoningContent}
-          isOpen={reasoningOpen}
-          onOpen={() => setReasoningOpen(true)}
-          onClose={() => setReasoningOpen(false)}
-          maxHeight={Math.max(6, Math.floor(rows / 3))}
-        />
-      )}
+      <FooterBar agentState={agentStream.state} slashMenuOpen={slashState.isOpen} hasReasoning={false} />
 
       {/* Task panel — background agent list / detail view */}
       {taskPanel.isOpen && bgTasks.length > 0 && (
