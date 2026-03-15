@@ -1,7 +1,8 @@
 /**
  * MessageList — scrollable message area.
  *
- * Layout: bottom-aligned chat (latest messages at bottom, like Claude.ai).
+ * Layout: web-page feel (content starts at top, grows down).
+ * Banner: first RenderItem — permanent transcript header, scrolls up naturally.
  * Scroll: line-based (not message-based) — smooth without jumps.
  * Stable: estimateLines is frozen during streaming to prevent startIdx jitter.
  */
@@ -14,38 +15,75 @@ import { Spinner } from "./Spinner.js";
 import { TOKENS } from "../lib/tokens.js";
 import { useMouseScroll } from "../hooks/useMouseScroll.js";
 import type { TUIMessage } from "../types.js";
+import stringWidth from "string-width";
 
 // Re-export for backward compat with App.tsx
 export type { TUIMessage } from "../types.js";
+
+// ─── RenderItem union ────────────────────────────────────────────────────────
+
+type BannerItem = {
+  kind: "banner";
+  id: "__welcome_banner__";
+};
+
+type RenderItem = BannerItem | TUIMessage;
+
+// ─── Props ───────────────────────────────────────────────────────────────────
 
 export interface MessageListProps {
   messages: TUIMessage[];
   isThinking?: boolean;
   maxHeight?: number;
   pendingMessage?: string;
+  hasConversationMessages?: boolean;
+  welcomeBanner?: React.ReactNode;
+  welcomeBannerRows?: number;
 }
+
+// ─── Line estimation ─────────────────────────────────────────────────────────
 
 const DIFF_TOOL_NAMES = new Set(["file_write", "file_edit", "edit_file", "write_file"]);
 
 /**
+ * Count how many terminal lines a string occupies, accounting for:
+ * - Hard newlines (\n) in the text
+ * - CJK double-width characters (using string-width)
+ * - Word wrapping at maxWidth columns
+ */
+function countWrappedLines(text: string, maxWidth: number): number {
+  if (!text || maxWidth <= 0) return 1;
+  const hardLines = text.split("\n");
+  let total = 0;
+  for (const line of hardLines) {
+    const w = stringWidth(line);
+    if (w === 0) {
+      total += 1; // empty line still occupies one row
+    } else {
+      total += Math.ceil(w / maxWidth);
+    }
+  }
+  return Math.max(1, total);
+}
+
+/**
  * Estimate how many terminal lines a message will occupy.
- * Conservative (overestimates) to guarantee no overflow.
+ * Uses real word-wrap line counting (CJK-aware) for accuracy.
  */
 function estimateLines(msg: TUIMessage, columns: number): number {
   const contentWidth = Math.max(20, columns - 12);
-  const textLen = msg.content?.length ?? 0;
-  const contentLines = textLen === 0 ? 0 : Math.ceil(textLen / contentWidth) + 1;
+  const content = msg.content ?? "";
 
   switch (msg.role) {
     case "user":
-      return Math.max(1, contentLines) + 2;
+      return countWrappedLines(content, contentWidth) + 2;
     case "assistant": {
       const toolCalls = msg.toolCalls ?? [];
       const toolLines = toolCalls.reduce((sum, tc) => {
         const hasDiff = DIFF_TOOL_NAMES.has(tc.toolName) && tc.status === "success";
         return sum + 2 + (hasDiff ? 24 : 0);
       }, 0);
-      return Math.max(2, contentLines) + toolLines + 2;
+      return Math.max(2, countWrappedLines(content, contentWidth)) + toolLines + 2;
     }
     case "tool":
       return 2;
@@ -60,11 +98,16 @@ function estimateLines(msg: TUIMessage, columns: number): number {
   }
 }
 
+// ─── Component ───────────────────────────────────────────────────────────────
+
 export const MessageList = memo(function MessageList({
   messages,
   isThinking,
   maxHeight,
   pendingMessage,
+  hasConversationMessages = false,
+  welcomeBanner,
+  welcomeBannerRows = 0,
 }: MessageListProps): React.JSX.Element {
   const { columns, rows } = useTerminalSize();
   const height = maxHeight ?? rows - 4;
@@ -72,151 +115,131 @@ export const MessageList = memo(function MessageList({
   // Line-based scroll offset: 0 = pinned to bottom (latest), N = scrolled up N lines
   const [lineOffset, setLineOffset] = useState(0);
   const [pinned, setPinned] = useState(true);
-const velocityRef = useRef(0);
-const inertiaTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-// scroll inertia (Ink / Node safe)
-const runInertia = useCallback(function runInertia() {
-  if (Math.abs(velocityRef.current) < 0.2) {
-    velocityRef.current = 0;
-    if (inertiaTimerRef.current) {
-      clearTimeout(inertiaTimerRef.current);
-      inertiaTimerRef.current = null;
+  // Inertia scroll
+  const velocityRef = useRef(0);
+  const inertiaTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const runInertia = useCallback(function runInertia() {
+    if (Math.abs(velocityRef.current) < 0.5) {  // was 0.2, stop sooner
+      velocityRef.current = 0;
+      if (inertiaTimerRef.current) {
+        clearTimeout(inertiaTimerRef.current);
+        inertiaTimerRef.current = null;
+      }
+      return;
     }
-    return;
-  }
 
-  setLineOffset((prev) => Math.max(0, prev + velocityRef.current));
+    setLineOffset((prev) => Math.max(0, prev + velocityRef.current));
+    velocityRef.current *= 0.82;  // was 0.85, more friction = less overshooting
+    inertiaTimerRef.current = setTimeout(() => runInertia(), 16);
+  }, []);
 
-  velocityRef.current *= 0.85; // friction
+  // Anchor scroll refs
+  const anchorMsgIdRef = useRef<string | null>(null);
+  const anchorOffsetRef = useRef<number>(0);
 
-inertiaTimerRef.current = setTimeout(() => runInertia(), 16);
-}, []);
+  // ─── renderItems: banner (if provided) + messages ─────────────────────────
+  const renderItems = useMemo<RenderItem[]>(() => {
+    if (!welcomeBanner) return messages;
+    return [{ kind: "banner", id: "__welcome_banner__" } as BannerItem, ...messages];
+  }, [messages, welcomeBanner]);
 
-  const prevMsgCountRef = useRef(messages.length);
-// anchor scroll
-const anchorMsgIdRef = useRef<string | null>(null);
-const anchorOffsetRef = useRef<number>(0);
-  // Auto-scroll when new messages arrive (only if pinned)
-  useEffect(() => {
-    if (messages.length > prevMsgCountRef.current && pinned) {
-      setLineOffset(0);
-    }
-    prevMsgCountRef.current = messages.length;
-  }, [messages.length, pinned]);
-
-  // Whether any message is currently streaming
-  const isStreaming = useMemo(
-    () => messages.some((m) => m.isStreaming),
-    [messages],
-  );
-
-  // Line counts: track actual content size for streaming messages too.
-  // Uses content length so the viewport doesn't over-reserve space and jump.
-  // Streaming messages get a minimum of 4 lines to avoid a too-small reservation.
-  const lineCounts = useMemo(
-    () => messages.map((m) => {
+  // ─── lineCounts: one entry per renderItem ─────────────────────────────────
+  const lineCounts = useMemo(() => {
+    const msgCounts = messages.map((m) => {
       const est = estimateLines(m, columns);
       return m.isStreaming ? Math.max(est, 4) : est;
-    }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [messages, columns],
-  );
+    });
+    return welcomeBanner ? [welcomeBannerRows, ...msgCounts] : msgCounts;
+  }, [messages, columns, welcomeBanner, welcomeBannerRows]);
 
   const totalLines = useMemo(
     () => lineCounts.reduce((a, b) => a + b, 0),
     [lineCounts],
   );
-// restore anchor scroll: keep anchor message at same relative position when not pinned
-// lineOffset is "lines from bottom", so offset = totalLines - linesBefore - anchorMsgLines
-useEffect(() => {
-  if (pinned) return;
 
-  const anchorId = anchorMsgIdRef.current;
-  if (!anchorId) return;
+  // ─── Web-page feel: no synthetic top spacer ────────────────────────────────
+  const addTopSpacer = false;
 
-  const idx = messages.findIndex(m => m.id === anchorId);
-  if (idx === -1) return;
+  // ─── Follow newest while pinned (streaming-aware) ─────────────────────────
+  useEffect(() => {
+    if (!pinned) return;
+    if (!hasConversationMessages) return;
+    setLineOffset(0);
+  }, [pinned, totalLines, hasConversationMessages]);
 
-  let linesBefore = 0;
-  for (let i = 0; i < idx; i++) {
-    linesBefore += lineCounts[i] ?? 2;
-  }
+  // ─── Restore anchor scroll when not pinned and content grows ─────────────
+  useEffect(() => {
+    if (pinned) return;
 
-  // Convert top-based position to bottom-based offset
-  const linesAfterAnchor = totalLines - linesBefore - (lineCounts[idx] ?? 2);
-  const newOffset = Math.max(0, linesAfterAnchor);
-  setLineOffset(newOffset);
+    const anchorId = anchorMsgIdRef.current;
+    if (!anchorId) return;
 
-}, [messages, lineCounts, pinned, totalLines]);
-  // Viewport budget (reserve 2 lines for indicators)
+    const idx = renderItems.findIndex((item) =>
+      "kind" in item ? item.id === anchorId : item.id === anchorId,
+    );
+    if (idx < 0) return;
+
+    let linesBefore = 0;
+    for (let i = 0; i < idx; i++) {
+      linesBefore += lineCounts[i] ?? 2;
+    }
+
+    // lineOffset is "lines from bottom"; convert top-based position to bottom-based
+    const anchorLines = lineCounts[idx] ?? 2;
+    const linesAfterAnchor = Math.max(0, totalLines - linesBefore - anchorLines);
+    setLineOffset(linesAfterAnchor);
+  }, [renderItems, lineCounts, totalLines, pinned]);
+
+  // ─── Viewport budget (reserve 2 lines for indicators) ────────────────────
   const budget = Math.max(4, height - 2);
 
-  // Compute visible message indices from line-based offset.
-  // Walk newest→oldest (posFromBottom accumulates upward from 0).
-  // Visible window: [lineOffset, lineOffset+budget) lines from bottom.
+  // ─── Windowing: walk newest→oldest (posFromBottom accumulates upward) ─────
   const visibleIndices = useMemo(() => {
-
     const maxOffset = Math.max(0, totalLines - budget);
     const clampedOffset = Math.min(lineOffset, maxOffset);
 
-    const windowStart = clampedOffset;       // bottom edge of visible area
+    const windowStart = clampedOffset;        // bottom edge of visible area
     const windowEnd = clampedOffset + budget; // top edge of visible area
 
     const indices: number[] = [];
     let posFromBottom = 0;
 
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const msgLines = lineCounts[i] ?? 2;
-      const msgBottom = posFromBottom;          // distance of msg start from chat bottom
-      const msgTop    = posFromBottom + msgLines; // distance of msg end from chat bottom
+    for (let i = renderItems.length - 1; i >= 0; i--) {
+      const itemLines = lineCounts[i] ?? 2;
+      const itemBottom = posFromBottom;
+      const itemTop = posFromBottom + itemLines;
 
-      posFromBottom += msgLines;
+      posFromBottom += itemLines;
 
-      // Message is entirely BELOW the visible window → skip (keep walking up)
-      if (msgTop <= windowStart) continue;
+      // Item is entirely BELOW the visible window → skip
+      if (itemTop <= windowStart) continue;
 
-      // Message is entirely ABOVE the visible window → we've passed the window → stop
-      if (msgBottom >= windowEnd) break;
+      // Item is entirely ABOVE the visible window → stop
+      if (itemBottom >= windowEnd) break;
 
-      // Message overlaps the window → include
+      // Item overlaps the window → include
       indices.unshift(i);
     }
 
     return indices;
-  }, [lineCounts, lineOffset, messages.length, totalLines, budget]);
+  }, [lineCounts, lineOffset, renderItems.length, totalLines, budget]);
 
   const startIdx = visibleIndices[0] ?? 0;
 
-  const visibleMessages = useMemo(
-    () => visibleIndices.map((i) => messages[i]!),
-    [visibleIndices, messages],
-  );
-// capture anchor
-useEffect(() => {
-  if (!visibleIndices.length) return;
+  // ─── Capture anchor for stable scroll ─────────────────────────────────────
+  useEffect(() => {
+    if (!visibleIndices.length) return;
+    const firstVisibleIdx = visibleIndices[0];
+    const item = renderItems[firstVisibleIdx];
+    if (item) {
+      anchorMsgIdRef.current = "kind" in item ? item.id : item.id;
+      anchorOffsetRef.current = lineOffset;
+    }
+  }, [visibleIndices, renderItems, lineOffset]);
 
-  const firstVisibleIdx = visibleIndices[0];
-  const msg = messages[firstVisibleIdx];
-
-  if (msg) {
-    anchorMsgIdRef.current = msg.id;
-    anchorOffsetRef.current = lineOffset;
-  }
-
-}, [visibleIndices, messages, lineOffset]);
-  // Compute visible line total for top-spacer decision
-  const visibleLineTotal = useMemo(
-    () => visibleIndices.reduce((sum, i) => sum + (lineCounts[i] ?? 2), 0),
-    [visibleIndices, lineCounts],
-  );
-
-  // Bottom-aligned chat: add spacer only when actual conversation messages exist
-  // (avoids banner appearing at bottom on fresh start)
-  const hasConversationMessages = messages.some(m => m.role === "user" || m.role === "assistant");
-  const addTopSpacer = pinned && totalLines < budget && hasConversationMessages;
-
-  // Keyboard scroll
+  // ─── Keyboard scroll ──────────────────────────────────────────────────────
   useInput((_input, key) => {
     if (key.pageUp || (key.ctrl && key.upArrow)) {
       setPinned(false);
@@ -230,43 +253,41 @@ useEffect(() => {
     }
   });
 
-  // Mouse wheel: 3 lines per tick
+  // ─── Mouse wheel: 4 lines per tick ────────────────────────────────────────
   const handleMouseUp = useCallback(() => {
     setPinned(false);
-  velocityRef.current += 3;
-
-  if (!inertiaTimerRef.current) {
-    inertiaTimerRef.current = setTimeout(runInertia, 16);
-  }
-  },[runInertia]);
+    velocityRef.current += 4;   // was 3, increase for faster response
+    if (!inertiaTimerRef.current) {
+      inertiaTimerRef.current = setTimeout(runInertia, 16);
+    }
+  }, [runInertia]);
 
   const handleMouseDown = useCallback(() => {
-  velocityRef.current -= 3;
-
-  if (!inertiaTimerRef.current) {
-    inertiaTimerRef.current = setTimeout(runInertia, 16);
-  }
-}, [runInertia]);
-
-
+    velocityRef.current -= 4;   // was -3
+    if (!inertiaTimerRef.current) {
+      inertiaTimerRef.current = setTimeout(runInertia, 16);
+    }
+  }, [runInertia]);
 
   useMouseScroll(handleMouseUp, handleMouseDown);
-useEffect(() => {
-  return () => {
-    if (inertiaTimerRef.current) {
-      clearTimeout(inertiaTimerRef.current);
-    }
-  };
-}, []);
+
+  useEffect(() => {
+    return () => {
+      if (inertiaTimerRef.current) {
+        clearTimeout(inertiaTimerRef.current);
+      }
+    };
+  }, []);
+
   const hasScrolledUp = lineOffset > 0;
 
   return (
     <Box flexDirection="column" height={height} flexShrink={0}>
-      {/* Top spacer — pushes messages to bottom when viewport isn't full (chat feel) */}
+      {/* Top spacer — disabled (web-page feel: content starts at top) */}
       {addTopSpacer && <Box flexGrow={1} />}
 
       {/* Empty state */}
-      {visibleMessages.length === 0 && !isThinking && (
+      {visibleIndices.length === 0 && !isThinking && (
         <Box justifyContent="center" flexGrow={1}>
           <Text dimColor>Type a message to start...</Text>
         </Box>
@@ -279,15 +300,31 @@ useEffect(() => {
         </Box>
       )}
 
-      {/* Messages */}
-      {visibleMessages.map((msg, i) => (
-        <MessageBubble
-          key={msg.id}
-          message={msg}
-          width={columns}
-          isLatest={visibleIndices[i] === messages.length - 1}
-        />
-      ))}
+      {/* Messages (and banner) */}
+      {visibleIndices.map((idx) => {
+        const item = renderItems[idx];
+        if (!item) return null;
+
+        // Banner item
+        if ("kind" in item && item.kind === "banner") {
+          return (
+            <Box key={item.id} marginBottom={1}>
+              {welcomeBanner}
+            </Box>
+          );
+        }
+
+        // Regular message
+        const msg = item as TUIMessage;
+        return (
+          <MessageBubble
+            key={msg.id}
+            message={msg}
+            width={columns}
+            isLatest={idx === renderItems.length - 1}
+          />
+        );
+      })}
 
       {/* Pending queued message bubble */}
       {pendingMessage && (

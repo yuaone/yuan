@@ -543,22 +543,24 @@ const replaceQueued = useCallback((index: number, newContent: string) => {
 
   return (
     <Box flexDirection="column" width={columns} height={rows}>
-      <MessageList
-        messages={messages}
-        isThinking={isRunning}
-        maxHeight={contentHeight}
-        hasConversationMessages={hasConversationMessages}
-        welcomeBanner={
-          <WelcomeBanner
-            width={columns}
-            version={version}
-            model={currentModel}
-            provider={provider}
-            cwd={cwd}
-          />
-        }
-        welcomeBannerRows={WELCOME_BANNER_ROWS + 1}
-      />
+      <Box height={contentHeight} overflow="hidden">
+        <MessageList
+          messages={messages}
+          isThinking={isRunning}
+          maxHeight={contentHeight}
+          hasConversationMessages={hasConversationMessages}
+          welcomeBanner={
+            <WelcomeBanner
+              width={columns}
+              version={version}
+              model={currentModel}
+              provider={provider}
+              cwd={cwd}
+            />
+          }
+          welcomeBannerRows={WELCOME_BANNER_ROWS}
+        />
+      </Box>
 
       {/* Approval prompt — shown when agent needs user approval for a tool call */}
       {agentStream.state.status === "awaiting_approval" && (
