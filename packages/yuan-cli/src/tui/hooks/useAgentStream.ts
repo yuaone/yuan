@@ -366,10 +366,18 @@ export function useAgentStream(): UseAgentStreamReturn {
           setCurrentToolName(null);
           setCurrentToolArgs(null);
           const thinkContent = String(event.content ?? "");
-          // Filter shadow/internal prefixes — go to ReasoningPanel via App.tsx, not chat
-          const isInternalTrace = thinkContent.startsWith("[shadow]") ||
+          // Filter internal-only events — never display in main chat transcript
+          const isInternalTrace =
+            thinkContent.startsWith("[shadow]") ||
             thinkContent.startsWith("[File Skill:") ||
-            thinkContent.startsWith("Phase: ");
+            thinkContent.startsWith("[Phase:") ||
+            thinkContent.startsWith("Phase: ") ||
+            thinkContent.startsWith("phase: ") ||   // phase transition events
+            thinkContent.startsWith("[nudge ") ||    // LLM reminder nudges
+            thinkContent.startsWith("Token budget") || // token budget warnings
+            thinkContent.startsWith("[token") ||
+            thinkContent.startsWith("[verify") ||
+            thinkContent.startsWith("[checkpoint");
           if (!isInternalTrace) {
             appendThinkingLines(thinkContent);
           }
@@ -417,6 +425,10 @@ export function useAgentStream(): UseAgentStreamReturn {
           statusRef.current = "tool_running";
           setStatus("tool_running");
           const toolName = event.tool as string;
+
+          // Filter internal protocol tools — task_complete is a completion signal, not a user-visible tool
+          if (toolName === "task_complete") break;
+
           const args = summarizeArgs(event.input as Record<string, unknown>);
           setCurrentToolName(toolName);
           setCurrentToolArgs(args);
@@ -735,8 +747,8 @@ export function useAgentStream(): UseAgentStreamReturn {
         case "agent:phase_transition": {
           const to = event.to as "explore" | "implement" | "verify" | "finalize";
           setCurrentPhase(to);
-          // Append as a dim thinking line — no new message bubble, no status overlap
-          appendThinkingLines(`phase: ${event.from as string} → ${to} (${event.trigger as string})`);
+          // Phase transition is internal — update footer only, never pollute chat transcript
+          setProgressLabel(`${event.from as string} → ${to}`);
           break;
         }
 

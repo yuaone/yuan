@@ -2900,6 +2900,22 @@ this.emitEvent({
       if (taskCompleteCall) {
         const callArgs = this.parseToolArgs(taskCompleteCall.arguments);
         const taskCompleteSummary = String(callArgs["summary"] ?? response.content ?? "Task completed.");
+
+        // FIX: Save assistant message to context so next conversation turn has valid history
+        this.contextManager.addMessage({
+          role: "assistant",
+          content: response.content,
+          tool_calls: response.toolCalls,
+        });
+
+        // FIX: Emit tool_result so TUI marks task_complete as "success" (stops BlinkingDot + LiveElapsed)
+        this.emitEvent({
+          kind: "agent:tool_result",
+          tool: "task_complete",
+          output: taskCompleteSummary,
+          durationMs: 0,
+        });
+
         this.emitEvent({
           kind: "agent:completed",
           summary: taskCompleteSummary,

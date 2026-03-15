@@ -71,15 +71,21 @@ function countWrappedLines(text: string, maxWidth: number): number {
  * Uses real word-wrap line counting (CJK-aware) for accuracy.
  */
 function estimateLines(msg: TUIMessage, columns: number): number {
-  const contentWidth = Math.max(20, columns - 12);
   const content = msg.content ?? "";
 
   switch (msg.role) {
-    case "user":
-      return countWrappedLines(content, contentWidth) + 2;
+    case "user": {
+      // MessageBubble user: "> " prefix + right pad = width - 5 effective content width
+      const contentWidth = Math.max(20, columns - 5);
+      return countWrappedLines(content, contentWidth) + 2; // +2 for marginBottom={2}
+    }
     case "assistant": {
+      // MessageBubble assistant: assistantContentWidth = width - 3
+      const contentWidth = Math.max(20, columns - 3);
       const toolCalls = msg.toolCalls ?? [];
-      const toolLines = toolCalls.reduce((sum, tc) => {
+      // Filter out task_complete — it's hidden from UI
+      const visibleToolCalls = toolCalls.filter((tc) => tc.toolName !== "task_complete");
+      const toolLines = visibleToolCalls.reduce((sum, tc) => {
         const hasDiff = DIFF_TOOL_NAMES.has(tc.toolName) && tc.status === "success";
         return sum + 2 + (hasDiff ? 24 : 0);
       }, 0);
@@ -130,7 +136,26 @@ export const MessageList = memo(function MessageList({
       return;
     }
 
-    setLineOffset((prev) => Math.max(0, prev + velocityRef.current));
+    let hitBottom = false;
+    setLineOffset((prev) => {
+      const next = prev + velocityRef.current;
+      if (next <= 0) {
+        hitBottom = true;
+        return 0;
+      }
+      return next;
+    });
+
+    if (hitBottom) {
+      // Stop inertia immediately when hitting the bottom — prevents banner push jitter
+      velocityRef.current = 0;
+      if (inertiaTimerRef.current) {
+        clearTimeout(inertiaTimerRef.current);
+        inertiaTimerRef.current = null;
+      }
+      return;
+    }
+
     velocityRef.current *= 0.82;  // was 0.85, more friction = less overshooting
     inertiaTimerRef.current = setTimeout(() => runInertia(), 16);
   }, []);
@@ -263,11 +288,12 @@ export const MessageList = memo(function MessageList({
   }, [runInertia]);
 
   const handleMouseDown = useCallback(() => {
+    if (pinned) return; // already at bottom, scroll-down does nothing
     velocityRef.current -= 4;   // was -3
     if (!inertiaTimerRef.current) {
       inertiaTimerRef.current = setTimeout(runInertia, 16);
     }
-  }, [runInertia]);
+  }, [runInertia, pinned]);
 
   useMouseScroll(handleMouseUp, handleMouseDown);
 

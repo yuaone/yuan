@@ -19,7 +19,7 @@ export interface MarkdownRendererProps {
 }
 
 interface RenderedBlock {
-  type: "paragraph" | "code" | "header" | "list" | "blank" | "table";
+  type: "paragraph" | "code" | "header" | "list" | "blank" | "table" | "hr";
   content: string;
   language?: string;
   level?: number;
@@ -254,6 +254,13 @@ function parseBlocks(content: string): RenderedBlock[] {
       continue;
     }
 
+    // Horizontal rule: ---, ***, ___  (3 or more)
+    if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      blocks.push({ type: "hr", content: "" });
+      i += 1;
+      continue;
+    }
+
     const headerMatch = line.match(/^(#{1,6})\s+(.+)/);
     if (headerMatch) {
       blocks.push({
@@ -306,6 +313,7 @@ function parseBlocks(content: string): RenderedBlock[] {
       (lines[i] ?? "").trim() !== "" &&
       !(lines[i] ?? "").startsWith("```") &&
       !/^#{1,6}\s/.test(lines[i] ?? "") &&
+      !/^(-{3,}|\*{3,}|_{3,})\s*$/.test(lines[i] ?? "") &&
       !/^\s*[-*+]\s/.test(lines[i] ?? "") &&
       !/^\s*\d+\.\s/.test(lines[i] ?? "") &&
       !(
@@ -558,6 +566,13 @@ function renderBlock(block: RenderedBlock, idx: number, width: number): React.JS
         </Box>
       );
     }
+
+    case "hr":
+      return (
+        <Box key={idx} marginTop={1} marginBottom={1}>
+          <Text dimColor>{"─".repeat(Math.max(8, width - 4))}</Text>
+        </Box>
+      );
 
     case "blank":
       return <Box key={idx} height={1} flexShrink={0} />;
