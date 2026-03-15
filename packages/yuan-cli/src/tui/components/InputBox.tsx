@@ -32,9 +32,10 @@ export interface InputBoxProps {
   pendingMessage?: string;
   pendingCount?: number;
   queuedMessages?: string[];
-  onQueueEdit?: (index:number)=>string|null;
-  onQueueDelete?: (index:number)=>void;
-  onQueueMove?: (from:number,to:number)=>void;
+  onQueueEdit?: (index: number) => string | null;
+  onQueueDelete?: (index: number) => void;
+  onQueueMove?: (from: number, to: number) => void;
+  onQueueReplace?: (index: number, newContent: string) => void;
   /** Task panel is open — ↑↓ navigate tasks, enter expand, esc close */
   taskPanelOpen?: boolean;
   onTaskNavigate?: (direction: "up" | "down") => void;
@@ -63,6 +64,7 @@ export function InputBox({
   onQueueEdit,
   onQueueDelete,
   onQueueMove,
+  onQueueReplace,
   taskPanelOpen,
   onTaskNavigate,
   onTaskExpand,
@@ -75,7 +77,10 @@ export function InputBox({
   // Combine value+cursor into single state → guaranteed single re-render per keypress
   const [inputState, setInputState] = useState({ value: "", cursor: 0 });
   const { value, cursor: cursorPos } = inputState;
-   const [queueCursor,setQueueCursor]=useState<number>(0)
+  const [queueCursor, setQueueCursor] = useState<number>(0);
+  const [queueMode, setQueueMode] = useState(false);
+  // Saves input value before entering queue mode so we can restore it on cancel
+  const savedInputRef = useRef("");
   const [pasteBadge, setPasteBadge] = useState<string | null>(null);
   const pasteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Debounce onInputChange to reduce parent re-renders while typing
@@ -129,6 +134,38 @@ export function InputBox({
     [onInputChange],
   );
 
+  // ── Queue mode helpers ────────────────────────────────────────────────────
+  const enterQueueMode = useCallback((msgs: string[]) => {
+    if (!msgs.length) return;
+    savedInputRef.current = value;
+    const idx = msgs.length - 1; // start at most-recently-queued
+    setQueueCursor(idx);
+    setQueueMode(true);
+    updateValue(msgs[idx] ?? "");
+  }, [value, updateValue]);
+
+  const exitQueueMode = useCallback((restoreInput = true) => {
+    setQueueMode(false);
+    if (restoreInput) updateValue(savedInputRef.current);
+    else updateValue("");
+    savedInputRef.current = "";
+  }, [updateValue]);
+
+  // Sync cursor + content when queuedMessages prop changes while in queue mode
+  // (e.g. after delete, the parent re-renders with the new array — this corrects stale reads)
+  useEffect(() => {
+    if (!queueMode) return;
+    const msgs = queuedMessages;
+    if (!msgs?.length) {
+      exitQueueMode(true);
+      return;
+    }
+    const clamped = Math.min(queueCursor, msgs.length - 1);
+    if (clamped !== queueCursor) setQueueCursor(clamped);
+    updateValue(msgs[clamped] ?? "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queuedMessages]); // intentionally only on queuedMessages change
+
   useInput(
     (input, key) => {
       if (disabled) return;
@@ -176,6 +213,16 @@ export function InputBox({
       if (input === "[A" || input === "\x1b[A") {
         if (slashMenuOpen && onSlashNavigate) {
           onSlashNavigate("up");
+        } else if (queueMode && queuedMessages) {
+          if (queueCursor > 0) {
+            const next = queueCursor - 1;
+            setQueueCursor(next);
+            updateValue(queuedMessages[next] ?? "");
+          }
+          return;
+        } else if (isRunning && !queueMode && queuedMessages?.length) {
+          enterQueueMode(queuedMessages);
+          return;
         } else {
           const prev = history.up(value);
           if (prev !== null) updateValue(prev);
@@ -185,6 +232,15 @@ export function InputBox({
       if (input === "[B" || input === "\x1b[B") {
         if (slashMenuOpen && onSlashNavigate) {
           onSlashNavigate("down");
+        } else if (queueMode && queuedMessages) {
+          if (queueCursor < queuedMessages.length - 1) {
+            const next = queueCursor + 1;
+            setQueueCursor(next);
+            updateValue(queuedMessages[next] ?? "");
+          } else {
+            exitQueueMode(true);
+          }
+          return;
         } else {
           const next = history.down();
           if (next !== null) updateValue(next);
@@ -192,7 +248,7 @@ export function InputBox({
         return;
       }
 
-      // Esc → close task panel → close slash menu → interrupt
+      // Esc → close task panel → close slash menu → exit queue mode → interrupt
       if (key.escape) {
         if (taskPanelOpen) {
           onTaskPanelClose?.();
@@ -200,6 +256,10 @@ export function InputBox({
         }
         if (slashMenuOpen) {
           onSlashClose?.();
+          return;
+        }
+        if (queueMode) {
+          exitQueueMode(true);
           return;
         }
         if (isRunning && onInterrupt) {
@@ -213,6 +273,19 @@ export function InputBox({
         // If task panel is open in list mode → expand selected task
         if (taskPanelOpen && onTaskExpand) {
           onTaskExpand();
+          return;
+        }
+
+        // Queue mode: save edited message at same position then exit
+        if (queueMode) {
+          const trimmed = value.trim();
+          if (trimmed) {
+            onQueueReplace?.(queueCursor, trimmed);
+          } else {
+            // Empty input → delete the item
+            onQueueDelete?.(queueCursor);
+          }
+          exitQueueMode(false); // clear input after save
           return;
         }
 
@@ -279,16 +352,23 @@ export function InputBox({
         return;
       }
 
-      // Arrow up/down — task panel > slash menu > history/pending
+      // Arrow up/down — task panel > slash menu > queue mode > history/pending
       if (key.upArrow) {
         if (taskPanelOpen && onTaskNavigate) {
           onTaskNavigate("up");
         } else if (slashMenuOpen && onSlashNavigate) {
           onSlashNavigate("up");
-        } else if (isRunning && pendingMessage && !value) {
-          updateValue(pendingMessage);
+        } else if (queueMode && queuedMessages) {
+          // In queue mode: navigate to older (lower index = runs sooner)
+          if (queueCursor > 0) {
+            const next = queueCursor - 1;
+            setQueueCursor(next);
+            updateValue(queuedMessages[next] ?? "");
+          }
+        } else if (isRunning && queuedMessages?.length) {
+          // Enter queue mode — start at most-recently-added item
+          enterQueueMode(queuedMessages);
         } else if (!isRunning) {
-          // Only navigate history when NOT running — avoids history injection during approval prompt
           const prev = history.up(value);
           if (prev !== null) updateValue(prev);
         }
@@ -300,23 +380,40 @@ export function InputBox({
           onTaskNavigate("down");
         } else if (slashMenuOpen && onSlashNavigate) {
           onSlashNavigate("down");
+        } else if (queueMode && queuedMessages) {
+          // In queue mode: navigate to newer (higher index = runs later), or exit
+          if (queueCursor < queuedMessages.length - 1) {
+            const next = queueCursor + 1;
+            setQueueCursor(next);
+            updateValue(queuedMessages[next] ?? "");
+          } else {
+            exitQueueMode(true); // exit, restore original input
+          }
         } else if (!value && !slashMenuOpen && hasBackgroundTasks && onTaskPanelOpen) {
-          // ↓ on empty input → open task panel
           onTaskPanelOpen();
         } else if (!isRunning) {
-          // Only navigate history when NOT running
           const next = history.down();
           if (next !== null) updateValue(next);
         }
         return;
       }
 
-      // Backspace — delete char before cursor
+      // Backspace — delete char before cursor, or delete queue item when empty in queue mode
       if (key.backspace || key.delete) {
+        if (queueMode && cursorPos === 0 && value === "") {
+          // Delete the current queue item — useEffect will sync cursor + content after parent re-renders
+          onQueueDelete?.(queueCursor);
+          // Pre-adjust cursor so the effect lands on the right item
+          if ((queuedMessages?.length ?? 0) <= 1) {
+            exitQueueMode(true); // last item deleted
+          } else {
+            setQueueCursor((c) => Math.max(0, c - 1));
+          }
+          return;
+        }
         if (cursorPos > 0) {
           const newVal = value.slice(0, cursorPos - 1) + value.slice(cursorPos);
           updateValue(newVal, cursorPos - 1);
-          // Close slash menu if we deleted the "/"
           if (!newVal.startsWith("/") && slashMenuOpen) {
             onSlashClose?.();
           }
@@ -385,8 +482,8 @@ const separator = useMemo(() => {
   const cmdRest = isSlash ? displayValue.slice(cmdToken.length) : "";
   const cmdRecognized = isSlash && isKnownCommand(cmdToken);
   
-  // Show cursor only when not running and not in slash menu
-  const showCursor = !isRunning && !slashMenuOpen;
+  // Show cursor when idle, or when in queue mode (editing a queued message while agent runs)
+  const showCursor = (!isRunning || queueMode) && !slashMenuOpen;
 
   /**
    * Build the input line as a SINGLE string with embedded ANSI codes for:
@@ -450,9 +547,17 @@ const separator = useMemo(() => {
 
   return (
     <Box width={columns} flexDirection="column" flexShrink={0}>
-      {/* Pending queued message row — always 1 row height to prevent layout reflow */}
+      {/* Queue nav header (queue mode) OR pending message hint — fixed 1 row */}
       <Box height={1}>
-        {isRunning && pendingMessage ? (
+        {queueMode && queuedMessages ? (
+          <Text>
+            <Text color="#6366f1">[Queue {queueCursor + 1}/{queuedMessages.length}] </Text>
+            <Text dimColor>↑↓ nav  </Text>
+            <Text dimColor>⏎ save  </Text>
+            <Text dimColor>⌫ del  </Text>
+            <Text dimColor>Esc cancel</Text>
+          </Text>
+        ) : isRunning && pendingMessage ? (
           <>
             <Text dimColor color="#9a9a9a" wrap="truncate">
               {pendingMessage.length > columns - 18
@@ -464,7 +569,6 @@ const separator = useMemo(() => {
                 ? ` (+${pendingCount - 1} more queued)`
                 : " (queued)"}
             </Text>
-            <Text dimColor> (queued)</Text>
           </>
         ) : null}
       </Box>
@@ -474,7 +578,12 @@ const separator = useMemo(() => {
       <Box justifyContent="space-between">
         <Box flexShrink={1}>
           <Text dimColor>{"\u2502"} </Text>
-          {isRunning && !value ? (
+          {queueMode ? (
+            <>
+              <Text color="#6366f1">✎ </Text>
+              <Text wrap="truncate">{inputLine}</Text>
+            </>
+          ) : isRunning && !value ? (
             <Text dimColor wrap="truncate">Message YUAN...</Text>
           ) : !value && !isRunning ? (
             <>

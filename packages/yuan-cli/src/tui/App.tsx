@@ -77,7 +77,7 @@ function App({
   // Reasoning content — streamed into ReasoningPanel (R key), inline shown in bubble
   const [reasoningContent, setReasoningContent] = useState("");
 
-const cwd = useMemo(() => process.cwd().replace(os.homedir(), "~"), []);
+  const cwd = useMemo(() => process.cwd().replace(os.homedir(), "~"), []);
 
   // Slash command state
   const [slashState, slashActions] = useSlashCommands();
@@ -190,6 +190,15 @@ const moveQueued = useCallback((from: number, to: number) => {
     return next;
   });
 }, []);
+const replaceQueued = useCallback((index: number, newContent: string) => {
+  const newId = `queued-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  agentStream.addQueuedMessage(newContent, newId);
+  setQueuedMessageIds((prev) => {
+    const next = [...prev];
+    next.splice(index, 1, newId); // replace at same position → preserve execution order
+    return next;
+  });
+}, [agentStream]);
 
   // Auto-send pending message when agent becomes idle/completed/interrupted
   const prevStatusRef = useRef(agentStream.state.status);
@@ -198,10 +207,18 @@ const moveQueued = useCallback((from: number, to: number) => {
     const curr = agentStream.state.status;
     prevStatusRef.current = curr;
 
-    const wasRunning = prev === "thinking" || prev === "streaming" || prev === "tool_running" || prev === "completed" || prev === "interrupted";
+    const wasActivelyRunning = prev === "thinking" || prev === "streaming" || prev === "tool_running";
+    const wasRunning = wasActivelyRunning || prev === "completed" || prev === "interrupted";
     const isNowIdle = curr === "idle";
+    const isNowCompleted = curr === "completed";
 
-    if (!wasRunning || !isNowIdle) return;
+    // Fast path: fire immediately on completed when queue has items (skip 3s idle delay)
+    // Fallback: fire on idle transition (catches interrupted / manual stop)
+    const shouldDequeue =
+      (isNowCompleted && wasActivelyRunning && queuedMessageIds.length > 0) ||
+      (isNowIdle && wasRunning);
+
+    if (!shouldDequeue) return;
     if (dequeueInFlightRef.current) return;
     if (queuedMessageIds.length === 0) return;
 
@@ -505,19 +522,12 @@ const moveQueued = useCallback((from: number, to: number) => {
     return Math.min(bgTasks.length + 3, 8); // header + rows + footer padding
   }, [taskPanel.isOpen, taskPanel.mode, taskPanel.detailTaskId, bgTasks]);
 
-  const hasConversation = useMemo(
-    () =>
-      agentStream.state.messages.some(
-        (m) =>
-          m.role === "user" ||
-          m.role === "assistant" ||
-          m.role === "queued_user" ||
-          m.role === "tool",
-      ),
-    [agentStream.state.messages],
-  );
+  const messages = agentStream.state.messages;
 
-  const showWelcomeBanner = !hasConversation;
+  const hasConversationMessages = useMemo(
+    () => messages.some((m) => m.role === "user" || m.role === "assistant"),
+    [messages],
+  );
 
   const contentHeight = useMemo(
     () =>
@@ -526,30 +536,28 @@ const moveQueued = useCallback((from: number, to: number) => {
         rows
           - 5
           - slashMenuRows
-          - taskPanelRows
-          - (showWelcomeBanner ? WELCOME_BANNER_ROWS + 1 : 0),
+          - taskPanelRows,
       ),
-    [rows, slashMenuRows, taskPanelRows, showWelcomeBanner],
+    [rows, slashMenuRows, taskPanelRows],
   );
-
-const messages = agentStream.state.messages;
 
   return (
     <Box flexDirection="column" width={columns} height={rows}>
-     {showWelcomeBanner && (
-        <WelcomeBanner
-          width={columns}
-          version={version}
-          model={currentModel}
-          provider={provider}
-          cwd={cwd}
-        />
-      )}
-
-     <MessageList
+      <MessageList
         messages={messages}
         isThinking={isRunning}
         maxHeight={contentHeight}
+        hasConversationMessages={hasConversationMessages}
+        welcomeBanner={
+          <WelcomeBanner
+            width={columns}
+            version={version}
+            model={currentModel}
+            provider={provider}
+            cwd={cwd}
+          />
+        }
+        welcomeBannerRows={WELCOME_BANNER_ROWS + 1}
       />
 
       {/* Approval prompt — shown when agent needs user approval for a tool call */}
@@ -589,6 +597,9 @@ const messages = agentStream.state.messages;
 
   onQueueMove={(from,to)=>{
     moveQueued(from,to);
+  }}
+  onQueueReplace={(index, newContent) => {
+    replaceQueued(index, newContent);
   }}
         taskPanelOpen={taskPanel.isOpen}
         onTaskNavigate={(dir) => {
