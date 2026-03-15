@@ -42,7 +42,7 @@ const PHASE_COLORS: Record<TUIPhaseEvent["status"], string> = {
 function PhaseEventTree({ events, width }: { events: TUIPhaseEvent[]; width: number }): React.JSX.Element {
   const maxItemW = Math.max(20, width - 8);
   return (
-    <Box flexDirection="column" paddingLeft={2} marginTop={1}>
+    <Box flexDirection="column">
       {events.map((ev) => {
         const icon = PHASE_ICONS[ev.kind] ?? "◇";
         const color = PHASE_COLORS[ev.status] ?? "#888888";
@@ -302,7 +302,7 @@ export const MessageBubble = React.memo(function MessageBubble({
             const dispW = stringWidth(full);
             const pad = Math.max(0, fillWidth - dispW);
             return (
-              <Text key={i} backgroundColor="#1a1a1a" color="#4b5563">{full}{" ".repeat(pad)}</Text>
+              <Text key={i} backgroundColor="#222222" color="#9a9a9a">{full}{" ".repeat(pad)}</Text>
             );
           })}
         </Box>
@@ -344,7 +344,7 @@ export const MessageBubble = React.memo(function MessageBubble({
             const dispW = stringWidth(full);
             const pad = Math.max(0, fillWidth - dispW);
             return (
-              <Text key={i} backgroundColor="#2a2a2a" color="white">{full}{" ".repeat(pad)}</Text>
+              <Text key={i} backgroundColor="#222222" color="white">{full}{" ".repeat(pad)}</Text>
             );
           })}
         </Box>
@@ -358,6 +358,7 @@ export const MessageBubble = React.memo(function MessageBubble({
       const hasThinking = !!msg.thinkingContent;
       const phaseEvents = msg.phaseEvents ?? [];
       const hasPhaseEvents = phaseEvents.length > 0;
+      const assistantContentWidth = Math.max(12, width - 3);
 
       // Reasoning: only show while streaming, max 3 lines (keeps it out of the way)
       const showThinking = hasThinking && msg.isStreaming;
@@ -373,33 +374,41 @@ export const MessageBubble = React.memo(function MessageBubble({
               <Text dimColor color="#555555">~ {line}</Text>
             </Box>
           ))}
-          {/* ● dot — single row header */}
-          <Box marginTop={thinkingLines.length > 0 ? 1 : 0}>
-            <Text dimColor>● </Text>
+          {/* Fixed 2-col gutter: ● in left column, content in right column */}
+          <Box
+            flexDirection="row"
+            alignItems="flex-start"
+            marginTop={thinkingLines.length > 0 ? 1 : 0}
+          >
+            <Box width={2} flexShrink={0}>
+              <Text dimColor>●</Text>
+            </Box>
+            <Box flexDirection="column" flexGrow={1}>
+              {/* Full content — no firstLine/restContent split (breaks Korean particles) */}
+              {hasText && (
+                <MarkdownRenderer content={msg.content} width={assistantContentWidth} />
+              )}
+              {/* Tool call tree */}
+              {hasTools && (
+                <Box flexDirection="column" marginTop={hasText ? 1 : 0}>
+                  {toolCalls.map((tc, i) => (
+                    <ToolCallLine
+                      key={tc.id}
+                      tc={tc}
+                      isLast={i === toolCalls.length - 1}
+                      width={assistantContentWidth}
+                    />
+                  ))}
+                </Box>
+              )}
+              {/* Phase 3: Autonomous event tree — inline below tools */}
+              {hasPhaseEvents && (
+                <Box marginTop={hasText || hasTools ? 1 : 0}>
+                  <PhaseEventTree events={phaseEvents} width={assistantContentWidth} />
+                </Box>
+              )}
+            </Box>
           </Box>
-          {/* Full content below — no firstLine/restContent split (breaks Korean particles) */}
-          {hasText && (
-            <Box paddingLeft={2}>
-              <MarkdownRenderer content={msg.content} width={width - 4} />
-            </Box>
-          )}
-          {/* Tool call tree */}
-          {hasTools && (
-            <Box flexDirection="column" paddingLeft={2} marginTop={hasText ? 1 : 0}>
-              {toolCalls.map((tc, i) => (
-                <ToolCallLine
-                  key={tc.id}
-                  tc={tc}
-                  isLast={i === toolCalls.length - 1}
-                  width={width - 2}
-                />
-              ))}
-            </Box>
-          )}
-          {/* Phase 3: Autonomous event tree — inline below tools */}
-          {hasPhaseEvents && (
-            <PhaseEventTree events={phaseEvents} width={width - 2} />
-          )}
         </Box>
       );
     }
@@ -422,11 +431,13 @@ export const MessageBubble = React.memo(function MessageBubble({
       );
     }
 
+    case "system": {
       return (
         <Box marginBottom={1}>
           <Text dimColor>{msg.content}</Text>
         </Box>
       );
+    }
 
     default:
       return <Box />;
@@ -450,5 +461,11 @@ export const MessageBubble = React.memo(function MessageBubble({
     }
   }
   if ((pm.phaseEvents?.length ?? 0) !== (nm.phaseEvents?.length ?? 0)) return false;
+  // Check if any phase event status changed (e.g. running → done)
+  if (pm.phaseEvents && nm.phaseEvents) {
+    for (let i = 0; i < pm.phaseEvents.length; i++) {
+      if (pm.phaseEvents[i]?.status !== nm.phaseEvents[i]?.status) return false;
+    }
+  }
   return true;
 });

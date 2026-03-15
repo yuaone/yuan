@@ -2678,29 +2678,20 @@ let iteration = this.iterationCount;
         const content = response.content ?? "";
         let finalSummary = content || "Task completed.";
 
-        // Unfulfilled-intent guard: if LLM previously used tools AND this response has
-        // no tool calls but clearly states future actions, nudge it to proceed (max 3x).
-        const prevHadTools = this.allToolResults.length > 0;
-        const looksIncomplete = prevHadTools && content && (
-          // Korean future-tense "I will do X" patterns
-          /[읽확살분체검수]\w*(?:볼게|할게|보겠어|하겠어|겠습니다)/.test(content) ||
-          /(?:읽어볼게|확인해볼게|살펴볼게|분석할게|체크해볼게|검토할게|수정할게)/.test(content) ||
-          // Generic Korean "will do" trailing verbs on last line
-          /(?:볼게|할게|겠어)[.!]?\s*$/.test(content.trim()) ||
-          // English intent patterns
-          /\b(?:I'll|I will|let me|going to|will now)\s+\w+/i.test(content)
-        );
-        if (looksIncomplete && this._unfulfilledContinuations < 3) {
+        // If LLM outputs text with no tool calls and hasn't signalled completion via task_complete,
+        // remind it once to use tools or call task_complete.
+        if (this._unfulfilledContinuations < 2) {
           this._unfulfilledContinuations++;
           this.contextManager.addMessage({ role: "assistant", content });
           this.contextManager.addMessage({
             role: "user",
-            content: "Please proceed with the actions you mentioned. Use the available tools to complete them now.",
+            content: "Please complete your task: either use the available tools to take action, or call task_complete if you are done.",
           });
-          this.emitEvent({ kind: "agent:thinking", content: `[continuation ${this._unfulfilledContinuations}/3] nudging LLM to execute stated intent` });
+          this.emitEvent({ kind: "agent:thinking", content: `[nudge ${this._unfulfilledContinuations}/2] reminding LLM to use tools or call task_complete` });
           continue;
         }
-        this._unfulfilledContinuations = 0;
+        // Do NOT reset _unfulfilledContinuations here — counter stays spent to prevent infinite nudge loop
+        // (resetting would re-enable nudging on the next continue from phase transition / cheap check failure)
 
         // Phase transition: implement → verify when LLM signals completion (no tool calls)
         if (this.taskPhase === "implement" && this.changedFiles.length > 0) {
@@ -2901,6 +2892,26 @@ this.emitEvent({
         return {
           reason: "GOAL_ACHIEVED",
           summary: finalSummary,
+        };
+      }
+
+      // Intercept task_complete — protocol-level completion signal
+      const taskCompleteCall = response.toolCalls.find((tc) => tc.name === "task_complete");
+      if (taskCompleteCall) {
+        const callArgs = this.parseToolArgs(taskCompleteCall.arguments);
+        const taskCompleteSummary = String(callArgs["summary"] ?? response.content ?? "Task completed.");
+        this.emitEvent({
+          kind: "agent:completed",
+          summary: taskCompleteSummary,
+          filesChanged: this.changedFiles,
+        });
+        this.emitEvent({
+          kind: "agent:reasoning_tree",
+          tree: this.reasoningTree.toJSON(),
+        });
+        return {
+          reason: "GOAL_ACHIEVED",
+          summary: taskCompleteSummary,
         };
       }
 

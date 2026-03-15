@@ -283,15 +283,7 @@ export function InputBox({
       if (key.upArrow) {
         if (taskPanelOpen && onTaskNavigate) {
           onTaskNavigate("up");
-        } 
-       else if (isRunning && queuedMessages?.length) {
-    const next = (queueCursor+1) % queuedMessages.length
-    setQueueCursor(next)
-    const msg = onQueueEdit?.(next)
-    if(msg) updateValue(msg)
-    return
-  }
-else if (slashMenuOpen && onSlashNavigate) {
+        } else if (slashMenuOpen && onSlashNavigate) {
           onSlashNavigate("up");
         } else if (isRunning && pendingMessage && !value) {
           updateValue(pendingMessage);
@@ -462,7 +454,7 @@ const separator = useMemo(() => {
       <Box height={1}>
         {isRunning && pendingMessage ? (
           <>
-            <Text dimColor color="yellow" wrap="truncate">
+            <Text dimColor color="#9a9a9a" wrap="truncate">
               {pendingMessage.length > columns - 18
                 ? pendingMessage.slice(0, columns - 21) + "…"
                 : pendingMessage}
