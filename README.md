@@ -1,62 +1,131 @@
-# YUAN -- Autonomous Coding Agent
+# YUAN — Autonomous Coding Agent
 
 [![CI](https://github.com/yuaone/yuan/actions/workflows/ci.yml/badge.svg)](https://github.com/yuaone/yuan/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-An open-source autonomous coding agent that reads, writes, and fixes code using your own API keys.
+An open-source autonomous coding agent with a **deterministic Decision Engine**, intelligent code quality enforcement, and multi-mode execution. Describe a task in natural language, and the agent plans, reads, writes, verifies, and self-corrects until the job is done.
 
-YUAN runs a **Tool Use Loop** locally on your machine: describe a task in natural language, and the agent iteratively reads files, writes code, runs commands, and self-corrects until the job is done. No hosted service required -- **bring your own API key (BYOK)**.
+**Bring your own API key (BYOK)** — runs locally with OpenAI, Anthropic, or Google Gemini.
 
 ---
 
 ## Quick Start
 
 ```bash
-# One-shot -- describe a task and let the agent handle it
-npx @yuaone/cli code "fix the login bug"
+# Install globally
+npm install -g @yuaone/cli
 
-# Interactive mode -- start a conversation with the agent
-npx @yuaone/cli
+# Interactive mode
+yuan
 
-# Configure your API key (interactive wizard)
-npx @yuaone/cli config
+# One-shot
+yuan code "fix the login bug"
+
+# Configure API key
+yuan config
 ```
 
-On first run, YUAN will prompt you to set up an API key if none is configured.
+---
+
+## Architecture
+
+### Decision Engine (SSOT)
+
+Every user message passes through a **deterministic Decision Engine** before any LLM call. No LLM is used in the decision process — pure heuristic reasoning.
+
+```
+User Message
+  → AgentReasoningEngine (intent, stage, complexity, Code/Math AST analysis)
+  → AgentAffordanceCalculator (5D execution tendency vector, cosineEase)
+  → AgentDecisionOrchestrator (27-field immutable SSOT)
+  → InteractionMode routing: CHAT / HYBRID / AGENT
+  → PromptRuntime (3-layer: SystemCore → PromptRuntime → PromptBuilder)
+  → LLM Call (with Decision-compiled prompt)
+```
+
+**27 Decision fields** control every aspect of execution:
+
+| Category | Fields |
+|----------|--------|
+| Reasoning | intent (9 types), taskStage, complexity, confidence, depthHint, cognitiveLoad |
+| Affordance | explain_plan, inspect_more, edit_now, run_checks, finalize |
+| Execution | interactionMode, planRequired, scanBreadth, verifyDepth, microPlan |
+| Safety | failureSurface, vetoFlags, toolGate, toolBudget, patchScope |
+| Quality | codeQuality (strictMode, primaryRisk), responseHint, leadHint |
+| Intelligence | subAgentPlan, skillActivation, pressureDecision, continuityCapsule |
+| Style | personaHint, styleHint, memoryIntent, memoryLoad |
+
+### Dual-Mode Execution
+
+The Decision Engine automatically routes to the appropriate execution mode:
+
+| Mode | When | Behavior |
+|------|------|----------|
+| **CHAT** | Simple questions, trivial tasks | Fast response, minimal tools, no planning |
+| **HYBRID** | Single-file fixes, moderate tasks | Direct execution + quick verification |
+| **AGENT** | Complex refactoring, multi-file work | Full planning → execution → verification pipeline |
+
+### Prompt 3-Layer Architecture
+
+```
+SystemCore (immutable constitution — identity, behavior, safety)
+  → PromptRuntime (Decision compiler — 16+ dynamic sections, token-budgeted)
+    → PromptBuilder (dumb renderer — zone-ordered, droppable-aware)
+```
+
+### Tool Execution Pipeline
+
+Every tool call passes through a **10-stage safety pipeline**:
+
+```
+SecurityGate → MutationPolicy → JudgmentRules → ToolGate
+→ VetoFlags → DependencyGuard → PatchScope → ToolBudget
+→ PreWriteValidator → PatchTransaction → [Execute]
+→ VerifierRules → SemanticDiffReview → RollbackPoint
+```
 
 ---
 
 ## Features
 
-### Core Agent
-- **Agent Loop** -- Autonomous tool-use loop that plans, executes, and self-corrects
-- **10 Built-in Tools** -- file_read, file_write, file_edit, shell_exec, grep, glob, git_ops, test_run, code_search, web_search
-- **BYOK** -- Works with YUA, OpenAI, Anthropic, and Google Gemini API keys
-- **Multi-provider** -- Store keys for all providers, switch model at runtime with `/model`
-- **Approval Flow** -- Interactive `[Allow] [Always Allow] [Deny]` for destructive operations
-- **One-shot Mode** -- Run a single task and exit (`yuan code "add error handling to auth.ts"`)
-- **Session Persistence** -- Pause, resume, and recover agent sessions
+### Intelligence Layer
+- **Code/Math AST Analysis** — Deterministic code complexity analysis (nesting depth, branches, async patterns, I/O) and math symbolic density detection in user messages
+- **Code Quality Pipeline** — Task-specific constraints (GENERATION/FIX/REFACTOR/TEST/REVIEW), primary risk identification, strict mode (no TODO/stub/placeholder)
+- **Model Weakness Tracker** — Learns model-specific repeated mistakes, injects preventive hints + engine coefficient boosts
+- **Target File Ranker** — Post-retrieval reranking of file candidates (error stack +40, message mention +30, recent change +20)
+- **Command Plan Compiler** — Deterministic shell command compilation for build/test/lint/verify (no LLM hallucination)
+- **Semantic Diff Reviewer** — Classifies change meaning (SIGNATURE/CONTROL_FLOW/IMPORT/CONFIG/BEHAVIOR/STYLE/TEST_ONLY)
 
-### World Model & Proactive Replanning (v0.7.0)
-- **World Model** -- Agent maintains a live snapshot of the codebase state (files, build status, test results) as it works
-- **Transition Model** -- Per-tool failure probability predictions with EMA calibration; learns from past outcomes
-- **Simulation Engine** -- Simulates plan success probability before execution begins; flags high-risk steps upfront
-- **Proactive Replanning** -- Risk scoring every 5 iterations; auto-replan at 70%+ risk without waiting for failure
-- **Immutable Delta-Patch State** -- World state history uses structural sharing (O(k) not O(n) memory per update)
+### Safety & Security
+- **Security Gate** — 17 shell injection patterns, 8 dangerous file paths, 6 credential leak patterns
+- **Workspace Mutation Policy** — 4-zone path protection (SAFE/CAUTION/PROTECTED/FORBIDDEN) with repo-local overrides
+- **Pre-Write Validator** — Quality gate before every file write (context-aware: fileRole, language, changedHunks)
+- **Patch Scope Controller** — Hard limits on blast radius (files, diff lines, cross-package touches) with greenfield/migration exceptions
+- **Patch Transaction Journal** — Atomic before-snapshots for every file mutation, deterministic rollback on failure
+- **Dependency Guard** — 10-ecosystem detection (npm/pnpm/yarn/pip/cargo/go/gem/composer), install policy enforcement
+- **Judgment Rule Registry** — Rule-based tool approval with learning (success/failure tracking, confidence decay)
 
-### Planning & Intelligence
-- **HierarchicalPlanner** -- Task decomposition with dependency graph for complex multi-file work
-- **DebateOrchestrator** -- Coder → Reviewer → Verifier loop for higher code quality
-- **6D Self-Reflection** -- Per-iteration scoring across correctness, completeness, consistency, quality, security, performance
-- **CAG Prompting** -- Cache-Augmented Generation: cold system context cached, dynamic context uncached for efficiency
-- **Parallel Tool Execution** -- Read-only tools (file_read, grep, glob) run in parallel waves; writes serialized by dependency
+### Execution
+- **15 Built-in Tools** — file_read, file_write, file_edit, shell_exec, bash, grep, glob, git_ops, test_run, code_search, web_search, parallel_web_search, security_scan, browser, task_complete
+- **HierarchicalPlanner** — 3-level task decomposition with dependency graph
+- **SubAgent Orchestration** — 6 typed roles (coder/reviewer/tester/debugger/refactorer/planner), DAG-based parallel execution
+- **OverheadGovernor** — Decision-driven subsystem activation (CHAT=all OFF, AGENT=BLOCKING)
+- **Tool Outcome Cache** — Content-hash based caching for deterministic commands (tsc, build, lint)
 
-### Developer Experience
-- **Full TUI** -- Full-screen terminal UI with slash menu, approval prompts, live token counters
-- **Real-time Diff Output** -- file_write shows unified diff instead of silent overwrite
-- **Benchmark Runner** -- `/benchmark` command for tracking performance regressions across runs
-- **Design Mode** -- AI-powered real-time UI collaboration via Playwright
-- **Security** -- Blocked commands, shell injection prevention, sensitive file detection, secret detector
+### Learning & Recovery
+- **Memory Decay** — Exponential confidence decay (30-day half-life) with automatic pruning
+- **Stall Detector** — 10 stall pattern types (read_loop, search_spiral, patch_churn, budget_corner, etc.)
+- **Causal Chain Resolver** — Registry-driven root cause analysis for tool failures
+- **Failure Surface Writer** — Categorized failure tracking for Decision calibration
+- **Self-Evaluation** — Deterministic run scoring (0-1) before reporting completion
+- **Execution Receipt** — Typed run outcome artifact (tools used, files changed, verification status, remaining risks)
+
+### CLI Experience
+- **Content-Aware Pacer** — Output type detection (prose/code/narration/diff/table) with type-specific pacing
+- **Decision-Driven Pacing** — CHAT=instant, AGENT=buffered+narrated, complexity-aware timing
+- **DEC 2026 Synchronized Output** — Flicker-free terminal rendering
+- **Budget Dock Display** — Real-time tool budget warnings in terminal dock
+- **Image Observer** — Automatic image classification (CODE/ERROR/UI/DIAGRAM) with OCR hints
 
 ---
 
@@ -64,195 +133,89 @@ On first run, YUAN will prompt you to set up an API key if none is configured.
 
 | Provider  | Default Model         | Notes                            |
 |-----------|-----------------------|----------------------------------|
-| YUA       | yua-normal            | Self-hosted, OpenAI-compatible   |
 | OpenAI    | gpt-4o-mini           | BYOK                             |
 | Anthropic | claude-sonnet-4-6     | BYOK, 1M context                 |
 | Google    | gemini-2.5-flash      | BYOK                             |
-
-### Model Catalog (2026)
-
-**OpenAI:** `gpt-4o`, `gpt-4o-mini`, `gpt-4.1`, `gpt-4.1-mini`, `o3`, `o3-mini`, `o4-mini`, `gpt-5`, `gpt-5-mini`
-
-**Anthropic:** `claude-opus-4-6` (1M ctx), `claude-sonnet-4-6`, `claude-haiku-4-5`
-
-**Google:** `gemini-2.5-pro` (2M ctx), `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-3.1-pro`, `gemini-3.1-flash`
-
-You can override the model per-session:
 
 ```bash
 yuan code "refactor the auth module" --model anthropic/claude-opus-4-6
 yuan code "quick fix" --model openai/gpt-4o-mini
 ```
 
-Or switch at runtime with `/model` slash command.
-
 ---
 
 ## Installation
 
-### Global install
-
 ```bash
+# Global install
 npm install -g @yuaone/cli
-yuan
-```
 
-### Without installing
-
-```bash
+# Without installing
 npx @yuaone/cli
+
+# Requirements: Node.js >= 20 + API key
 ```
 
-### Requirements
+---
 
-- Node.js >= 20
-- An API key from YUA, OpenAI, or Anthropic
+## Packages
+
+```
+yuan/
+  packages/
+    yuan-core/   @yuaone/core   — Decision Engine, Agent Loop, Prompt Runtime, Safety Pipeline
+    yuan-tools/  @yuaone/tools  — 15 tool implementations
+    yuan-cli/    @yuaone/cli    — CLI, Content-Aware Pacer, Terminal UI
+    yuan-mcp/    @yuaone/mcp    — MCP server adapter
+```
 
 ---
 
 ## Configuration
 
-Run the interactive setup wizard:
-
 ```bash
-yuan config
-```
-
-Or set values directly:
-
-```bash
-# Set provider and API key
-yuan config set-key yua yua-...
-yuan config set-key openai sk-...
+yuan config                          # Interactive wizard
+yuan config set-key openai sk-...    # Set API key
 yuan config set-key anthropic sk-ant-...
-
-# Switch to cloud mode (uses YUA hosted service instead of BYOK)
-yuan config set-mode cloud
+yuan config show                     # View current config
 ```
 
-View current configuration:
-
-```bash
-yuan config show
-```
-
-Configuration is stored in `~/.yuan/config.json`.
+Stored in `~/.yuan/config.json`.
 
 ---
 
-## Usage Examples
+## Project Memory
 
-### Interactive mode
-
-```bash
-yuan
-```
-
-Start a persistent REPL session. The agent remembers context across messages.
-
-### One-shot mode
-
-```bash
-yuan code "add error handling to auth.ts"
-yuan code "write unit tests for the UserService class"
-yuan code "fix the TypeScript build errors"
-```
-
-Describe the task, the agent executes it, and exits when done.
-
-### Cloud mode
-
-```bash
-yuan config set-mode cloud
-yuan code "refactor the database layer"
-```
-
-Use the YUA hosted service instead of your own API key.
-
-### Resume a session
-
-```bash
-yuan resume --list
-yuan resume --id <sessionId>
-```
-
----
-
-## Architecture
-
-YUAN is organized as a pnpm monorepo:
+YUAN learns from your project:
 
 ```
-yuan/
-  packages/
-    yuan-core/     @yuaone/core   -- Agent runtime (loop, governor, planner, context manager, security)
-    yuan-tools/    @yuaone/tools  -- Tool implementations (file I/O, shell, search, git, tests)
-    yuan-cli/      @yuaone/cli    -- CLI entry point, REPL, terminal renderer, session management
-    yuan-mcp/      @yuaone/mcp    -- MCP server adapter for exposing tools to external clients
+.yuan/
+  ├─ memory.json              — Learned patterns, conventions, failed approaches
+  ├─ memory/
+  │   ├─ reflections.json     — Self-reflection entries (max 100, FIFO)
+  │   └─ strategies.json      — Proven task strategies (confidence-sorted)
+  ├─ sessions/                — Session checkpoints with atomic writes
+  ├─ cache/
+  │   ├─ repo-capability-profile.json  — 1-time repo scan (package manager, test framework, etc.)
+  │   └─ model-weaknesses.json         — Model-specific mistake patterns (scoped, decaying)
+  └─ judgment-rules.json      — Tool approval rules (auto-expanding from repo profile)
 ```
-
-### @yuaone/core
-
-The agent runtime. Contains the main Agent Loop that orchestrates LLM calls and tool execution, the Governor that enforces safety limits, the HierarchicalPlanner for task decomposition, ReflexionEngine for per-iteration self-improvement, ContinuationEngine for checkpointing, ExecutionPolicyEngine for cost control, and the Context Manager for token-aware history compaction.
-
-### @yuaone/tools
-
-Implementations of all 9 tools. Each tool extends `BaseTool` with a consistent interface for parameter validation, execution, and result formatting.
-
-### yuan (CLI)
-
-The user-facing CLI built on Commander.js. Provides the interactive REPL, one-shot mode, session persistence (save/resume/list), configuration management, and terminal rendering with syntax-highlighted diffs.
-
-### @yuaone/mcp
-
-An MCP (Model Context Protocol) server that exposes YUAN's tools as MCP resources and tool endpoints, allowing external MCP clients to use YUAN's capabilities.
-
----
-
-## Tools
-
-| Tool          | Description                                                    |
-|---------------|----------------------------------------------------------------|
-| `file_read`   | Read file contents with optional line range                    |
-| `file_write`  | Create or overwrite files                                      |
-| `file_edit`   | Apply targeted string replacements (diff-based editing)        |
-| `shell_exec`  | Execute shell commands with security validation                |
-| `grep`        | Search file contents using regular expressions                 |
-| `glob`        | Find files by name pattern                                     |
-| `git_ops`     | Git operations (status, diff, log, commit, branch)             |
-| `test_run`    | Run project test suites and report results                     |
-| `code_search` | Semantic code search across the project                        |
-
-All tool results are size-limited to prevent context window overflow.
-
----
-
-## Security
-
-YUAN enforces multiple layers of security:
-
-- **Blocked commands** -- `sudo`, `rm -rf /`, interactive editors, network tools, destructive system ops
-- **Shell injection prevention** -- Metacharacter injection (`|`, `&`, `` ` ``, `$()`) is blocked
-- **Sensitive file detection** -- Operations on credentials, keys, and env files trigger warnings
-- **Approval system** -- Dangerous operations (force push, publish, etc.) require explicit approval
-- **Output limits** -- Tool results are capped to prevent token overflow
 
 ---
 
 ## Contributing
-
-Contributions are welcome! See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
 
 ```bash
 git clone https://github.com/yuaone/yuan.git
 cd yuan
 pnpm install
 pnpm run build
-pnpm run dev
 ```
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
 
 ---
 
 ## License
 
-[AGPL-3.0](./LICENSE) -- Copyright 2026 YUA Inc.
+[AGPL-3.0](./LICENSE) — Copyright 2026 YUA Inc.
