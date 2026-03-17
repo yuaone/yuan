@@ -44,6 +44,7 @@ export interface StreamRendererConfig {
   onExit: () => void;
 }
 
+
 /**
  * Launch the stream renderer — the main interactive loop of the CLI.
  *
@@ -203,7 +204,7 @@ export function launchStreamRenderer(config: StreamRendererConfig): void {
     // Use markdown renderer for line-level formatting
     const rendered = mdRenderer.pushLine(lineBuffer);
     if (rendered !== null) {
-      write(rendered);
+      directWrite(rendered);
     }
     lineBuffer = "";
   }
@@ -223,7 +224,7 @@ export function launchStreamRenderer(config: StreamRendererConfig): void {
             codeBlockLang = fenceMatch[1] || "";
             codeLineBuffer = "";
             const langLabel = codeBlockLang ? ` ${codeBlockLang}` : "";
-            write(chalk.bgHex(CODE_COLORS.bg)(chalk.hex(CODE_COLORS.comment)(`  \`\`\`${langLabel}`)) + "\n");
+            directWrite(chalk.bgHex(CODE_COLORS.bg)(chalk.hex(CODE_COLORS.comment)(`  \`\`\`${langLabel}`)) + "\n");
             i += fenceMatch[0].length;
             continue;
           }
@@ -232,7 +233,7 @@ export function launchStreamRenderer(config: StreamRendererConfig): void {
         // Buffer text character by character; flush on newline
         if (text[i] === "\n") {
           flushLineBuffer();
-          write("\n");
+          directWrite("\n");
           i++;
         } else {
           lineBuffer += text[i];
@@ -242,10 +243,10 @@ export function launchStreamRenderer(config: StreamRendererConfig): void {
         // Inside code block — check for closing fence
         if (text[i] === "`" && text.slice(i).startsWith("```") && codeLineBuffer.trim() === "") {
           if (codeLineBuffer) {
-            write(chalk.bgHex(CODE_COLORS.bg)("  " + highlightCodeLine(codeLineBuffer)) + "\n");
-            codeLineBuffer = "";
+             directWrite(chalk.bgHex(CODE_COLORS.bg)("  " + highlightCodeLine(codeLineBuffer)) + "\n");
+             codeLineBuffer = "";
           }
-          write(chalk.bgHex(CODE_COLORS.bg)(chalk.hex(CODE_COLORS.comment)("  ```")) + "\n");
+          directWrite(chalk.bgHex(CODE_COLORS.bg)(chalk.hex(CODE_COLORS.comment)("  ```")) + "\n");
           inCodeBlock = false;
           codeBlockLang = "";
           i += 3;
@@ -254,7 +255,7 @@ export function launchStreamRenderer(config: StreamRendererConfig): void {
         }
 
         if (text[i] === "\n") {
-          write(chalk.bgHex(CODE_COLORS.bg)("  " + highlightCodeLine(codeLineBuffer)) + "\n");
+          directWrite(chalk.bgHex(CODE_COLORS.bg)("  " + highlightCodeLine(codeLineBuffer)) + "\n");
           codeLineBuffer = "";
           i++;
         } else {
@@ -277,7 +278,7 @@ export function launchStreamRenderer(config: StreamRendererConfig): void {
     // Route it through writeWithCodeHighlight for proper rendering
     // (code block detection, syntax highlighting, inline markdown).
     // Each content piece from the pacer is a line with trailing newline.
-    writeWithCodeHighlight(content);
+   write(content);
   });
 
   const pacingStrategy = new PacingStrategy(PACING_CONFIG, (output: PacingOutput) => {
@@ -322,15 +323,30 @@ export function launchStreamRenderer(config: StreamRendererConfig): void {
    * error, completed handlers to ensure all buffered content is rendered.
    */
   function pacerFlushAll(): void {
-    // Flush classifier's incomplete line buffer
-    const incomplete = classifier.flushIncomplete();
-    if (incomplete) {
-      pacingStrategy.route(incomplete);
-    }
+classifier.flushIncomplete(); // 결과 무시 (이미 처리됨)
     // Flush strategy buffers
     pacingStrategy.flushAll();
     // Flush output queue
     outputQueue.flushAll();
+  }
+  function directWrite(text: string): void {
+    if (text.length === 0) return;
+
+    const emit = (): void => {
+      if (dock?.active) {
+        dock.appendTranscript(text);
+      } else {
+        writeGate.write(text);
+      }
+      lastCharNewline = text.endsWith("\n");
+    };
+
+    if (dock?.active) {
+      emit();
+      return;
+    }
+
+    input.runAbovePrompt(emit);
   }
 
   /**
@@ -343,6 +359,34 @@ export function launchStreamRenderer(config: StreamRendererConfig): void {
     pacerKeyCounter = 0;
   }
 
+  function cleanup(closeInput = true): void {
+    if (metricsInterval) { clearInterval(metricsInterval); metricsInterval = null; }
+    pacerFlushAll();
+    showCursor();
+    toolDisplay.dispose();
+    writeGate.dispose();
+    dock?.dispose();
+    if (closeInput) {
+      input.close({ exitProcess: false });
+    }
+  }
+
+  function clearPlainInputFrame(): void {
+    // Cursor is on prompt line:
+    //   line -1: top separator
+    //   line  0: prompt line
+    //   line +1: bottom separator
+    writeGate.write(
+      "\x1b[1A" +    // move to top separator
+      "\x1b[2K\r" +  // clear top separator
+      "\x1b[1B" +    // back to prompt line
+      "\x1b[2K\r" +  // clear prompt line
+      "\n" +         // move to bottom separator line
+      "\x1b[2K\r" +  // clear bottom separator
+      "\n"           // move to a clean line below the frame
+    );
+    lastCharNewline = true;
+  }
   // ── Cursor hide/show + cleanup ───────────────────────────────────────────
 
   const HIDE_CURSOR = "\x1b[?25l";
@@ -356,15 +400,6 @@ export function launchStreamRenderer(config: StreamRendererConfig): void {
     process.stdout.write(HIDE_CURSOR);
   }
 
-  function cleanup(): void {
-    if (metricsInterval) { clearInterval(metricsInterval); metricsInterval = null; }
-    pacerFlushAll();
-    showCursor();
-    toolDisplay.dispose();
-    writeGate.dispose();
-    dock?.dispose();
-    input.close();
-  }
 
   // Ensure cursor is restored on any exit path.
   process.on("exit", showCursor);
@@ -399,12 +434,7 @@ export function launchStreamRenderer(config: StreamRendererConfig): void {
    */
   function write(text: string): void {
     if (text.length === 0) return;
-    if (dock?.active) {
-      dock.appendTranscript(text);
-    } else {
-      writeGate.write(text);
-    }
-    lastCharNewline = text.endsWith("\n");
+writeWithCodeHighlight(text);
   }
 
   /** Write a line followed by newline. */
@@ -419,10 +449,42 @@ export function launchStreamRenderer(config: StreamRendererConfig): void {
     }
   }
 
+ function getSeparatorLine(): string {
+    const width = cols();
+    return chalk.hex("#3a3a3a")("─".repeat(Math.min(width, 120)));
+  }
+
   /** Print a gray horizontal separator spanning the terminal width. */
   function printSeparator(): void {
-    const width = cols();
-    writeln(chalk.gray("\u2500".repeat(Math.min(width, 120))));
+directWrite(getSeparatorLine() + "\n");
+  }
+
+  function renderIdleInputFrame(): void {
+    if (dock?.active) {
+      input.prompt();
+      return;
+    }
+
+    if (!lastCharNewline) {
+      writeGate.write("\n");
+      lastCharNewline = true;
+    }
+
+    // top separator
+    writeGate.write(getSeparatorLine() + "\n");
+
+    // prompt line
+     input.prompt();
+
+    // draw bottom separator below the prompt, then restore cursor to prompt line
+    writeGate.write("\x1b7");              // save cursor (on prompt line)
+    writeGate.write("\n");                 // move to line below prompt
+    writeGate.write("\x1b[2K\r");          // clear that line
+    writeGate.write(getSeparatorLine());   // bottom separator
+    writeGate.write("\x1b8");              // restore cursor to prompt line
+
+    // cursor is back on prompt line, not at a newline
+    lastCharNewline = false;
   }
 
   /** Format a token count compactly: 1234 -> "1.2k", 56789 -> "56.8k". */
@@ -550,7 +612,32 @@ export function launchStreamRenderer(config: StreamRendererConfig): void {
     onCommand(command: string, args: string): void {
       handleCommand(command, args);
     },
-  });
+    onEmptyInterrupt(): void {
+      if (dock?.active) {
+        // Claude Code-style: print ^C into transcript, then re-open clean idle dock
+        dock.appendTranscript("^C\n");
+        dock.setMode("idle");
+        renderIdleInputFrame();
+        return;
+      }
+
+      clearPlainInputFrame();
+      writeGate.write("^C\n");
+      lastCharNewline = true;
+      renderIdleInputFrame();
+    },
+
+    onDoubleInterruptExit(): void {
+      if (dock?.active) {
+        dock.dispose();
+        process.stdout.write("^C\n");
+      } else {
+        clearPlainInputFrame();
+        writeGate.write("^C\n");
+      }
+      cleanup(false);
+    },
+   });
 
   // ── Finish turn helper ───────────────────────────────────────────────────
 
@@ -563,6 +650,7 @@ export function launchStreamRenderer(config: StreamRendererConfig): void {
     pacerReset();
     showCursor();
     input.unlock();
+    renderIdleInputFrame();
   }
 
   // ── Wire bridge events ───────────────────────────────────────────────────
@@ -787,9 +875,6 @@ export function launchStreamRenderer(config: StreamRendererConfig): void {
         writeln();
         writeln(doneLine);
 
-        // Separator before next prompt.
-        printSeparator();
-
         finishTurn();
         break;
       }
@@ -811,7 +896,7 @@ export function launchStreamRenderer(config: StreamRendererConfig): void {
 
         writeln();
         writeln(chalk.red(`  \u2717 Error: ${errorMsg}`));
-        printSeparator();
+
 
         finishTurn();
         break;
@@ -1264,4 +1349,5 @@ export function launchStreamRenderer(config: StreamRendererConfig): void {
   // ── Start input loop ─────────────────────────────────────────────────────
 
   input.start();
+renderIdleInputFrame();
 }

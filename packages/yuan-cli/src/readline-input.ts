@@ -55,6 +55,10 @@ export interface ReadlineInputOptions {
   onAbort: () => void;
   /** Callback for slash commands (command without leading /, plus args) */
   onCommand: (command: string, args: string) => void;
+ /** First Ctrl+C on empty prompt */
+  onEmptyInterrupt?: () => void;
+  /** Second Ctrl+C on empty prompt — caller should clean UI before exit */
+  onDoubleInterruptExit?: () => void;
   /** Custom prompt string (default: '> ') */
   prompt?: string;
 }
@@ -64,6 +68,8 @@ export class ReadlineInput {
   private readonly onSubmit: (message: string) => void;
   private readonly onAbort: () => void;
   private readonly onCommand: (command: string, args: string) => void;
+  private readonly onEmptyInterrupt?: () => void;
+  private readonly onDoubleInterruptExit?: () => void;
   private readonly promptStr: string;
 
   // -- Readline -------------------------------------------------------------
@@ -93,7 +99,7 @@ export class ReadlineInput {
 
   // -- Line handler (stored so we can remove/re-attach) ---------------------
   private lineHandler: ((line: string) => void) | null = null;
-
+  private exitOnClose = true;
   // =========================================================================
   // Constructor
   // =========================================================================
@@ -102,6 +108,8 @@ export class ReadlineInput {
     this.onSubmit = options.onSubmit;
     this.onAbort = options.onAbort;
     this.onCommand = options.onCommand;
+    this.onEmptyInterrupt = options.onEmptyInterrupt;
+    this.onDoubleInterruptExit = options.onDoubleInterruptExit;
     this.promptStr = options.prompt ?? DEFAULT_PROMPT;
   }
 
@@ -136,11 +144,10 @@ export class ReadlineInput {
     // Handle close (Ctrl+D or EOF).
     this.rl.on("close", () => {
       this.started = false;
-      process.exit(0);
+        if (this.exitOnClose) {
+        process.exit(0);
+      }
     });
-
-    // Show the initial prompt.
-    this.rl.prompt();
   }
 
   /** Lock input — agent is processing. Ctrl+C still works for abort. */
@@ -166,13 +173,13 @@ export class ReadlineInput {
     if (this.rl && this.lineHandler) {
       this.rl.on("line", this.lineHandler);
       this.rl.setPrompt(this.promptStr);
-      this.rl.prompt();
     }
   }
 
   /** Close readline and clean up. */
-  close(): void {
+ close(options?: { exitProcess?: boolean }): void {
     this.clearTimers();
+    this.exitOnClose = options?.exitProcess ?? false;
     if (this.rl) {
       this.rl.close();
       this.rl = null;
@@ -183,6 +190,28 @@ export class ReadlineInput {
   /** Whether input is currently locked. */
   get isLocked(): boolean {
     return this.locked;
+  }
+  /** Render the prompt at the current cursor position. */
+  prompt(): void {
+    if (!this.rl || this.locked) return;
+    this.rl.setPrompt(this.promptStr);
+    this.refreshLine();
+  }
+
+  /**
+   * Write transcript output above the current prompt, then redraw the prompt/input.
+   * This prevents the input line from shaking or duplicating while stdout is written.
+   */
+  runAbovePrompt(writer: () => void): void {
+    if (!this.rl || this.locked) {
+      writer();
+      return;
+    }
+
+    readline.clearLine(process.stdout, 0);
+    readline.cursorTo(process.stdout, 0);
+    writer();
+    this.refreshLine();
   }
 
   // =========================================================================
@@ -320,11 +349,20 @@ export class ReadlineInput {
 
     // 3. If current line has text → clear it.
     if (this.rl) {
-      const currentLine = (this.rl as unknown as { line?: string }).line ?? "";
+      const rlAny = this.rl as readline.Interface & {
+        line?: string;
+        cursor?: number;
+      };
+      const currentLine = rlAny.line ?? "";
       if (currentLine.length > 0) {
-        // Clear the current line and re-prompt.
-        process.stdout.write("\n");
-        this.rl.prompt();
+        rlAny.line = "";
+        rlAny.cursor = 0;
+        this.ctrlCPending = false;
+        if (this.ctrlCTimer) {
+          clearTimeout(this.ctrlCTimer);
+          this.ctrlCTimer = null;
+        }
+        this.refreshLine();
         return;
       }
     }
@@ -333,15 +371,14 @@ export class ReadlineInput {
     if (this.ctrlCPending) {
       // Second Ctrl+C — exit.
       this.clearTimers();
-      process.stdout.write("\n");
-      this.close();
-      process.exit(0);
+      this.onDoubleInterruptExit?.();
+      this.close({ exitProcess: false });
+      process.exit(130);
     }
 
     // First Ctrl+C on empty line.
     this.ctrlCPending = true;
-    process.stdout.write("\n  Press Ctrl+C again to exit.\n");
-    if (this.rl) this.rl.prompt();
+    this.onEmptyInterrupt?.();
 
     this.ctrlCTimer = setTimeout(() => {
       this.ctrlCPending = false;
@@ -381,6 +418,22 @@ export class ReadlineInput {
     const combined = this.pasteBuffer.join("\n");
     this.pasteBuffer = [];
     this.submitInput(combined);
+  }
+
+ /** Safely redraw current prompt + input buffer. */
+  private refreshLine(): void {
+    if (!this.rl) return;
+
+    const rlAny = this.rl as readline.Interface & {
+      _refreshLine?: () => void;
+    };
+
+    if (typeof rlAny._refreshLine === "function") {
+      rlAny._refreshLine();
+      return;
+    }
+
+    this.rl.prompt(true);
   }
 
   // =========================================================================

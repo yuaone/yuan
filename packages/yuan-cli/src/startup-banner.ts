@@ -106,7 +106,7 @@ const PALETTE: Record<string, string> = {
   O: "#f97316",
   D: "#c2410c",
   W: "#f8fafc",
-  N: "#94a3b8",
+  N: "#0f141cff",
   T: "#fcd34d",
 };
 
@@ -115,7 +115,7 @@ const SPRITE_DATA: string[] = [
   "DOOOOOD.",
   "DONWWNOD",
   "DOWWWWOD",
-  ".DOWOOD.",
+  ".DOOOOD.",
   ".DOOOD..",
   "DOOOOOD.",
   ".DD..DD.",

@@ -82,10 +82,10 @@ export interface DockConfig {
 
 /** Dock heights by mode (number of terminal rows reserved at the bottom). */
 const DOCK_HEIGHTS: Record<DockMode, number> = {
-  idle: 3,       // separator + input + hint
-  thinking: 5,   // separator + status + separator + input + hint
-  streaming: 5,
-  tool: 5,
+  idle: 3,       // separator + input + separator
+  thinking: 4,   // separator + status + input + separator
+  streaming: 4,
+  tool: 4,
   approval: 8,   // separator + title + blank + detail + risk + blank + options + separator
 };
 
@@ -480,14 +480,12 @@ export class BottomDock {
     // Input prompt
     this.rawWrite(moveTo(startRow + 1, 1));
     this.rawWrite(eraseLine());
-    const promptContent = chalk.bold(">") + " ";
-    const promptLine = promptContent + " ".repeat(Math.max(0, this._cols - 2));
-    this.rawWrite(chalk.bgHex("#2a2a2a")(promptLine));
+this.rawWrite(this.promptStr);
 
     // Hint bar
     this.rawWrite(moveTo(startRow + 2, 1));
     this.rawWrite(eraseLine());
-    this.drawHintBar("? for shortcuts");
+    this.rawWrite(chalk.gray("\u2500".repeat(Math.min(this._cols, 120))));
   }
 
   /**
@@ -512,7 +510,7 @@ export class BottomDock {
     // Separator 2
     this.rawWrite(moveTo(startRow + 2, 1));
     this.rawWrite(eraseLine());
-    this.rawWrite(chalk.gray("\u2500".repeat(Math.min(this._cols, 120))));
+    this.rawWrite(this.promptStr);
 
     // Input prompt
     this.rawWrite(moveTo(startRow + 3, 1));
