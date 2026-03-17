@@ -82,8 +82,8 @@ export interface DockConfig {
 
 /** Dock heights by mode (number of terminal rows reserved at the bottom). */
 const DOCK_HEIGHTS: Record<DockMode, number> = {
-  idle: 3,       // separator + input + separator
-  thinking: 4,   // separator + status + input + separator
+  idle: 3,       // separator + input + hint
+  thinking: 4,   // separator + status + input + hint
   streaming: 4,
   tool: 4,
   approval: 8,   // separator + title + blank + detail + risk + blank + options + separator
@@ -149,6 +149,25 @@ export class BottomDock {
     return this._rows - this.currentDockHeight;
   }
 
+  /**
+   * The terminal row where the input prompt "> " is drawn.
+   * Readline's cursor should be positioned here so typed text appears in the dock.
+   *
+   * Layout:  dockStart = rows - dockHeight + 1
+   *   idle:    input is at dockStart + 1  (separator, INPUT, hint)
+   *   active:  input is at dockStart + 2  (separator, status, INPUT, hint)
+   */
+  get inputRow(): number {
+    if (!this._active) return this._rows;
+    this.refreshDimensions();
+    const dockStart = this._rows - this.currentDockHeight + 1;
+    if (this._mode === "idle") {
+      return dockStart + 1; // separator, then input
+    }
+    // thinking/streaming/tool: separator, status, then input
+    return dockStart + 2;
+  }
+
   // ── Initialization ──────────────────────────────────────────────────────
 
   /**
@@ -192,7 +211,7 @@ export class BottomDock {
    * Switch the dock mode. This may change dock height and triggers a redraw.
    *
    * Mode heights:
-   *   idle=3, thinking/streaming/tool=5, approval=8
+   *   idle=3, thinking/streaming/tool=4, approval=8
    */
   setMode(mode: DockMode): void {
     if (!this._active) return;
@@ -415,6 +434,10 @@ export class BottomDock {
       // Reset scroll region to full terminal
       this.rawWrite(resetScrollRegion());
 
+      // Move cursor to bottom of terminal to prevent ^C flooding into banner area
+      this.refreshDimensions();
+      this.rawWrite(moveTo(this._rows, 1));
+
       // Show cursor (may have been hidden)
       this.rawWrite(SHOW_CURSOR);
 
@@ -468,59 +491,51 @@ export class BottomDock {
   /**
    * Draw the idle dock (3 rows):
    *   Row 1: separator
-   *   Row 2: input prompt (bgHex #2a2a2a)
-   *   Row 3: hint bar
+   *   Row 2: > [input area]  (readline cursor lives here)
+   *   Row 3: hint bar (? for shortcuts)
    */
   private drawIdleDock(startRow: number): void {
-    // Separator
+    // Row 1: Separator
     this.rawWrite(moveTo(startRow, 1));
     this.rawWrite(eraseLine());
     this.rawWrite(chalk.gray("\u2500".repeat(Math.min(this._cols, 120))));
 
-    // Input prompt
+    // Row 2: Input prompt — dock draws "> ", readline has prompt suppressed
     this.rawWrite(moveTo(startRow + 1, 1));
     this.rawWrite(eraseLine());
-this.rawWrite(this.promptStr);
+    this.rawWrite(this.promptStr);
 
-    // Hint bar
+    // Row 3: Hint bar
     this.rawWrite(moveTo(startRow + 2, 1));
     this.rawWrite(eraseLine());
-    this.rawWrite(chalk.gray("\u2500".repeat(Math.min(this._cols, 120))));
+    this.drawHintBar("? for shortcuts");
   }
 
   /**
-   * Draw the active dock (5 rows — thinking/streaming/tool):
+   * Draw the active dock (4 rows — thinking/streaming/tool):
    *   Row 1: separator
-   *   Row 2: status line
-   *   Row 3: separator
-   *   Row 4: input prompt (bgHex #2a2a2a)
-   *   Row 5: hint bar
+   *   Row 2: status line (ABOVE input)
+   *   Row 3: > [input area]  (readline cursor lives here)
+   *   Row 4: hint bar (esc to interrupt)
    */
   private drawActiveDock(startRow: number): void {
-    // Separator 1
+    // Row 1: Separator
     this.rawWrite(moveTo(startRow, 1));
     this.rawWrite(eraseLine());
     this.rawWrite(chalk.gray("\u2500".repeat(Math.min(this._cols, 120))));
 
-    // Status line
+    // Row 2: Status line (above input, like Claude Code)
     this.rawWrite(moveTo(startRow + 1, 1));
     this.rawWrite(eraseLine());
     this.rawWrite(this.formatStatusLine());
 
-    // Separator 2
+    // Row 3: Input prompt — dock draws "> ", readline has prompt suppressed
     this.rawWrite(moveTo(startRow + 2, 1));
     this.rawWrite(eraseLine());
     this.rawWrite(this.promptStr);
 
-    // Input prompt
+    // Row 4: Hint bar
     this.rawWrite(moveTo(startRow + 3, 1));
-    this.rawWrite(eraseLine());
-    const promptContent = chalk.bold(">") + " ";
-    const promptLine = promptContent + " ".repeat(Math.max(0, this._cols - 2));
-    this.rawWrite(chalk.bgHex("#2a2a2a")(promptLine));
-
-    // Hint bar
-    this.rawWrite(moveTo(startRow + 4, 1));
     this.rawWrite(eraseLine());
     this.drawHintBar("esc to interrupt");
   }

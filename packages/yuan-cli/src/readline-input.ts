@@ -161,8 +161,12 @@ export class ReadlineInput {
     }
   }
 
-  /** Unlock input and re-show prompt. */
-  unlock(): void {
+  /**
+   * Unlock input and re-show prompt.
+   * @param options.suppressPrompt - When true, don't restore the "> " prompt
+   *   (used when BottomDock draws the prompt instead of readline).
+   */
+  unlock(options?: { suppressPrompt?: boolean }): void {
     if (!this.locked) return;
     this.locked = false;
 
@@ -172,7 +176,11 @@ export class ReadlineInput {
 
     if (this.rl && this.lineHandler) {
       this.rl.on("line", this.lineHandler);
-      this.rl.setPrompt(this.promptStr);
+      if (options?.suppressPrompt) {
+        this.rl.setPrompt("");
+      } else {
+        this.rl.setPrompt(this.promptStr);
+      }
     }
   }
 
@@ -190,6 +198,11 @@ export class ReadlineInput {
   /** Whether input is currently locked. */
   get isLocked(): boolean {
     return this.locked;
+  }
+
+  /** Hide the readline prompt (when dock renders the prompt instead). */
+  suppressPrompt(): void {
+    if (this.rl) this.rl.setPrompt("");
   }
   /** Render the prompt at the current cursor position. */
   prompt(): void {

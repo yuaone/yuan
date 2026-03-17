@@ -80,6 +80,10 @@ export function launchStreamRenderer(config: StreamRendererConfig): void {
   /** Metrics update interval during agent runs (dock mode only). */
   let metricsInterval: ReturnType<typeof setInterval> | null = null;
 
+  /** Error dedup: last error message and timestamp to suppress duplicates. */
+  let lastErrorMsg = "";
+  let lastErrorTime = 0;
+
   // ── Code block state ──────────────────────────────────────────────────
   let inCodeBlock = false;
   let codeBlockLang = "";
@@ -360,12 +364,13 @@ classifier.flushIncomplete(); // 결과 무시 (이미 처리됨)
   }
 
   function cleanup(closeInput = true): void {
+    // Reset scroll region FIRST to prevent terminal corruption on exit
+    dock?.dispose();
     if (metricsInterval) { clearInterval(metricsInterval); metricsInterval = null; }
     pacerFlushAll();
     showCursor();
     toolDisplay.dispose();
     writeGate.dispose();
-    dock?.dispose();
     if (closeInput) {
       input.close({ exitProcess: false });
     }
@@ -404,14 +409,18 @@ classifier.flushIncomplete(); // 결과 무시 (이미 처리됨)
   // Ensure cursor is restored on any exit path.
   process.on("exit", showCursor);
   process.on("SIGINT", () => {
+    // Dispose dock first to reset DECSTBM scroll region before any output
+    dock?.dispose();
     cleanup();
     process.exit(130);
   });
   process.on("SIGTERM", () => {
+    dock?.dispose();
     cleanup();
     process.exit(143);
   });
   process.on("uncaughtException", (err) => {
+    dock?.dispose();
     cleanup();
     process.stderr.write(`\nFatal: ${err.message}\n`);
     process.exit(1);
@@ -461,6 +470,12 @@ directWrite(getSeparatorLine() + "\n");
 
   function renderIdleInputFrame(): void {
     if (dock?.active) {
+      // Dock draws the visual "> " — suppress readline's own prompt to avoid double "> "
+      input.suppressPrompt();
+      // Position cursor at dock's input row (after the "> " drawn by dock)
+      const row = dock.inputRow;
+      const promptLen = 2; // "> " is 2 chars
+      process.stdout.write(`\x1b[${row};${promptLen + 1}H`);
       input.prompt();
       return;
     }
@@ -601,6 +616,10 @@ directWrite(getSeparatorLine() + "\n");
     },
 
     onAbort(): void {
+      // CRITICAL: Reset scroll region BEFORE any output to prevent ^C corruption
+      if (dock?.active) {
+        dock.dispose();
+      }
       bridge.interrupt();
       turnState.transition("interrupted");
       turnState.transition("idle");
@@ -649,7 +668,8 @@ directWrite(getSeparatorLine() + "\n");
     turnState.reset(); // back to idle
     pacerReset();
     showCursor();
-    input.unlock();
+    // When dock is active, suppress readline's own "> " — the dock draws it instead.
+    input.unlock({ suppressPrompt: dock?.active === true });
     renderIdleInputFrame();
   }
 
@@ -894,9 +914,16 @@ directWrite(getSeparatorLine() + "\n");
           ?? (event as { error?: string }).error
           ?? "Unknown error";
 
+        // Dedup: skip if same error within 2 seconds (agent-loop may emit twice on retry)
+        if (errorMsg === lastErrorMsg && Date.now() - lastErrorTime < 2000) {
+          finishTurn();
+          break;
+        }
+        lastErrorMsg = errorMsg;
+        lastErrorTime = Date.now();
+
         writeln();
         writeln(chalk.red(`  \u2717 Error: ${errorMsg}`));
-
 
         finishTurn();
         break;
@@ -1080,8 +1107,11 @@ directWrite(getSeparatorLine() + "\n");
     // agent:completed already handles turn cleanup (finishTurn).
     // Only show message for actual ERROR terminations.
     if (result.reason === "ERROR") {
+      const errText = (result as { error?: string }).error ?? result.reason;
+      // Skip if already shown by agent:error handler (dedup)
+      if (errText === lastErrorMsg && Date.now() - lastErrorTime < 5000) return;
       ensureNewline();
-      writeln(chalk.red(`  Session error: ${(result as { error?: string }).error ?? result.reason}`));
+      writeln(chalk.red(`  Session error: ${errText}`));
     }
     // All other reasons (GOAL_ACHIEVED, COMPLETE, OK, BUDGET_EXHAUSTED, etc.) — silent.
   });
