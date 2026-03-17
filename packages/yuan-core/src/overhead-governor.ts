@@ -89,7 +89,7 @@ const DEFAULTS: Required<OverheadGovernorConfig> = {
 // ─── OverheadGovernor ────────────────────────────────────────────────────────
 
 export class OverheadGovernor {
-  private readonly cfg: Required<OverheadGovernorConfig>;
+  private cfg: Required<OverheadGovernorConfig>;
   /** Shadow mode 로그 콜백 (TUI로 보내거나 stdout) */
   private readonly onShadow?: (subsystem: string, reason: string) => void;
 
@@ -284,6 +284,13 @@ export class OverheadGovernor {
       this._shadow("DebugMode", `would run: ${ctx.failureCount} failures`);
     }
     return "OFF";
+  }
+
+  // ─── Runtime Override ────────────────────────────────────────────────────
+
+  /** Override config at runtime (called by Decision Engine integration) */
+  overrideConfig(overrides: Partial<OverheadGovernorConfig>): void {
+    Object.assign(this.cfg, overrides);
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────────

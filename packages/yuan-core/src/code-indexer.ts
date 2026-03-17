@@ -212,7 +212,7 @@ export class CodeIndexer {
     // Persist to .yuan/vector-store.json
     await vectorStore.save().catch(() => {});
 
-    console.error(`[CodeIndexer] Indexed ${totalFiles} files, ${totalChunks} chunks`);
+    // file-only log — console.error corrupts Ink TUI
   }
 
   /**

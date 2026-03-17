@@ -46,31 +46,32 @@ import {
 import {
   AutoFixLoop,
   type AutoFixConfig,
-  type ValidationResult,
 } from "./auto-fix.js";
 import { InterruptManager } from "./interrupt-manager.js";
 import type { InterruptSignal } from "./types.js";
 import { YuanMemory, type ProjectStructure } from "./memory.js";
 import { MemoryManager } from "./memory-manager.js";
 import { buildSystemPrompt, type EnvironmentInfo } from "./system-prompt.js";
+import { compilePromptEnvelope, type PromptRuntimeInput } from "./prompt-runtime.js";
+import { buildPrompt } from "./prompt-builder.js";
 import {
   HierarchicalPlanner,
   type HierarchicalPlan,
   type TacticalTask,
   type RePlanTrigger,
 } from "./hierarchical-planner.js";
-import { TaskClassifier, type TaskClassification } from "./task-classifier.js";
+import { TaskClassifier } from "./task-classifier.js";
 import { PromptDefense } from "./prompt-defense.js";
 import { ReflexionEngine, type ReflexionEntry } from "./reflexion.js";
 import { TokenBudgetManager, type BudgetRole } from "./token-budget.js";
 import { ContinuationEngine } from "./continuation-engine.js";
-import { MemoryUpdater, type RunAnalysis } from "./memory-updater.js";
+import { MemoryUpdater } from "./memory-updater.js";
 import type { ContinuationCheckpoint, ToolDefinition } from "./types.js";
 import { MCPClient, type MCPServerConfig } from "./mcp-client.js";
 import { loadMCPConfig } from "./mcp-config-loader.js";
 import { BOUNDS, cap, truncate, pushCapped } from "./safe-bounds.js";
 import { WorldStateCollector, type WorldStateSnapshot } from "./world-state.js";
-import { FailureRecovery, type RecoveryDecision } from "./failure-recovery.js";
+import { FailureRecovery } from "./failure-recovery.js";
 import { ExecutionPolicyEngine, type ExecutionPolicy } from "./execution-policy-engine.js";
 import { CostOptimizer } from "./cost-optimizer.js";
 import { ImpactAnalyzer, type ImpactReport } from "./impact-analyzer.js";
@@ -80,24 +81,25 @@ import {
   ContinuousReflection,
   type AgentStateSnapshot,
 } from "./continuous-reflection.js";
-import { PluginRegistry, type TriggerMatch } from "./plugin-registry.js";
+import { PluginRegistry } from "./plugin-registry.js";
 import { SkillLoader } from "./skill-loader.js";
-import type { SkillDefinition } from "./plugin-types.js";
-import { SpecialistRegistry, type SpecialistMatch } from "./specialist-registry.js";
+import { SpecialistRegistry } from "./specialist-registry.js";
 import { ToolPlanner, type ToolPlan, type PlanContext } from "./tool-planner.js";
-import { SelfDebugLoop, type DebugResult } from "./self-debug-loop.js";
+import { SelfDebugLoop } from "./self-debug-loop.js";
 import { SkillLearner } from "./skill-learner.js";
-import { RepoKnowledgeGraph, type ImpactReport as GraphImpactReport } from "./repo-knowledge-graph.js";
+import { RepoKnowledgeGraph } from "./repo-knowledge-graph.js";
 import { BackgroundAgentManager, type BackgroundEvent } from "./background-agent.js";
+import { SubAgent, type SubAgentResult, type DAGContextLike } from "./sub-agent.js";
+import type { SubAgentRole } from "./sub-agent-prompts.js";
 import { ReasoningAggregator } from "./reasoning-aggregator.js";
 import { ReasoningTree } from "./reasoning-tree.js";
-import { ContextCompressor } from "./context-compressor.js";
-import { DependencyAnalyzer } from "./dependency-analyzer.js";
 import { CrossFileRefactor } from "./cross-file-refactor.js";
 import { ContextBudgetManager } from "./context-budget.js";
 import { QAPipeline, type QAPipelineResult } from "./qa-pipeline.js";
 import { PersonaManager } from "./persona.js";
 import { InMemoryVectorStore, OllamaEmbeddingProvider } from "./vector-store.js";
+import { agentDecide, DEFAULT_DECISION, worldStateToProjectContext } from "./agent-decision.js";
+import type { AgentDecisionContext, AgentProjectContext } from "./agent-decision-types.js";
 import { OverheadGovernor, type OverheadGovernorConfig, type TriggerContext, type TaskPhase } from "./overhead-governor.js";
 import {
   StateStore,
@@ -105,17 +107,18 @@ import {
   SimulationEngine,
   StateUpdater,
 } from "./world-model/index.js";
-import type { WorldState, StatePatch } from "./world-model/index.js";
+import type { WorldState } from "./world-model/index.js";
 import {
   MilestoneChecker,
   RiskEstimator,
   PlanEvaluator,
   ReplanningEngine,
 } from "./planner/index.js";
-import type { Milestone, MilestoneStatus, RiskScore, PlanHealth, ProactiveReplanResult } from "./planner/index.js";
+import type { Milestone } from "./planner/index.js";
 import { TraceRecorder } from "./trace-recorder.js";
 import { ArchSummarizer } from "./arch-summarizer.js";
 import { FailureSignatureMemory } from "./failure-signature-memory.js";
+import { CausalChainResolver } from "./causal-chain-resolver.js";
 import { PlaybookLibrary } from "./playbook-library.js";
 import { ProjectExecutive } from "./project-executive.js";
 import { StallDetector } from "./stall-detector.js";
@@ -136,6 +139,20 @@ import { registerToolsInGraph, recordToolOutcomeInGraph } from "./extensions/cap
 import { getSelfWeaknessContext } from "./extensions/self-model-wiring.js";
 import { initMarketPlaybooks, selectMarketStrategy } from "./extensions/strategy-wiring.js";
 import { VisionIntentDetector } from "./vision-intent-detector.js";
+import { PatchTransactionJournal } from "./patch-transaction.js";
+import { securityCheck } from "./security-gate.js";
+import { JudgmentRuleRegistry } from "./judgment-rules.js";
+import { loadOrScanProfile } from "./repo-capability-profile.js";
+import { verifyToolResult } from "./verifier-rules.js";
+import { checkDependencyChange } from "./dependency-guard.js";
+import { WorkspaceMutationPolicy } from "./workspace-mutation-policy.js";
+import { validateBeforeWrite, detectFileRole } from "./pre-write-validator.js";
+import { PatchScopeController, detectRepoLifecycle } from "./patch-scope-controller.js";
+import { classifyCommand, validateProposedCommand, compileVerifyCommands } from "./command-plan-compiler.js";
+import type { CommandCompilerInput } from "./command-plan-compiler.js";
+import { reviewFileDiff } from "./semantic-diff-reviewer.js";
+import { ModelWeaknessTracker } from "./model-weakness-tracker.js";
+import { dlog, dlogSep } from "./debug-logger.js";
 /** AgentLoop 설정 */
 export interface AgentLoopOptions {
   abortSignal?: AbortSignal
@@ -183,35 +200,56 @@ export interface AgentLoopOptions {
   overheadGovernorConfig?: OverheadGovernorConfig;
 }
 
-/**
- * AgentLoop — YUAN 에이전트의 핵심 실행 루프.
- *
- * 동작 흐름:
- * 1. 사용자 메시지 수신
- * 2. 시스템 프롬프트 + 히스토리로 LLM 호출
- * 3. LLM 응답에서 tool_call 파싱
- * 4. Governor가 안전성 검증
- * 5. 도구 실행 → 결과를 히스토리에 추가
- * 6. LLM에 결과 피드백 → 2번으로 반복
- * 7. 종료 조건 충족 시 결과 반환
- *
- * @example
- * ```typescript
- * const loop = new AgentLoop({
- *   config: agentConfig,
- *   toolExecutor: executor,
- *   governorConfig: { planTier: "PRO" },
- * });
- *
- * loop.on("event", (event: AgentEvent) => {
- *   // SSE 스트리밍
- * });
- *
- * const result = await loop.run("모든 console.log를 제거해줘");
- * ```
- */
-/** Minimum confidence for classification-based hints/routing to activate */
 const CLASSIFICATION_CONFIDENCE_THRESHOLD = 0.6;
+
+const SPAWN_SUB_AGENT_TOOL: import("./types.js").ToolDefinition = {
+  name: "spawn_sub_agent",
+  description:
+    "Spawn a sub-agent to work on a delegated task in parallel. " +
+    "The sub-agent runs an independent agent loop with its own tool access, " +
+    "inheriting the same LLM configuration. Use this for tasks that can be " +
+    "broken down (e.g., implement one module while you work on another, " +
+    "run a review pass, verify changes).",
+  parameters: {
+    type: "object",
+    properties: {
+      goal: {
+        type: "string",
+        description: "The specific task goal for the sub-agent to accomplish.",
+      },
+      role: {
+        type: "string",
+        enum: ["coder", "critic", "verifier", "specialist"],
+        description:
+          "Sub-agent role. 'coder' writes code, 'critic' reviews for issues, " +
+          "'verifier' checks correctness, 'specialist' handles domain tasks. " +
+          "Defaults to 'coder'.",
+      },
+    },
+    required: ["goal"],
+    additionalProperties: false,
+  },
+  source: "builtin",
+  readOnly: false,
+  requiresApproval: false,
+  riskLevel: "medium",
+};
+
+/** Map user-facing sub-agent roles to internal SubAgentRole */
+function mapToSubAgentRole(role?: string): SubAgentRole {
+  switch (role) {
+    case "critic":
+      return "reviewer";
+    case "verifier":
+      return "tester";
+    case "specialist":
+      return "coder";
+    case "coder":
+      return "coder";
+    default:
+      return "coder";
+  }
+}
 
 export class AgentLoop extends EventEmitter {
   private readonly abortSignal?: AbortSignal;
@@ -223,14 +261,19 @@ export class AgentLoop extends EventEmitter {
   private readonly approvalManager: ApprovalManager;
   private readonly autoFixLoop: AutoFixLoop;
   private readonly interruptManager: InterruptManager;
+  /** @deprecated Use decision.core.memoryLoad.shouldLoad at runtime. Kept for constructor init only. */
   private readonly enableMemory: boolean;
+  /** @deprecated Use decision.core.planRequired at runtime. Kept for constructor init only. */
   private readonly enablePlanning: boolean;
+  /** @deprecated Planning threshold is now determined by Decision Engine. Kept for constructor init only. */
   private readonly planningThreshold: "simple" | "moderate" | "complex";
   private readonly environment?: EnvironmentInfo;
   private yuanMemory: YuanMemory | null = null;
   private memoryManager: MemoryManager | null = null;
+  private judgmentRegistry: JudgmentRuleRegistry | null = null;
   private planner: HierarchicalPlanner | null = null;
   private activePlan: HierarchicalPlan | null = null;
+  /** @deprecated Use AgentDecisionContext when available; taskClassifier is legacy fallback only */
   private taskClassifier: TaskClassifier;
   private promptDefense: PromptDefense;
   private reflexionEngine: ReflexionEngine | null = null;
@@ -241,6 +284,7 @@ export class AgentLoop extends EventEmitter {
   private changedFiles: string[] = [];
   private aborted = false;
   private initialized = false;
+  private partialInit = false;
   private continuationEngine: ContinuationEngine | null = null;
   private mcpClient: MCPClient | null = null;
   private mcpToolDefinitions: ToolDefinition[] = [];
@@ -260,6 +304,23 @@ export class AgentLoop extends EventEmitter {
   private readonly enableSelfReflection: boolean;
   private readonly enableDebate: boolean;
   private currentComplexity: "trivial" | "simple" | "moderate" | "complex" | "massive" = "simple";
+  // ─── Agent Decision Engine ─────────────────────────────────────────────────
+  private decision: AgentDecisionContext = DEFAULT_DECISION;
+  // ─── Prompt 3-Layer Architecture ──────────────────────────────────────────
+  private pendingRunContext: NonNullable<PromptRuntimeInput["runContext"]> = {};
+  /** Cached values for refreshSystemPrompt() — set during criticalInit/backgroundInit */
+  private _cachedProjectStructure: import("./memory.js").ProjectStructure | undefined;
+  private _cachedYuanMdContent: string | undefined;
+  private prevDecision: AgentDecisionContext = DEFAULT_DECISION;
+  private toolUsageCounter = {
+    reads: 0,
+    edits: 0,
+    shells: 0,
+    tests: 0,
+    searches: 0,
+    webLookups: 0,
+    sameFileEdits: new Map<string, number>(),
+  };
   private readonly policyOverrides?: Partial<ExecutionPolicy>;
   private checkpointSaved = false;
   private iterationCount = 0;
@@ -279,32 +340,35 @@ export class AgentLoop extends EventEmitter {
   private backgroundAgentManager: BackgroundAgentManager | null = null;
  private sessionPersistence: SessionPersistence | null = null;
   private sessionId: string | null = null;
+  /** @deprecated Use decision.core.skillActivation.enableToolPlanning at runtime. Kept for constructor init only. */
   private readonly enableToolPlanning: boolean;
+  /** @deprecated Use decision.core.skillActivation.enableSkillLearning at runtime. Kept for constructor init only. */
   private readonly enableSkillLearning: boolean;
+  /** @deprecated Use decision.core.subAgentPlan.enabled at runtime. Kept for constructor init only. */
   private readonly enableBackgroundAgents: boolean;
   private currentToolPlan: ToolPlan | null = null;
   private executedToolNames: string[] = [];
   /** Unfulfilled-intent continuation counter — reset each run(), max 3 nudges */
   private _unfulfilledContinuations = 0;
+  /** Model weakness learning layer — scoped by model+repo */
+  private weaknessTracker: ModelWeaknessTracker | null = null;
   /** Context Budget: max 3 active skills at once */
   private activeSkillIds: string[] = [];
   private static readonly MAX_ACTIVE_SKILLS = 3;
   /** Context Budget: track injected system messages per iteration to cap at 5 */
   private iterationSystemMsgCount = 0;
-  /** Task 1: ContextBudgetManager for LLM-based summarization at 60-70% context usage */
   private contextBudgetManager: ContextBudgetManager | null = null;
-  /** Task 1: Flag to ensure LLM summarization only runs once per agent run (non-blocking guard) */
   private _contextSummarizationDone = false;
-  /** Task 2: Track whether write tools ran this iteration for QA triggering */
   private iterationWriteToolPaths: string[] = [];
-  /** Task 2: Last QA result (surfaced to LLM on issues) */
   private lastQAResult: QAPipelineResult | null = null;
-  /** Task 3: Track TS files modified this run for auto-tsc */
   private iterationTsFilesModified: string[] = [];
-  /** Task 3: Whether tsc was run in the previous iteration (skip cooldown) */
   private tscRanLastIteration = false;
-
-  // ─── OverheadGovernor — subsystem execution policy ──────────────────────
+  private patchJournal: PatchTransactionJournal | null = null;
+  private mutationPolicy: WorkspaceMutationPolicy | null = null;
+  private patchScopeController: PatchScopeController | null = null;
+  /** Per-iteration ephemeral hints — collected and bulk-injected before next LLM call */
+  private ephemeralHints: string[] = [];
+  // ─── OverheadGovernor ──────────────────────────────────────────────────
   private readonly overheadGovernor: OverheadGovernor;
   /** Writes since last verify ran (for QA/quickVerify trigger) */
   private writeCountSinceVerify = 0;
@@ -357,14 +421,11 @@ private archSummarizer: ArchSummarizer | null = null;
   private selfImprovementLoop: SelfImprovementLoop | null = null;
   private metaLearningCollector: MetaLearningCollector | null = null;
   private trustEconomics: TrustEconomics | null = null;
-  // Phase 5: Strategy Learner + Skill Registry
   private strategyLearner: StrategyLearner | null = null;
   private skillRegistry: SkillRegistry | null = null;
-  // Phase 5 extended: TracePatternExtractor, MetaLearningEngine, ToolSynthesizer
   private tracePatternExtractor: TracePatternExtractor | null = null;
   private metaLearningEngine: MetaLearningEngine | null = null;
   private toolSynthesizer: ToolSynthesizer | null = null;
-  // Phase 6: BudgetGovernorV2, CapabilityGraph, CapabilitySelfModel, StrategyMarket
   private budgetGovernorV2: BudgetGovernorV2 | null = null;
   private capabilityGraph: CapabilityGraph | null = null;
   private capabilitySelfModel: CapabilitySelfModel | null = null;
@@ -447,13 +508,8 @@ async restoreSession(data: SessionData): Promise<void> {
     this.enableSelfReflection = options.enableSelfReflection !== false;
     this.enableDebate = options.enableDebate !== false;
 
-    // BYOK LLM 클라이언트 생성
     this.llmClient = new BYOKClient(options.config.byok);
-
-    // Governor 생성
     this.governor = new Governor(options.governorConfig);
-
-    // OverheadGovernor — subsystem execution policy
     this.overheadGovernor = new OverheadGovernor(
       options.overheadGovernorConfig,
       (subsystem, reason) => {
@@ -462,7 +518,6 @@ async restoreSession(data: SessionData): Promise<void> {
       },
     );
 
-    // ContextManager 생성
     this.contextManager = new ContextManager({
       maxContextTokens:
         options.contextConfig?.maxContextTokens ??
@@ -472,16 +527,12 @@ async restoreSession(data: SessionData): Promise<void> {
       ...options.contextConfig,
     });
 
-    // ApprovalManager 생성
     this.approvalManager = new ApprovalManager(options.approvalConfig);
     if (options.approvalHandler) {
       this.approvalManager.setHandler(options.approvalHandler);
     }
 
-    // AutoFixLoop 생성
     this.autoFixLoop = new AutoFixLoop(options.autoFixConfig);
-
-    // Task Classifier + Prompt Defense + Token Budget + Memory Updater
     this.taskClassifier = new TaskClassifier();
     this.promptDefense = new PromptDefense();
     this.tokenBudgetManager = new TokenBudgetManager({
@@ -492,18 +543,12 @@ async restoreSession(data: SessionData): Promise<void> {
     this.costOptimizer = new CostOptimizer();
     this.policyOverrides = options.policyOverrides;
 
-    // MCP 서버 설정 저장
     this.mcpServerConfigs = options.mcpServerConfigs ?? [];
-
-    // InterruptManager 설정 (외부 주입 또는 내부 생성)
     this.interruptManager = options.interruptManager ?? new InterruptManager();
     this.setupInterruptListeners();
 
-    // PluginRegistry + SkillLoader 초기화
     this.pluginRegistry = options.pluginRegistry ?? new PluginRegistry();
     this.skillLoader = new SkillLoader();
-
-    // Advanced Intelligence 모듈 초기화
     this.specialistRegistry = new SpecialistRegistry();
     this.toolPlanner = new ToolPlanner();
     this.selfDebugLoop = new SelfDebugLoop();
@@ -511,7 +556,6 @@ async restoreSession(data: SessionData): Promise<void> {
     this.enableSkillLearning = options.enableSkillLearning !== false;
     this.enableBackgroundAgents = options.enableBackgroundAgents === true;
 
-    // 시스템 프롬프트 추가 (메모리 없이 기본 프롬프트로 시작, init()에서 갱신)
     this.contextManager.addMessage({
       role: "system",
       content: this.config.loop.systemPrompt,
@@ -522,44 +566,63 @@ async restoreSession(data: SessionData): Promise<void> {
    * Memory와 프로젝트 컨텍스트를 로드하여 시스템 프롬프트를 갱신.
    * run() 호출 전에 한 번 호출하면 메모리가 자동으로 주입된다.
    * 이미 초기화되었으면 스킵.
+   * @deprecated run()은 내부적으로 criticalInit() + backgroundInit()을 직접 호출함.
+   *             외부에서 호출 시 하위호환을 위해 유지.
    */
   async init(): Promise<void> {
-    if (this.initialized) return;
-    this.initialized = true;
+    await this.criticalInit();
+    await this.backgroundInit();
+  }
 
-    // Task 1: Initialize ContextBudgetManager with the total token budget
+  /**
+   * TTFT 최적화: LLM 호출 전 반드시 완료되어야 하는 최소 초기화.
+   * - 메모리/페르소나 로드 (YUAN.md, MemoryManager, PersonaManager)
+   * - ExecutionPolicyEngine (FailureRecovery 설정)
+   * - ImpactAnalyzer, ContinuationEngine + 체크포인트 복원
+   * - buildSystemPrompt (projectStructure 없이 — background에서 보완)
+   * 목표: 1초 이내 완료.
+   */
+  private async criticalInit(): Promise<void> {
+    if (this.initialized) return;
+    if (this.partialInit) return;
+    this.partialInit = true;
+
     this.contextBudgetManager = new ContextBudgetManager({
       totalBudget: this.config.loop.totalTokenBudget,
       enableSummarization: true,
-      summarizationThreshold: 0.60, // trigger summarize() at 60% (before ContextCompressor at 70%)
+      summarizationThreshold: 0.60,
     });
 
     const projectPath = this.config.loop.projectPath;
     if (!projectPath) return;
-  // Session persistence init
-  try {
-    this.sessionPersistence = new SessionPersistence(undefined, projectPath);
-  } catch {
-    this.sessionPersistence = null;
-  }
-    let yuanMdContent: string | undefined;
-    let projectStructure: ProjectStructure | undefined;
 
-    // Memory 로드
+    try {
+      this.sessionPersistence = new SessionPersistence(undefined, projectPath);
+    } catch {
+      this.sessionPersistence = null;
+    }
+
+    let yuanMdContent: string | undefined;
+
     if (this.enableMemory) {
       try {
-        // YUAN.md (raw markdown)
         this.yuanMemory = new YuanMemory(projectPath);
         const memData = await this.yuanMemory.load();
         if (memData) {
           yuanMdContent = memData.raw;
         }
 
-        // MemoryManager (structured learnings)
         this.memoryManager = new MemoryManager(projectPath);
         await this.memoryManager.load();
 
-        // PersonaManager — user communication style learning + persona injection
+        this.judgmentRegistry = new JudgmentRuleRegistry(projectPath);
+
+        // Auto-expand judgment rules from repo capability profile
+        try {
+          const repoProfile = loadOrScanProfile(projectPath);
+          this.judgmentRegistry.autoExpandFromProfile(repoProfile);
+        } catch { /* non-fatal */ }
+
         const personaUserId = basename(projectPath) || "default";
         this.personaManager = new PersonaManager({
           userId: personaUserId,
@@ -567,8 +630,116 @@ async restoreSession(data: SessionData): Promise<void> {
           enableLearning: true,
         });
         await this.personaManager.loadProfile().catch(() => {});
+      } catch (memErr) {
+        this.emitEvent({
+          kind: "agent:error",
+          message: `Memory load failed: ${memErr instanceof Error ? memErr.message : String(memErr)}`,
+          retryable: false,
+        });
+      }
+    }
 
-        // InMemoryVectorStore — RAG semantic code context (TF-IDF fallback if Ollama unavailable)
+    try {
+      this.policyEngine = new ExecutionPolicyEngine(projectPath);
+      await this.policyEngine.load();
+      if (this.policyOverrides) {
+        for (const [section, values] of Object.entries(this.policyOverrides)) {
+          this.policyEngine.override(
+            section as keyof ExecutionPolicy,
+            values as Partial<ExecutionPolicy[keyof ExecutionPolicy]>,
+          );
+        }
+      }
+      const recoveryConfig = this.policyEngine.toFailureRecoveryConfig();
+      this.failureRecovery = new FailureRecovery(recoveryConfig);
+    } catch {
+      // Policy load failure — use defaults
+    }
+
+    this.impactAnalyzer = new ImpactAnalyzer({ projectPath });
+    this.continuationEngine = new ContinuationEngine({ projectPath });
+    try {
+      const latestCheckpoint = await this.continuationEngine.findLatestCheckpoint();
+      if (latestCheckpoint) {
+        const continuationPrompt = this.continuationEngine.formatContinuationPrompt(latestCheckpoint);
+        this.contextManager.addMessage({
+          role: "system",
+          content: continuationPrompt,
+        });
+        await this.continuationEngine.pruneOldCheckpoints();
+      }
+    } catch {
+      // non-fatal
+    }
+
+    this._cachedYuanMdContent = yuanMdContent;
+    this._cachedProjectStructure = undefined;
+
+    const allTools = [...this.config.loop.tools, ...this.mcpToolDefinitions, SPAWN_SUB_AGENT_TOOL];
+    try {
+      const envelope = compilePromptEnvelope({
+        decision: this.decision,
+        promptOptions: {
+          projectStructure: undefined, // background에서 analyzeProject() 후 갱신
+          yuanMdContent,
+          tools: allTools,
+          activeToolNames: allTools.map(t => t.name),
+          projectPath,
+          environment: this.environment,
+        },
+        runContext: this.pendingRunContext,
+      });
+      const enhancedPrompt = buildPrompt(envelope);
+      this.contextManager.replaceSystemMessage(enhancedPrompt);
+    } catch {
+      // Fallback to legacy buildSystemPrompt if PromptRuntime fails
+      const enhancedPrompt = buildSystemPrompt({
+        projectStructure: undefined,
+        yuanMdContent,
+        tools: allTools,
+        projectPath,
+        environment: this.environment,
+      });
+      this.contextManager.replaceSystemMessage(enhancedPrompt);
+    }
+    // MemoryManager learnings → pendingRunContext
+    if (this.memoryManager) {
+      const memory = this.memoryManager.getMemory();
+      if (memory.learnings.length > 0 || memory.failedApproaches.length > 0) {
+        const memoryContext = this.buildMemoryContext(memory);
+        if (memoryContext) {
+          this.pendingRunContext.memoryContext = memoryContext;
+          this.refreshSystemPrompt();
+        }
+      }
+    }
+
+  }
+
+  /**
+   * TTFT 최적화: LLM 호출을 블로킹하지 않는 백그라운드 초기화.
+   * - VectorStore.load() + CodeIndexer
+   * - analyzeProject() + WorldState 수집
+   * - MCP connectAll()
+   * - CapabilityGraph, SkillLearner, Phase 4/5/6
+   * - HierarchicalPlanner, ContinuousReflection
+   * criticalInit() 완료 후 fire-and-forget으로 실행됨.
+   */
+  private async backgroundInit(): Promise<void> {
+    if (this.initialized) return;
+
+    const projectPath = this.config.loop.projectPath;
+    if (!projectPath) {
+      this.initialized = true;
+      this.partialInit = false;
+      return;
+    }
+
+    this.partialInit = false;
+
+    if (this.enableMemory && this.yuanMemory) {
+      try {
+        const personaUserId = basename(projectPath) || "default";
         this.vectorStore = new InMemoryVectorStore({
           projectId: personaUserId,
           projectPath,
@@ -579,45 +750,22 @@ async restoreSession(data: SessionData): Promise<void> {
           new Promise<void>(resolve => setTimeout(resolve, 1_500)),
         ]).catch(() => {});
 
-        // Background indexing — non-blocking, fires and forgets
         const vectorStoreRef = this.vectorStore;
         import("./code-indexer.js").then(({ CodeIndexer }) => {
           const indexer = new CodeIndexer({});
           indexer.indexProject(projectPath, vectorStoreRef).catch(() => {});
         }).catch(() => {});
 
-        // 프로젝트 구조 분석
-        projectStructure = await this.yuanMemory.analyzeProject();
-      } catch (memErr) {
-        // 메모리 로드 실패는 치명적이지 않음 — 경고만 출력
-        this.emitEvent({
-          kind: "agent:error",
-          message: `Memory load failed: ${memErr instanceof Error ? memErr.message : String(memErr)}`,
-          retryable: false,
-        });
+        const projectStructure = await this.yuanMemory.analyzeProject();
+        const yuanMdContent = (await this.yuanMemory.load().catch(() => null))?.raw;
+        this._cachedProjectStructure = projectStructure;
+        this._cachedYuanMdContent = yuanMdContent;
+        this.refreshSystemPrompt();
+      } catch {
+        // non-fatal
       }
     }
 
-    // ExecutionPolicyEngine 로드
-    try {
-      this.policyEngine = new ExecutionPolicyEngine(projectPath);
-      const policy = await this.policyEngine.load();
-      if (this.policyOverrides) {
-        for (const [section, values] of Object.entries(this.policyOverrides)) {
-          this.policyEngine.override(
-            section as keyof ExecutionPolicy,
-            values as Partial<ExecutionPolicy[keyof ExecutionPolicy]>,
-          );
-        }
-      }
-      // FailureRecovery에 정책 적용
-      const recoveryConfig = this.policyEngine.toFailureRecoveryConfig();
-      this.failureRecovery = new FailureRecovery(recoveryConfig);
-    } catch {
-      // 정책 로드 실패 → 기본값 사용
-    }
-
-    // WorldState 수집 → system prompt에 주입
     try {
       const worldStateCollector = new WorldStateCollector({
         projectPath,
@@ -625,23 +773,39 @@ async restoreSession(data: SessionData): Promise<void> {
         skipTest: true,
       });
       this.worldState = await worldStateCollector.collect();
+
+      if (this.worldState) {
+        const collector = new WorldStateCollector({ projectPath });
+        const worldStateSection = collector.formatForPrompt(this.worldState);
+        this.pendingRunContext.worldStateSection = worldStateSection;
+        this.refreshSystemPrompt();
+      }
     } catch {
-      // WorldState 수집 실패는 치명적이지 않음
+      // non-fatal
     }
 
-    // Initialize World Model
+    // CodeOrchestrator — append directly (not yet in runContext schema)
+    try {
+      const { codeOrchestrator } = await import('./code-orchestrator.js');
+      const codeCtx = await codeOrchestrator.getContextForLLM(projectPath ?? '');
+      if (codeCtx) {
+        const currentMsgs = this.contextManager.getMessages();
+        const sysMsg = currentMsgs.find((m) => m.role === "system");
+        if (sysMsg) {
+          this.contextManager.replaceSystemMessage(String(sysMsg.content) + '\n\n' + codeCtx);
+        }
+      }
+    } catch { /* non-fatal */ }
+
     if (this.worldState && projectPath) {
       try {
         this.transitionModel = new TransitionModel();
         this.worldModel = StateStore.fromSnapshot(this.worldState, projectPath);
         this.simulationEngine = new SimulationEngine(this.transitionModel, this.worldModel);
         this.stateUpdater = new StateUpdater(this.worldModel, projectPath);
-      } catch {
-        // World Model initialization failure is non-fatal
-      }
+      } catch { /* non-fatal */ }
     }
 
-    // Capture last known good git commit for FailureRecovery rollback
     try {
       const headHash = execSync("git rev-parse HEAD", {
         cwd: projectPath,
@@ -652,39 +816,14 @@ async restoreSession(data: SessionData): Promise<void> {
         this.failureRecovery.setLastGoodCommit(headHash, projectPath);
       }
     } catch {
-      // Not a git repo or git unavailable — FailureRecovery will use file-level rollback only
+      // non-fatal — FailureRecovery will use file-level rollback
     }
 
-    // ImpactAnalyzer 생성
-    this.impactAnalyzer = new ImpactAnalyzer({ projectPath });
-
-    // ContinuationEngine 생성
-    this.continuationEngine = new ContinuationEngine({ projectPath });
-
-    // 이전 세션 체크포인트 복원
-    try {
-      const latestCheckpoint = await this.continuationEngine.findLatestCheckpoint();
-      if (latestCheckpoint) {
-        const continuationPrompt = this.continuationEngine.formatContinuationPrompt(latestCheckpoint);
-        this.contextManager.addMessage({
-          role: "system",
-          content: continuationPrompt,
-        });
-        // 복원 후 체크포인트 정리
-        await this.continuationEngine.pruneOldCheckpoints();
-      }
-    } catch {
-      // 체크포인트 복원 실패는 치명적이지 않음
-    }
-
-    // MCP 클라이언트 연결
-    // Auto-load ~/.yuan/mcp.json and merge with any programmatically supplied configs
     {
       let mergedMCPConfigs = [...this.mcpServerConfigs];
       try {
         const fileConfig = await loadMCPConfig();
         if (fileConfig && fileConfig.servers.length > 0) {
-          // Deduplicate by name — programmatic configs take precedence
           const existingNames = new Set(mergedMCPConfigs.map((s) => s.name));
           for (const server of fileConfig.servers) {
             if (!existingNames.has(server.name)) {
@@ -693,7 +832,6 @@ async restoreSession(data: SessionData): Promise<void> {
           }
         }
       } catch (mcpLoadErr) {
-        // Config parse error — warn and continue without file-based servers
         this.emitEvent({
           kind: "agent:error",
           message: `MCP config load warning: ${mcpLoadErr instanceof Error ? mcpLoadErr.message : String(mcpLoadErr)}`,
@@ -713,19 +851,14 @@ async restoreSession(data: SessionData): Promise<void> {
             content: `MCP: loaded ${this.mcpToolDefinitions.length} tools from ${mergedMCPConfigs.length} server(s)`,
           });
         } catch {
-          // MCP 연결 실패는 치명적이지 않음 — 로컬 도구만 사용
           this.mcpClient = null;
           this.mcpToolDefinitions = [];
         }
       }
     }
 
-    // ReflexionEngine 생성
-    if (projectPath) {
-      this.reflexionEngine = new ReflexionEngine({ projectPath });
-    }
+    this.reflexionEngine = new ReflexionEngine({ projectPath });
 
-    // SelfReflection 생성 (6D deep verify + quick verify)
     if (this.enableSelfReflection) {
       const sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       this.selfReflection = new SelfReflection(sessionId, {
@@ -736,18 +869,14 @@ async restoreSession(data: SessionData): Promise<void> {
         criticalDimensions: ["correctness", "security"],
       });
 
-      // 메모리에서 기존 학습 복원
       if (this.memoryManager) {
         try {
           const memory = await this.memoryManager.load();
           this.selfReflection.loadFromMemory(memory);
-        } catch {
-          // 학습 복원 실패는 치명적이지 않음
-        }
+        } catch { /* non-fatal */ }
       }
     }
 
-    // DebateOrchestrator 생성 (complex/massive 태스크에서 multi-agent debate)
     if (this.enableDebate && projectPath) {
       this.debateOrchestrator = new DebateOrchestrator({
         projectPath,
@@ -761,47 +890,32 @@ async restoreSession(data: SessionData): Promise<void> {
       });
     }
 
-    // 향상된 시스템 프롬프트 생성
-    const enhancedPrompt = buildSystemPrompt({
-      projectStructure,
-      yuanMdContent,
-      tools: [...this.config.loop.tools, ...this.mcpToolDefinitions],
-      projectPath,
-      environment: this.environment,
-    });
-
-    // WorldState를 시스템 프롬프트에 추가
-    let worldStateSection = "";
-    if (this.worldState) {
-      const collector = new WorldStateCollector({ projectPath });
-      worldStateSection = "\n\n" + collector.formatForPrompt(this.worldState);
+    const weaknessCtx = getSelfWeaknessContext(this.capabilitySelfModel);
+    if (weaknessCtx) {
+      this.pendingRunContext.weaknessContext = weaknessCtx;
+      this.refreshSystemPrompt();
     }
 
-    // 기존 시스템 메시지를 향상된 프롬프트로 교체
-    this.contextManager.replaceSystemMessage(enhancedPrompt + worldStateSection);
-
-    // MemoryManager의 관련 학습/경고를 추가 컨텍스트로 주입
-    if (this.memoryManager) {
-      const memory = this.memoryManager.getMemory();
-      if (memory.learnings.length > 0 || memory.failedApproaches.length > 0) {
-        const memoryContext = this.buildMemoryContext(memory);
-        if (memoryContext) {
-          this.contextManager.addMessage({
-            role: "system",
-            content: memoryContext,
-          });
+    // ModelWeaknessTracker — learn from repeated validator blocks
+    if (projectPath) {
+      try {
+        const modelId = this.config.byok.model ?? this.config.byok.provider;
+        this.weaknessTracker = new ModelWeaknessTracker(projectPath, modelId);
+        const hints = this.weaknessTracker.getPreventiveHints();
+        if (hints.length > 0) {
+          const existing = this.pendingRunContext.weaknessContext ?? "";
+          this.pendingRunContext.weaknessContext =
+            (existing ? existing + "\n" : "") +
+            "[Model Weakness Prevention]\n" + hints.map(h => `- ${h}`).join("\n");
+          this.refreshSystemPrompt();
         }
+      } catch {
+        this.weaknessTracker = null;
       }
     }
 
-    // Self-model weakness context injection
-    const weaknessCtx = getSelfWeaknessContext(this.capabilitySelfModel);
-    if (weaknessCtx) {
-      this.contextManager.addMessage({ role: "system", content: weaknessCtx });
-    }
-
-    // SkillLearner 초기화 (경험에서 학습된 스킬 자동 로드)
-    if (this.enableSkillLearning && projectPath) {
+    const shouldLearnSkills = this.decision.core.skillActivation.enableSkillLearning;
+    if (shouldLearnSkills && projectPath) {
       try {
         this.skillLearner = new SkillLearner(projectPath);
         await this.skillLearner.init();
@@ -810,38 +924,27 @@ async restoreSession(data: SessionData): Promise<void> {
       }
     }
 
-    // Phase 4: FailureSignatureMemory, PlaybookLibrary, ProjectExecutive, StallDetector
     if (projectPath) {
       try {
         this.failureSigMemory = new FailureSignatureMemory({ projectPath });
         this.playbookLibrary = new PlaybookLibrary();
         this.projectExecutive = new ProjectExecutive(projectPath);
-        // Estimated iterations from config or default 20
         const estimatedIter = this.config.loop.maxIterations ?? 20;
         this.stallDetector = new StallDetector(estimatedIter);
-        // Forward project executive events
         this.projectExecutive.on("event", (ev) => this.emitEvent(ev));
-        // Phase 4 remaining: SelfImprovementLoop, MetaLearningCollector, TrustEconomics
         this.selfImprovementLoop = new SelfImprovementLoop({ projectPath });
         this.selfImprovementLoop.on("event", (ev) => this.emitEvent(ev as import("./types.js").AgentEvent));
         this.metaLearningCollector = new MetaLearningCollector({ projectPath });
         this.trustEconomics = new TrustEconomics({ projectPath });
-      } catch {
-        // Phase 4 init failure is non-fatal
-      }
+      } catch { /* non-fatal */ }
     }
 
-    // Phase 5: StrategyLearner + SkillRegistry
     try {
       this.strategyLearner = new StrategyLearner();
       this.skillRegistry = new SkillRegistry();
-      // Forward Phase 5 events
       this.strategyLearner.on("event", (ev) => this.emitEvent(ev as import("./types.js").AgentEvent));
       this.skillRegistry.on("event", (ev) => this.emitEvent(ev as import("./types.js").AgentEvent));
-    } catch {
-      // Phase 5 init failure is non-fatal
-    }
-    // Phase 5 extended: TracePatternExtractor, MetaLearningEngine, ToolSynthesizer
+    } catch { /* non-fatal */ }
     try {
       this.tracePatternExtractor = new TracePatternExtractor();
       this.metaLearningEngine = new MetaLearningEngine({
@@ -849,16 +952,12 @@ async restoreSession(data: SessionData): Promise<void> {
         strategyLearner: this.strategyLearner ?? undefined,
       });
       this.toolSynthesizer = new ToolSynthesizer();
-      // Forward Phase 5 extended events
       this.tracePatternExtractor.on("event", (ev) => this.emitEvent(ev as import("./types.js").AgentEvent));
       this.metaLearningEngine.on("event", (ev) => this.emitEvent(ev as import("./types.js").AgentEvent));
       this.toolSynthesizer.on("event", (ev) => this.emitEvent(ev as import("./types.js").AgentEvent));
-    } catch {
-      // Phase 5 extended init failure is non-fatal
-    }
-    // Phase 6: BudgetGovernorV2, CapabilityGraph, CapabilitySelfModel, StrategyMarket
+    } catch { /* non-fatal */ }
     try {
-      this.budgetGovernorV2 = new BudgetGovernorV2();
+      this.budgetGovernorV2 = new BudgetGovernorV2({ taskBudget: this.config.loop.totalTokenBudget || 200_000 });
       this.capabilityGraph = new CapabilityGraph();
       this.capabilitySelfModel = new CapabilitySelfModel();
       this.strategyMarket = new StrategyMarket();
@@ -866,18 +965,15 @@ async restoreSession(data: SessionData): Promise<void> {
       this.capabilityGraph.on("event", (ev) => this.emitEvent(ev as import("./types.js").AgentEvent));
       this.capabilitySelfModel.on("event", (ev) => this.emitEvent(ev as import("./types.js").AgentEvent));
       this.strategyMarket.on("event", (ev) => this.emitEvent(ev as import("./types.js").AgentEvent));
-      // Register known tools in capability graph
       const toolNames = this.config.loop.tools.map((t) => t.name);
       registerToolsInGraph(this.capabilityGraph, toolNames);
     } catch { /* non-fatal */ }
-    // HierarchicalPlanner 생성
-    this.planner = new HierarchicalPlanner({ projectPath });
 
+    this.planner = new HierarchicalPlanner({ projectPath });
     if (this.skillLearner) {
       this.planner.setSkillLearner(this.skillLearner);
     }
 
-    // Initialize Proactive Replanning (requires planner + impactAnalyzer + worldModel)
     try {
       if (this.impactAnalyzer && this.worldModel && this.simulationEngine && this.transitionModel) {
         this.milestoneChecker = new MilestoneChecker();
@@ -896,9 +992,7 @@ async restoreSession(data: SessionData): Promise<void> {
           this.milestoneChecker,
         );
       }
-    } catch {
-      // Proactive replanning initialization failure is non-fatal
-    }
+    } catch { /* non-fatal */ }
 
     if (this.skillLearner) {
       const learnedSkills = this.skillLearner.getAllSkills();
@@ -907,38 +1001,28 @@ async restoreSession(data: SessionData): Promise<void> {
           .filter((s) => s.confidence >= CLASSIFICATION_CONFIDENCE_THRESHOLD)
           .map((s) => s.id);
         if (skillNames.length > 0) {
-          this.contextManager.addMessage({
-            role: "system",
-            content: `[Learned Skills: ${skillNames.join(", ")}] — Auto-activate on matching error patterns.`,
-          });
+          this.pendingRunContext.learnedSkills = `[Learned Skills: ${skillNames.join(", ")}] — Auto-activate on matching error patterns.`;
+          this.refreshSystemPrompt();
         }
       }
     }
 
-    // RepoKnowledgeGraph 초기화 (코드 구조 그래프 — 비동기 빌드)
-    if (projectPath) {
-      try {
-        this.repoGraph = new RepoKnowledgeGraph(projectPath);
-        // 백그라운드에서 그래프 빌드 (블로킹하지 않음)
-        this.repoGraph.buildFromProject(projectPath).catch(() => {
-          // 그래프 빌드 실패는 치명적이지 않음
-        });
-      } catch {
-        this.repoGraph = null;
-      }
+    try {
+      this.repoGraph = new RepoKnowledgeGraph(projectPath);
+      this.repoGraph.buildFromProject(projectPath).catch(() => {});
+    } catch {
+      this.repoGraph = null;
     }
 
-    // BackgroundAgentManager 초기화 (opt-in)
-    if (this.enableBackgroundAgents && projectPath) {
+    const shouldEnableBgAgents = this.decision.core.subAgentPlan.enabled;
+    if (shouldEnableBgAgents && projectPath) {
       try {
         this.backgroundAgentManager = new BackgroundAgentManager();
         this.backgroundAgentManager.createDefaults(projectPath);
-        // Background events → agent loop events
         for (const agent of this.backgroundAgentManager.list()) {
           const bgAgent = this.backgroundAgentManager.get(agent.id);
           if (bgAgent) {
             bgAgent.on("event", (event: BackgroundEvent) => {
-              // Emit structured bg_update for TUI task panel
               this.emitEvent({
                 kind: "agent:bg_update",
                 agentId: event.agentId,
@@ -955,23 +1039,18 @@ async restoreSession(data: SessionData): Promise<void> {
       }
     }
 
-    // Inject active plugin skills into system prompt (lazy: names only)
-    // Full skill content is loaded on-demand when triggered (file-pattern or error match)
     const activeSkills = this.pluginRegistry.getAllSkills();
     if (activeSkills.length > 0) {
       const skillSummary = activeSkills
         .map((s) => `${s.pluginId}/${s.skill.name}`)
         .join(", ");
-      this.contextManager.addMessage({
-        role: "system",
-        content: `[Plugins: ${skillSummary}] — Skills auto-activate on matching files/errors.`,
-      });
+      this.pendingRunContext.pluginSkills = `[Plugins: ${skillSummary}] — Skills auto-activate on matching files/errors.`;
+      this.refreshSystemPrompt();
     }
 
-    // ContinuousReflection 생성 (1분 간격 체크포인트 + 자기검증 + 컨텍스트 모니터)
     this.continuousReflection = new ContinuousReflection({
       getState: () => this.getStateSnapshot(),
-      checkpoint: async (state, emergency) => {
+      checkpoint: async (state, _emergency) => {
         if (!this.continuationEngine) return;
         const checkpoint: ContinuationCheckpoint = {
           sessionId: this.sessionId ?? "unknown-session",
@@ -993,7 +1072,6 @@ async restoreSession(data: SessionData): Promise<void> {
         await this.continuationEngine.saveCheckpoint(checkpoint);
       },
       selfVerify: async (prompt) => {
-        // 경량 LLM 호출 (~200 토큰)로 자기검증
         try {
           const response = await this.llmClient.chat(
             [{ role: "user", content: prompt }],
@@ -1022,7 +1100,6 @@ async restoreSession(data: SessionData): Promise<void> {
       },
     });
 
-    // Wire ContinuousReflection events to agent loop
     this.continuousReflection.on("reflection:feedback", (feedback: string) => {
       this.contextManager.addMessage({
         role: "system",
@@ -1038,6 +1115,9 @@ async restoreSession(data: SessionData): Promise<void> {
     this.continuousReflection.on("reflection:context_overflow", () => {
       void this.handleSoftContextOverflow();
     });
+
+    this.initialized = true;
+    this.partialInit = false;
   }
 
   /**
@@ -1079,6 +1159,34 @@ async restoreSession(data: SessionData): Promise<void> {
   }
 
   /**
+   * 3-Layer Prompt 재빌드: pendingRunContext + cached state → PromptRuntime → PromptBuilder.
+   * backgroundInit()에서 부분 컨텍스트가 채워질 때마다 호출.
+   */
+  private refreshSystemPrompt(): void {
+    if (!this.initialized && !this.partialInit) return;
+    const projectPath = this.config.loop.projectPath;
+    const allTools = [...this.config.loop.tools, ...this.mcpToolDefinitions, SPAWN_SUB_AGENT_TOOL];
+    try {
+      const envelope = compilePromptEnvelope({
+        decision: this.decision,
+        promptOptions: {
+          projectStructure: this._cachedProjectStructure,
+          yuanMdContent: this._cachedYuanMdContent,
+          tools: allTools,
+          activeToolNames: allTools.map(t => t.name),
+          projectPath,
+          environment: this.environment,
+        },
+        runContext: this.pendingRunContext,
+      });
+      const prompt = buildPrompt(envelope);
+      this.contextManager.replaceSystemMessage(prompt);
+    } catch {
+      // If PromptRuntime fails, leave existing system message as-is
+    }
+  }
+
+  /**
    * 에이전트 루프를 실행.
    * 첫 호출 시 자동으로 Memory와 프로젝트 컨텍스트를 로드한다.
    * @param userMessage 사용자의 요청 메시지
@@ -1086,9 +1194,10 @@ async restoreSession(data: SessionData): Promise<void> {
    */
   async run(userMessage: string): Promise<AgentTermination> {
     this.aborted = false;
+    dlogSep("RUN START");
+    dlog("AGENT-LOOP", `run() called`, { goal: userMessage.slice(0, 120), resumedFromSession: this.resumedFromSession });
     this.reasoningAggregator.reset();
     this.reasoningTree.reset();
-    // Capture before reset so session snapshot gets accurate file list
     const prevChangedFiles = [...this.changedFiles];
     if (!this.resumedFromSession) {
       this.changedFiles = [];
@@ -1105,59 +1214,63 @@ async restoreSession(data: SessionData): Promise<void> {
         total: 0,
       };
       this.impactHintInjected = false;
-      // Task 3: reset tsc tracking per run
+      this.pendingRunContext = {};
+      this.decision = DEFAULT_DECISION;
+      this.toolUsageCounter = { reads: 0, edits: 0, shells: 0, tests: 0, searches: 0, webLookups: 0, sameFileEdits: new Map() };
       this.iterationTsFilesModified = [];
       this.tscRanLastIteration = false;
-      // Task 1: reset context summarization guard per run
       this._contextSummarizationDone = false;
       this._unfulfilledContinuations = 0;
     }
+    this.resumedFromSession = false;
 
 this.checkpointSaved = false;
     this.failureRecovery.reset();
+    this.patchJournal?.reset();
+    this.patchScopeController?.reset();
     this.costOptimizer.reset();
     this.tokenBudgetManager.reset();
     const runStartTime = Date.now();
 
-    // 즉시 start 이벤트 emit — init 전에 TUI 타이머/상태 시작
+    dlog("AGENT-LOOP", `emitting agent:start, sessionId=${this.sessionId}`);
     this.emitEvent({ kind: "agent:start", goal: userMessage });
 
-    // 첫 실행 시 메모리/프로젝트 컨텍스트 자동 로드
-    // init은 최대 2초만 블로킹 — Ollama/analyzeProject 등 느린 작업은 백그라운드 계속
     await Promise.race([
-      this.init(),
-      new Promise<void>(resolve => setTimeout(resolve, 2_000)),
+      this.criticalInit(),
+      new Promise<void>(resolve => setTimeout(resolve, 1_000)),
     ]);
-  if (!this.sessionId) {
-    this.sessionId = randomUUID();
+    if (this.partialInit && !this.initialized) {
+      this.partialInit = false;
+    }
+    this.backgroundInit().catch(() => {});
+  this.sessionId = randomUUID();
+  // Initialize patch transaction journal for atomic rollback
+  if (this.config.loop.projectPath) {
+    this.patchJournal = new PatchTransactionJournal(
+      this.config.loop.projectPath,
+      this.sessionId,
+    );
   }
-  // Phase 6: start task budget tracking
   try {
     this.budgetGovernorV2?.startTask(this.sessionId ?? "default");
     initMarketPlaybooks(this.strategyMarket);
   } catch { /* non-fatal */ }
-  // Initialize trace recorder (once per run)
   if (!this.traceRecorder) {
     this.traceRecorder = new TraceRecorder(this.sessionId);
   }
-  // Initialize arch summarizer (once per run)
   if (!this.archSummarizer && this.config.loop.projectPath) {
     this.archSummarizer = new ArchSummarizer(this.config.loop.projectPath);
-    // Trigger refresh in background if dirty
     this.archSummarizer.getSummary().catch(() => {/* non-fatal */});
   }
-  // Phase 4: PlaybookLibrary — inject hint into system context based on goal
   if (this.playbookLibrary) {
     try {
       const playbook = this.playbookLibrary.query(userMessage);
       if (playbook) {
-        this.contextManager.addMessage({
-          role: "system",
-          content: `[Playbook: ${playbook.taskType} v${playbook.version}] ` +
-            `Phase order: ${playbook.phaseOrder.join(" → ")}. ` +
-            `Stop conditions: ${playbook.stopConditions.join(", ")}. ` +
-            `Evidence required: ${playbook.evidenceRequirements.join(", ")}.`,
-        });
+        this.pendingRunContext.playbookHint =
+          `[Playbook: ${playbook.taskType} v${playbook.version}] ` +
+          `Phase order: ${playbook.phaseOrder.join(" → ")}. ` +
+          `Stop conditions: ${playbook.stopConditions.join(", ")}. ` +
+          `Evidence required: ${playbook.evidenceRequirements.join(", ")}.`;
       }
     } catch { /* non-fatal */ }
   }
@@ -1190,7 +1303,6 @@ this.checkpointSaved = false;
       changedFiles: prevChangedFiles,
     });
   }
-    // 사용자 입력 검증 (prompt injection 방어)
     const inputValidation = this.promptDefense.validateUserInput(userMessage);
     if (inputValidation.injectionDetected && (inputValidation.severity === "critical" || inputValidation.severity === "high")) {
       this.emitEvent({
@@ -1200,20 +1312,16 @@ this.checkpointSaved = false;
       });
     }
 
-    // 사용자 메시지 추가
     this.contextManager.addMessage({
       role: "user",
       content: userMessage,
     });
 
-    // PersonaManager — 유저 메시지로 커뮤니케이션 스타일 학습
     this.lastUserMessage = userMessage;
     if (this.personaManager) {
       this.personaManager.analyzeUserMessage(userMessage);
     }
 
-    // Vision Intent Detection — user message
-    // If the user signals they want to look at an image, auto-read it and inject as vision.
     try {
       const visionIntent = this.visionIntentDetector.detect(userMessage);
       if (visionIntent && visionIntent.confidence >= 0.5) {
@@ -1242,20 +1350,16 @@ this.checkpointSaved = false;
           });
         }
       }
-    } catch {
-      // Vision intent detection is non-fatal; continue normally
-    }
+    } catch { /* non-fatal */ }
 
     try {
-      // Persona injection — 유저 선호도/언어/스타일 어댑테이션을 시스템 메시지로 주입
       if (this.personaManager) {
         const personaSection = this.personaManager.buildPersonaPrompt();
         if (personaSection) {
-          this.contextManager.addMessage({ role: "system", content: personaSection });
+          this.pendingRunContext.personaSection = personaSection;
         }
       }
 
-      // MemoryManager.getRelevant() — 현재 태스크와 관련된 conventions/patterns/warnings 주입
       if (this.memoryManager) {
         const relevant = this.memoryManager.getRelevant(userMessage);
         const parts: string[] = [];
@@ -1269,14 +1373,10 @@ this.checkpointSaved = false;
           parts.push(`## Relevant Code Patterns\n${relevant.patterns.slice(0, 3).map((p) => `- **${p.name}**: ${p.description}`).join("\n")}`);
         }
         if (parts.length > 0) {
-          this.contextManager.addMessage({
-            role: "system",
-            content: `[Task Memory]\n${parts.join("\n\n")}`,
-          });
+          this.pendingRunContext.taskMemory = `[Task Memory]\n${parts.join("\n\n")}`;
         }
       }
 
-      // VectorStore RAG — 태스크와 의미적으로 유사한 코드 컨텍스트 검색·주입
       if (this.vectorStore) {
         try {
           const hits = await this.vectorStore.search(userMessage, 3, 0.2);
@@ -1284,80 +1384,31 @@ this.checkpointSaved = false;
             const ragCtx = hits
               .map((h) => `**${h.id}** (relevance: ${(h.similarity * 100).toFixed(0)}%)\n${h.text.slice(0, 400)}`)
               .join("\n\n---\n\n");
-            this.contextManager.addMessage({
-              role: "system",
-              content: `[RAG Context — semantically relevant code snippets]\n${ragCtx}`,
-            });
+            this.pendingRunContext.ragContext = `[RAG Context — semantically relevant code snippets]\n${ragCtx}`;
           }
-        } catch {
-          // VectorStore search failure is non-fatal
-        }
+        } catch { /* non-fatal */ }
       }
 
-      // Reflexion: 과거 실행에서 배운 가이던스 주입
       if (this.reflexionEngine) {
         try {
           const guidance = await this.reflexionEngine.getGuidance(userMessage);
-          // 가이던스 유효성 검증: 빈 전략이나 매우 낮은 confidence 필터링
           const validStrategies = guidance.relevantStrategies.filter(
             (s) => s.strategy && s.strategy.length > 5 && s.confidence > 0.1,
           );
           if (validStrategies.length > 0 || guidance.recentFailures.length > 0) {
             const filteredGuidance = { ...guidance, relevantStrategies: validStrategies };
             const guidancePrompt = this.reflexionEngine.formatForSystemPrompt(filteredGuidance);
-            this.contextManager.addMessage({
-              role: "system",
-              content: guidancePrompt,
-            });
+            this.pendingRunContext.reflexionGuidance = guidancePrompt;
           }
-        } catch {
-          // guidance 로드 실패는 치명적이지 않음
-        }
+        } catch { /* non-fatal */ }
       }
 
-      // Task 분류 → 시스템 프롬프트에 tool sequence hint 주입
-      const classification = this.taskClassifier.classify(userMessage);
-      if (classification.confidence >= CLASSIFICATION_CONFIDENCE_THRESHOLD) {
-        const classificationHint = this.taskClassifier.formatForSystemPrompt(classification);
-        this.contextManager.addMessage({
-          role: "system",
-          content: classificationHint,
-        });
-      }
+      this.refreshSystemPrompt();
 
-      // Specialist routing: 태스크 타입에 맞는 전문 에이전트 설정 주입
-      if (classification.specialistDomain) {
-        const specialistMatch = this.specialistRegistry.findSpecialist(
-          classification.specialistDomain,
-        );
-        if (specialistMatch && specialistMatch.confidence >= CLASSIFICATION_CONFIDENCE_THRESHOLD) {
-          this.contextManager.addMessage({
-            role: "system",
-            content: `[Specialist: ${specialistMatch.specialist.name}] ${specialistMatch.specialist.systemPrompt.slice(0, 500)}`,
-          });
-        }
-      }
+      // Legacy task classification block removed — Decision Engine is now always present.
+      // Task classification, specialist routing, and tool planning are handled via
+      // decision.core.skillActivation in the Decision-based overrides section below.
 
-      // Tool Planning: 태스크 타입에 맞는 도구 실행 계획 힌트 주입
-      if (this.enableToolPlanning && classification.confidence >= CLASSIFICATION_CONFIDENCE_THRESHOLD) {
-        const planContext: PlanContext = {
-          userMessage,
-        };
-        this.currentToolPlan = this.toolPlanner.planForTask(
-          classification.type,
-          planContext,
-        );
-        this.executedToolNames = [];
-        if (this.currentToolPlan.confidence >= CLASSIFICATION_CONFIDENCE_THRESHOLD) {
-          const planHint = this.toolPlanner.formatPlanHint(this.currentToolPlan);
-          this.contextManager.addMessage({
-            role: "system",
-            content: planHint,
-          });
-        }
-      }
-
-      // CrossFileRefactor: detect rename/move intent and inject preview hint
       if (this.config.loop.projectPath) {
         try {
           const renameMatch = userMessage.match(
@@ -1390,7 +1441,6 @@ this.checkpointSaved = false;
           } else if (moveMatch) {
             const [, symbolOrFile, destination] = moveMatch;
             const refactor = new CrossFileRefactor(this.config.loop.projectPath);
-            // Try move as symbol move (source heuristic: look for a file with that name)
             const preview = await refactor.moveSymbol(symbolOrFile, symbolOrFile, destination);
             if (preview.totalChanges > 0) {
               const affectedList = preview.affectedFiles
@@ -1409,15 +1459,138 @@ this.checkpointSaved = false;
               this.iterationSystemMsgCount++;
             }
           }
-        } catch {
-          // CrossFileRefactor preview failure is non-fatal
-        }
+        } catch { /* non-fatal */ }
       }
 
-      // 복잡도 감지 → 필요 시 자동 플래닝
+      try {
+        let projectCtx: AgentProjectContext | undefined = this.worldState
+          ? worldStateToProjectContext(this.worldState)
+          : undefined;
+        // Codebase complexity stats are enriched by ExecutionEngine when it calls agentDecide
+        // AgentLoop uses worldState only; CodebaseContext lives in ExecutionEngine
+
+        this.decision = agentDecide({
+          message: userMessage,
+          projectContext: projectCtx,
+          prevDecision: this.prevDecision ?? undefined,
+        });
+
+        this.emitEvent({
+          kind: "agent:decision",
+          decision: {
+            intent: this.decision.core.reasoning.intent,
+            complexity: this.decision.core.reasoning.complexity,
+            taskStage: this.decision.core.reasoning.taskStage,
+            planRequired: this.decision.core.planRequired,
+            nextAction: this.decision.core.nextAction,
+          },
+        });
+
+        this.emitEvent({
+          kind: "agent:interaction_mode",
+          mode: this.decision.core.interactionMode,
+        });
+
+        if (this.decision.core.nextAction === "ask_user" && this.decision.core.clarification) {
+          const clar = this.decision.core.clarification;
+          const clarMsg = `I need some clarification before proceeding:\n\n${clar.reason}` +
+            (clar.missingFields.length > 0 ? `\n\nMissing: ${clar.missingFields.join(", ")}` : "") +
+            (clar.allowProceedWithAssumptions ? "\n\n(I can proceed with assumptions if you prefer.)" : "");
+          this.emitEvent({ kind: "agent:completed", summary: clarMsg, filesChanged: [] });
+          return { reason: "NEEDS_CLARIFICATION", summary: clarMsg };
+        }
+
+        if (this.decision.core.nextAction === "blocked_external") {
+          const blockedMsg = "This task appears to be blocked by an external dependency. Please resolve the blocking issue and retry.";
+          this.emitEvent({ kind: "agent:completed", summary: blockedMsg, filesChanged: [] });
+          return { reason: "BLOCKED_EXTERNAL", summary: blockedMsg };
+        }
+
+        this.currentComplexity = this.decision.core.reasoning.complexity;
+
+        const decMode = this.decision.core.interactionMode;
+        const decVd = this.decision.core.verifyDepth;
+        if (decMode === "CHAT") {
+          this.overheadGovernor.overrideConfig({
+            autoTsc: "OFF",
+            debate: "OFF",
+            deepVerify: "OFF",
+            quickVerify: "OFF",
+            qaPipeline: "OFF",
+            llmFixer: "OFF",
+            summarize: "OFF",
+          });
+        } else if (decMode === "AGENT" && decVd === "thorough") {
+          this.overheadGovernor.overrideConfig({
+            autoTsc: "BLOCKING",
+            deepVerify: "BLOCKING",
+            quickVerify: "BLOCKING",
+            qaPipeline: "BLOCKING",
+          });
+        } else if (decMode === "HYBRID") {
+          this.overheadGovernor.overrideConfig({
+            autoTsc: "SHADOW",
+            quickVerify: "SHADOW",
+            qaPipeline: "SHADOW",
+          });
+        }
+
+        // ── Initialize safety floor modules (MutationPolicy + PatchScopeController) ──
+        if (this.config.loop.projectPath) {
+          this.mutationPolicy = new WorkspaceMutationPolicy(this.config.loop.projectPath);
+          const lifecycle = detectRepoLifecycle(this.config.loop.projectPath);
+          this.patchScopeController = new PatchScopeController(
+            this.decision.core.reasoning.complexity,
+            lifecycle,
+          );
+        }
+
+        // ── Decision-based memory load override (Phase I+ SSOT) ──
+        // If Decision says memory is not needed, clear already-loaded memory context
+        // to reduce prompt size for trivial tasks.
+        const shouldLoadMemory = this.decision.core.memoryLoad.shouldLoad;
+        if (!shouldLoadMemory) {
+          this.pendingRunContext.memoryContext = undefined;
+          this.pendingRunContext.taskMemory = undefined;
+          this.pendingRunContext.ragContext = undefined;
+        }
+
+        // ── Decision-based skill/specialist/background overrides (Phase I SSOT) ──
+        const sa = this.decision.core.skillActivation;
+
+        // Specialist routing from Decision
+        if (sa.enableSpecialist && sa.specialistDomain) {
+          const specialistMatch = this.specialistRegistry.findSpecialist(sa.specialistDomain);
+          if (specialistMatch && specialistMatch.confidence >= CLASSIFICATION_CONFIDENCE_THRESHOLD) {
+            this.contextManager.addMessage({
+              role: "system",
+              content: `[Specialist: ${specialistMatch.specialist.name}] ${specialistMatch.specialist.systemPrompt.slice(0, 500)}`,
+            });
+          }
+        }
+
+        // Tool planning from Decision
+        if (sa.enableToolPlanning) {
+          const classification = this.taskClassifier.classify(userMessage);
+          if (classification.confidence >= CLASSIFICATION_CONFIDENCE_THRESHOLD) {
+            const planContext: PlanContext = { userMessage };
+            this.currentToolPlan = this.toolPlanner.planForTask(classification.type, planContext);
+            this.executedToolNames = [];
+            if (this.currentToolPlan.confidence >= CLASSIFICATION_CONFIDENCE_THRESHOLD) {
+              const planHint = this.toolPlanner.formatPlanHint(this.currentToolPlan);
+              this.contextManager.addMessage({
+                role: "system",
+                content: planHint,
+              });
+            }
+          }
+        }
+      } catch {
+        this.decision = DEFAULT_DECISION;
+      }
+
       await this.maybeCreatePlan(userMessage);
 
-      // ContinuousReflection 시작 (1분 간격 체크포인트/자기검증/컨텍스트모니터)
       if (this.continuousReflection) {
         this.continuousReflection.start();
       }
@@ -1426,11 +1599,14 @@ this.checkpointSaved = false;
       try {
         result = await this.executeLoop();
       } finally {
-        // ContinuousReflection 정지 (루프 종료 시 반드시 정리)
         if (this.continuousReflection) {
           this.continuousReflection.stop();
         }
       }
+
+      this.prevDecision = this.decision;
+      this.toolUsageCounter = { reads: 0, edits: 0, shells: 0, tests: 0, searches: 0, webLookups: 0, sameFileEdits: new Map() };
+
       if (this.sessionPersistence && this.sessionId) {
         const finalStatus =
           result.reason === "ERROR"
@@ -1438,10 +1614,8 @@ this.checkpointSaved = false;
             : "completed";
         await this.sessionPersistence.updateStatus(this.sessionId, finalStatus);
       }
-      // 실행 완료 후 메모리 자동 업데이트
       await this.updateMemoryAfterRun(userMessage, result, Date.now() - runStartTime);
 
-      // Phase 4: FailureSignatureMemory promote + PlaybookLibrary outcome recording
       if (result.reason === "GOAL_ACHIEVED") {
         try {
           if (this.failureSigMemory && this.repeatedErrorSignature) {
@@ -1461,7 +1635,6 @@ this.checkpointSaved = false;
         } catch { /* non-fatal */ }
       }
 
-      // Phase 4 remaining: SelfImprovementLoop + MetaLearningCollector + TrustEconomics
       try {
         const taskType = this.playbookLibrary?.query(userMessage)?.taskType ?? "unknown";
         const championPlaybook = selectMarketStrategy(this.strategyMarket, taskType);
@@ -1505,7 +1678,6 @@ this.checkpointSaved = false;
           }
         }
 
-        // Phase 5: record strategy outcome
         if (this.strategyLearner) {
           const activePlaybookId = (this as unknown as { _activePlaybookId?: string })._activePlaybookId ?? "default";
           if (runSuccess) {
@@ -1515,7 +1687,6 @@ this.checkpointSaved = false;
           }
         }
 
-        // Phase 5 extended: periodic pattern extraction (every 10 runs)
         this.sessionRunCount += 1;
         if (this.sessionRunCount % 10 === 0) {
           if (this.tracePatternExtractor) {
@@ -1526,7 +1697,6 @@ this.checkpointSaved = false;
           }
         }
 
-        // Phase 6: record outcomes in capability self model and strategy market
         try {
           const env = (this as unknown as { _detectedEnvironment?: string })._detectedEnvironment ?? "general";
           this.capabilitySelfModel?.recordOutcome(env, taskType, runSuccess);
@@ -1543,13 +1713,11 @@ this.checkpointSaved = false;
         } catch { /* non-fatal */ }
       } catch { /* non-fatal */ }
 
-      // SkillLearner: 성공적 에러 해결 시 새로운 스킬 학습
       if (this.skillLearner && result.reason === "GOAL_ACHIEVED") {
         try {
           let newSkillId: string | null = null;
           const errorToolResults = this.allToolResults.filter((r) => !r.success);
           if (errorToolResults.length > 0 && this.changedFiles.length > 0) {
-            // 에러가 있었지만 결국 성공 → 학습 가능한 패턴
             const runAnalysis = this.memoryUpdater.analyzeRun({
               goal: userMessage,
               termination: { reason: result.reason, summary: result.summary },
@@ -1579,32 +1747,18 @@ this.checkpointSaved = false;
               });
             }
           }
-        } catch {
-          // 학습 실패는 치명적이지 않음
-        }
+        } catch { /* non-fatal */ }
       }
 
-      // Tool plan compliance check (non-blocking, for metrics)
       if (this.currentToolPlan && this.executedToolNames.length > 0) {
         try {
-          this.toolPlanner.validateExecution(
-            this.currentToolPlan,
-            this.executedToolNames,
-          );
-        } catch {
-          // compliance check 실패는 치명적이지 않음
-        }
+          this.toolPlanner.validateExecution(this.currentToolPlan, this.executedToolNames);
+        } catch { /* non-fatal */ }
       }
 
-      // RepoKnowledgeGraph: 변경 파일 그래프 업데이트
       if (this.repoGraph && this.changedFiles.length > 0) {
-        this.repoGraph.updateFiles(this.changedFiles).catch(() => {
-          // 그래프 업데이트 실패는 치명적이지 않음
-        });
+        this.repoGraph.updateFiles(this.changedFiles).catch(() => {});
       }
-
-      // BackgroundAgentManager: 정리 (stopAll은 abort 시에만)
-      // Background agents는 세션 간 지속되므로 여기서 stop하지 않음
 
       return result;
       
@@ -1634,10 +1788,10 @@ this.checkpointSaved = false;
     result: AgentTermination,
     runDurationMs = 0,
   ): Promise<void> {
-    if (!this.enableMemory || !this.memoryManager) return;
+    // Gate by both memoryLoad (loading) and memoryIntent (saving)
+    if (!this.decision.core.memoryIntent.shouldSave || !this.memoryManager) return;
 
     try {
-      // MemoryUpdater로 풍부한 학습 추출
       const analysis = this.memoryUpdater.analyzeRun({
         goal: userGoal,
         termination: {
@@ -1661,18 +1815,15 @@ this.checkpointSaved = false;
         iterations: this.iterationCount,
       });
 
-      // 추출된 학습을 MemoryManager에 저장
       const learnings = this.memoryUpdater.extractLearnings(analysis, userGoal);
       for (const learning of learnings) {
         this.memoryManager.addLearning(learning.category, learning.content);
       }
 
-      // 감지된 컨벤션 저장 (기존에 추출만 되고 저장 안 되던 버그 수정)
       for (const convention of analysis.conventions) {
         this.memoryManager.addConvention(convention);
       }
 
-      // 감지된 패턴 저장
       for (const pattern of analysis.toolPatterns) {
         if (pattern.successRate > 0.7 && pattern.count >= 3) {
           this.memoryManager.addPattern({
@@ -1684,7 +1835,6 @@ this.checkpointSaved = false;
         }
       }
 
-      // 에러로 종료된 경우 실패 기록도 추가
       if (result.reason === "ERROR") {
         this.memoryManager.addFailedApproach(
           `Task: ${userGoal.slice(0, 80)}`,
@@ -1692,23 +1842,17 @@ this.checkpointSaved = false;
         );
       }
 
-      // 오래된 항목 정리 (매 5회 실행마다)
       if (this.iterationCount % 5 === 0) {
         this.memoryManager.prune();
       }
 
-      // 메모리 저장
       await this.memoryManager.save();
 
-      // PersonaManager — 유저 프로필 저장 (학습된 커뮤니케이션 스타일 유지)
       if (this.personaManager) {
         await this.personaManager.saveProfile().catch(() => {});
       }
-    } catch {
-      // 메모리 저장 실패는 치명적이지 않음
-    }
+    } catch { /* non-fatal */ }
 
-    // Reflexion: 실행 결과 반영 + 전략 추출
     if (this.reflexionEngine) {
       try {
         const entry = this.reflexionEngine.reflect({
@@ -1724,16 +1868,13 @@ this.checkpointSaved = false;
 
         await this.reflexionEngine.store.saveReflection(entry);
 
-        // 성공 시 전략 추출
         if (entry.outcome === "success") {
           const strategy = this.reflexionEngine.extractStrategy(entry, userGoal);
           if (strategy) {
             await this.reflexionEngine.store.saveStrategy(strategy);
           }
         }
-      } catch {
-        // reflexion 저장 실패는 치명적이지 않음
-      }
+      } catch { /* non-fatal */ }
     }
   }
 
@@ -1876,11 +2017,30 @@ this.checkpointSaved = false;
     }
     lines.push(`token_budget: ${remaining}% remaining`);
 
-    if (this.iterationSystemMsgCount < 5) {
-      this.contextManager.addMessage({ role: "system", content: lines.join(" | ") });
-      this.lastAgentStateInjection = iteration;
-      this.iterationSystemMsgCount++;
+    this.ephemeralHints.push(lines.join(" | "));
+    this.lastAgentStateInjection = iteration;
+  }
+
+  /**
+   * Phase B: flush collected ephemeral hints into context as system messages.
+   * Applies rate-limiting: max 7 hints, max 3000 tokens total (matching PromptRuntime compileEphemeral).
+   * Called at end of each iteration (before next LLM call) and before `continue` statements.
+   */
+  private flushEphemeralHints(): void {
+    if (this.ephemeralHints.length === 0) return;
+
+    const MAX_HINTS = 7;
+    const MAX_TOKENS = 3000;
+    let tokenCount = 0;
+
+    for (const hint of this.ephemeralHints.slice(0, MAX_HINTS)) {
+      const tokens = Math.ceil(hint.length / 3.5);
+      if (tokenCount + tokens > MAX_TOKENS) break;
+      tokenCount += tokens;
+      this.contextManager.addMessage({ role: "system", content: hint });
     }
+
+    this.ephemeralHints = [];
   }
 
   /**
@@ -1952,26 +2112,11 @@ this.checkpointSaved = false;
    * - "moderate" 이상 → HierarchicalPlanner로 L1+L2 계획 수립
    */
   private async maybeCreatePlan(userMessage: string): Promise<void> {
-    if (!this.planner || !this.enablePlanning) return;
+    if (!this.planner) return;
 
-    const complexity = await this.detectComplexity(userMessage);
-    this.currentComplexity = complexity;
+    if (!this.decision.core.planRequired) return;
 
-    // 임계값 미만이면 플래닝 스킵
-    // Bug 4 fix: extend thresholdOrder to include "massive" (4), so that when planningThreshold
-    // is "complex", both "complex" (3) and "massive" (4) trigger planning.
-    // Previously "massive" had no entry and fell through to undefined → NaN comparisons.
-    const thresholdOrder: Record<string, number> = { simple: 1, moderate: 2, complex: 3, massive: 4 };
-    const complexityOrder: Record<string, number> = {
-      trivial: 0, simple: 1, moderate: 2, complex: 3, massive: 4,
-    };
-    // Use the threshold for the configured level; "complex" threshold activates for complexity >= "complex"
-    const effectiveThreshold = thresholdOrder[this.planningThreshold] ?? 2;
-    if ((complexityOrder[complexity] ?? 0) < effectiveThreshold) {
-      return;
-    }
-
-this.emitSubagent("planner", "start", `task complexity ${complexity}. creating execution plan`);
+this.emitSubagent("planner", "start", `task complexity ${this.currentComplexity}. creating execution plan`);
 
 try {
   const plan = await this.planner.createHierarchicalPlan(
@@ -2022,12 +2167,7 @@ try {
 }
   }
   /**
-   * 사용자 메시지에서 태스크 복잡도를 휴리스틱으로 추정.
-   * LLM 호출 없이 빠르게 결정 (토큰 절약).
-   */
-  /**
    * Detect the best test/verify command for the current project.
-   * Bug 3 fix: replaces the hardcoded "pnpm build" default.
    */
   private detectTestCommand(): string {
     const projectPath = this.config.loop.projectPath;
@@ -2060,6 +2200,7 @@ try {
     return "pnpm build";
   }
 
+  /** @deprecated Use AgentDecisionContext.core.reasoning.complexity instead */
   private _detectComplexityHeuristic(
     message: string,
   ): "trivial" | "simple" | "moderate" | "complex" | "massive" {
@@ -2152,10 +2293,9 @@ try {
   }
 
   /**
-   * Hybrid complexity detection: keyword heuristic for clear cases,
-   * LLM single-word classification for ambiguous borderline cases (score 1-3).
-   * This prevents both over-planning (trivial tasks) and under-planning
-   * (ambitious short requests that keywords miss across any language).
+   * @deprecated Use AgentDecisionContext.core.reasoning.complexity instead.
+   * Hybrid complexity detection: keyword heuristic + LLM fallback for borderline cases.
+   * Only called when Decision Engine is absent.
    */
   private async detectComplexity(
     message: string,
@@ -2284,11 +2424,7 @@ try {
           }
         }
 
-        // 리플래닝 결과를 컨텍스트에 주입
-        this.contextManager.addMessage({
-          role: "system",
-          content: `[Re-plan] Strategy: ${result.strategy}. Reason: ${result.reason}.\nModified tasks: ${result.modifiedTasks.map((t) => t.description).join(", ")}`,
-        });
+        this.ephemeralHints.push(`[Re-plan] Strategy: ${result.strategy}. Reason: ${result.reason}.\nModified tasks: ${result.modifiedTasks.map((t) => t.description).join(", ")}`);
       }
 
       // Estimate replan token usage
@@ -2315,6 +2451,7 @@ try {
   // ─── Core Loop ───
 
   private async executeLoop(): Promise<AgentTermination> {
+    dlog("AGENT-LOOP", `entering main loop`, { contextMessages: this.contextManager?.getMessages?.()?.length ?? "?", totalTokenBudget: this.config.loop.totalTokenBudget });
 let iteration = this.iterationCount;
 
     while (!this.aborted) {
@@ -2337,6 +2474,7 @@ let iteration = this.iterationCount;
         this.governor.checkIteration();
       } catch (err) {
         if (err instanceof PlanLimitError) {
+          dlog("AGENT-LOOP", `run() terminating`, { reason: "MAX_ITERATIONS", tokensUsed: this.tokenUsage.total, iterations: this.iterationCount });
           return {
             reason: "MAX_ITERATIONS",
             lastState: `Stopped at iteration ${iteration}: ${err.message}`,
@@ -2347,25 +2485,22 @@ let iteration = this.iterationCount;
 
       iteration++;
       this.iterationCount = iteration;
+      dlog("AGENT-LOOP", `── iteration ${iteration} start ──`, { tokenUsageTotal: this.tokenUsage.total });
       const iterationStart = Date.now();
-      // Phase 6: Budget governor halt check
+      dlog("AGENT-LOOP", `BUDGET_EXHAUSTED check`, { used: this.tokenUsage.total, budget: this.config.loop.totalTokenBudget });
       if (checkBudgetShouldHalt(this.budgetGovernorV2, this.sessionId ?? "default")) {
         return { reason: "BUDGET_EXHAUSTED", tokensUsed: this.tokenUsage.total };
       }
-      // Reset per-iteration governor state
       this.verifyRanThisIteration = false;
       this.summarizeRanThisIteration = false;
       this.llmFixerRunCount = 0;
       this.iterationSystemMsgCount = 0;
-
-      // Message pruning — cap in-memory messages to prevent OOM (GPT recommendation)
+      this.ephemeralHints = [];
       this.pruneMessagesIfNeeded();
 
-      // Cap allToolResults (prevents unbounded memory growth)
       this.allToolResults = cap(this.allToolResults, BOUNDS.allToolResults);
       this.allToolResultsSinceLastReplan = cap(this.allToolResultsSinceLastReplan, BOUNDS.toolResultsSinceReplan);
 
-      // Proactive replanning check (every 10 iterations when plan is active)
       if (
         this.replanningEngine &&
         this.activePlan &&
@@ -2404,49 +2539,22 @@ let iteration = this.iterationCount;
               }
             }
 
-            // Reset tool results accumulator after replan
             this.allToolResultsSinceLastReplan = [];
 
-            // Inject replan notice into context
-            this.contextManager.addMessage({
-              role: "system",
-              content: `[Proactive Replan] ${replanResult.message}\nScope: ${replanResult.decision.scope}, Risk: ${replanResult.decision.urgency}`,
-            });
+            this.ephemeralHints.push(`[Proactive Replan] ${replanResult.message}\nScope: ${replanResult.decision.scope}, Risk: ${replanResult.decision.urgency}`);
           }
-        } catch {
-          // Non-blocking — proactive replanning failures should not crash the agent
-        }
+        } catch { /* non-fatal */ }
       }
 
-      // Plan progress injection — every 3 iterations or when task advances
       if (this.activePlan) {
         this.injectPlanProgress(iteration);
       }
 
-      // Policy validation — check cost limits from ExecutionPolicyEngine
-      if (this.policyEngine) {
-        try {
-          const costPolicy = this.policyEngine.get("cost");
-          const iterationTokensUsed = this.tokenUsage.input + this.tokenUsage.output;
-          if (costPolicy.maxTokensPerIteration > 0 && iterationTokensUsed > costPolicy.maxTokensPerIteration) {
-            this.emitReasoning(`policy blocked iteration ${iteration}: token usage ${iterationTokensUsed} exceeds maxTokensPerIteration ${costPolicy.maxTokensPerIteration}`);
-            return { reason: "BUDGET_EXHAUSTED", tokensUsed: iterationTokensUsed };
-          }
-        } catch {
-          // Policy engine failure is non-fatal
-        }
-      }
-
-      // Soft context rollover:
-      // checkpoint first, then let ContextManager compact instead of aborting/throwing.
       const contextUsageRatio = this.contextManager.getUsageRatio();
-
-      // Task 1: ContextBudgetManager LLM summarization — Governor gated (default SHADOW)
       const summarizeMode = this.overheadGovernor.shouldRunSummarize(this.buildTriggerContext());
       if (summarizeMode === "BLOCKING") this.summarizeRanThisIteration = true;
       if (contextUsageRatio >= 0.75 && this.contextBudgetManager && !this._contextSummarizationDone && summarizeMode === "BLOCKING") {
-        this._contextSummarizationDone = true; // run at most once per agent turn
-        // Non-blocking: fire-and-forget so the main iteration is not stalled
+        this._contextSummarizationDone = true;
         this.contextBudgetManager.importMessages(this.contextManager.getMessages());
         if (this.contextBudgetManager.needsSummarization()) {
           const budgetMgr = this.contextBudgetManager;
@@ -2464,42 +2572,7 @@ let iteration = this.iterationCount;
                 content: `Context at ${Math.round(ratio * 100)}%: summarized ${summary.originalIds.length} old messages (${summary.originalTokens} → ${summary.summarizedTokens} tokens, ${Math.round(summary.compressionRatio * 100)}% ratio).`,
               });
             }
-          }).catch(() => {
-            // summarization failure is non-fatal
-          });
-        }
-      }
-
-      // Bug 5 fix: use ContextCompressor as an alternative when context pressure is high (>70%)
-      // At 70-84% we apply intelligent priority-based compression before falling back to truncation.
-      if (contextUsageRatio >= 0.70 && contextUsageRatio < 0.85) {
-        try {
-          // Estimate maxTokens from the usage ratio and current message count
-          // contextUsageRatio = estimatedTokens / (maxTokens - outputReserve)
-          // We use a conservative 128_000 as a safe upper bound
-          const estimatedMaxTokens = 128_000;
-          const contextCompressor = new ContextCompressor({
-            maxTokens: estimatedMaxTokens,
-            reserveTokens: Math.ceil(estimatedMaxTokens * 0.15),
-          });
-          const currentMessages = this.contextManager.getMessages();
-          const currentTokenEstimate = Math.ceil(estimatedMaxTokens * contextUsageRatio);
-          const compressed = contextCompressor.compress(currentMessages, currentTokenEstimate);
-          if (compressed.evicted > 0 || compressed.summarized > 0) {
-            // Replace messages in contextManager with compressed version
-            // by clearing and re-adding (contextManager.addMessages is the public API)
-            const internalMessages = (this.contextManager as unknown as { messages: import("./types.js").Message[] }).messages;
-            if (internalMessages) {
-              internalMessages.length = 0;
-              internalMessages.push(...compressed.messages);
-            }
-            this.emitEvent({
-              kind: "agent:thinking",
-              content: `Context pressure ${Math.round(contextUsageRatio * 100)}%: ContextCompressor applied (evicted ${compressed.evicted}, summarized ${compressed.summarized} messages).`,
-            });
-          }
-        } catch {
-          // ContextCompressor failure is non-fatal; ContextManager will handle via compactHistory
+          }).catch(() => {});
         }
       }
 
@@ -2516,9 +2589,6 @@ let iteration = this.iterationCount;
         });
       }
 
-      // Check file-pattern skill triggers based on changed files
-      // Guard: skip skill injection if over 80% token budget to preserve remaining budget
-      // Guard: max 3 active skills globally (Context Budget Rules)
       const fileTriggerBudgetRatio = this.config.loop.totalTokenBudget > 0
         ? this.tokenUsage.total / this.config.loop.totalTokenBudget
         : 0;
@@ -2531,18 +2601,13 @@ let iteration = this.iterationCount;
         const fileSkills = this.pluginRegistry.findMatchingSkills({
           filePath: lastFile,
         });
-        // Max 2 skills per iteration, capped by global 3-skill limit
         const slotsRemaining = AgentLoop.MAX_ACTIVE_SKILLS - this.activeSkillIds.length;
         for (const skill of fileSkills.slice(0, Math.min(2, slotsRemaining))) {
           if (this.activeSkillIds.includes(skill.id)) continue; // no duplicate
           const parsed = this.skillLoader.loadTemplate(skill);
           if (parsed) {
-            this.contextManager.addMessage({
-              role: "system",
-              content: `[File Skill: ${skill.name}] ${parsed.domain ? `[${parsed.domain}] ` : ""}${skill.description}`,
-            });
+            this.ephemeralHints.push(`[File Skill: ${skill.name}] ${parsed.domain ? `[${parsed.domain}] ` : ""}${skill.description}`);
             this.activeSkillIds.push(skill.id);
-            this.iterationSystemMsgCount++;
           }
         }
       }
@@ -2566,10 +2631,14 @@ let iteration = this.iterationCount;
 
       let response: LLMResponse;
       try {
+        dlog("AGENT-LOOP", `calling LLM`, { messages: (this as unknown as Record<string, unknown[]>).messages?.length ?? "?", iteration });
         response = await this.callLLMStreaming(messages);
       } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        dlog("AGENT-LOOP", `run() LLM error`, { reason: "ERROR", error: errMsg, tokensUsed: this.tokenUsage.total, iterations: this.iterationCount });
+        this.emit("event", { kind: "agent:error", message: errMsg, retryable: false });
         if (err instanceof LLMError) {
-          return { reason: "ERROR", error: err.message };
+          return { reason: "ERROR", error: errMsg };
         }
         throw err;
       }
@@ -2678,20 +2747,7 @@ let iteration = this.iterationCount;
         const content = response.content ?? "";
         let finalSummary = content || "Task completed.";
 
-        // If LLM outputs text with no tool calls and hasn't signalled completion via task_complete,
-        // remind it once to use tools or call task_complete.
-        if (this._unfulfilledContinuations < 2) {
-          this._unfulfilledContinuations++;
-          this.contextManager.addMessage({ role: "assistant", content });
-          this.contextManager.addMessage({
-            role: "user",
-            content: "Please complete your task: either use the available tools to take action, or call task_complete if you are done.",
-          });
-          this.emitEvent({ kind: "agent:thinking", content: `[nudge ${this._unfulfilledContinuations}/2] reminding LLM to use tools or call task_complete` });
-          continue;
-        }
-        // Do NOT reset _unfulfilledContinuations here — counter stays spent to prevent infinite nudge loop
-        // (resetting would re-enable nudging on the next continue from phase transition / cheap check failure)
+        // Text-only response: let model decide next step (removed aggressive nudging)
 
         // Phase transition: implement → verify when LLM signals completion (no tool calls)
         if (this.taskPhase === "implement" && this.changedFiles.length > 0) {
@@ -2751,10 +2807,9 @@ let iteration = this.iterationCount;
                 role: "assistant",
                 content: content || "",
               });
-              this.contextManager.addMessage({
-                role: "system",
-                content: `[Self-Reflection L2] Verification failed (score: ${deepResult.overallScore}, confidence: ${deepResult.confidence.toFixed(2)}). ${deepResult.selfCritique}${issuesList ? ` Issues: ${issuesList}` : ""}. Please address these before completing.`,
-              });
+              this.ephemeralHints.push(`[Self-Reflection L2] Verification failed (score: ${deepResult.overallScore}, confidence: ${deepResult.confidence.toFixed(2)}). ${deepResult.selfCritique}${issuesList ? ` Issues: ${issuesList}` : ""}. Please address these before completing.`);
+              // Flush ephemeral hints before continue (next iteration resets them)
+              this.flushEphemeralHints();
              this.emitSubagent("verifier", "done", `deep verification failed, score ${deepResult.overallScore}. continuing to address issues`);
               continue; // Don't return GOAL_ACHIEVED, continue the loop
             }
@@ -2794,10 +2849,9 @@ let iteration = this.iterationCount;
                     role: "assistant",
                     content: content || "",
                   });
-                  this.contextManager.addMessage({
-                    role: "system",
-                    content: `[Debate] Multi-agent debate did not pass (score: ${debateResult.finalScore}). ${debateResult.summary}. Please address the identified issues.`,
-                  });
+                  this.ephemeralHints.push(`[Debate] Multi-agent debate did not pass (score: ${debateResult.finalScore}). ${debateResult.summary}. Please address the identified issues.`);
+                  // Flush ephemeral hints before continue
+                  this.flushEphemeralHints();
                   this.emitEvent({
                     kind: "agent:thinking",
                     content: `Debate failed (score: ${debateResult.finalScore}). Continuing to address issues...`,
@@ -2831,7 +2885,6 @@ let iteration = this.iterationCount;
           });
         }
 
-        // Task 2: QAPipeline "thorough" mode at final task completion (LLM review included)
         if (this.changedFiles.length > 0 && this.config.loop.projectPath) {
           try {
             const thoroughQA = new QAPipeline({
@@ -2880,6 +2933,7 @@ let iteration = this.iterationCount;
           }
         }
 
+        dlog("AGENT-LOOP", `run() terminating`, { reason: "GOAL_ACHIEVED", tokensUsed: this.tokenUsage.total, iterations: this.iterationCount });
         this.emitEvent({
           kind: "agent:completed",
     summary: finalSummary,
@@ -2901,14 +2955,25 @@ this.emitEvent({
         const callArgs = this.parseToolArgs(taskCompleteCall.arguments);
         const taskCompleteSummary = String(callArgs["summary"] ?? response.content ?? "Task completed.");
 
-        // FIX: Save assistant message to context so next conversation turn has valid history
+        if (this.decision.core.vetoFlags.verifyRequired && !this.verifyRanThisIteration) {
+          this.ephemeralHints.push("[VERIFY REQUIRED] You must run build/test verification before completing. Run tsc, tests, or verification commands now.");
+          // Don't return completion — continue loop so LLM runs verification first
+          this.contextManager.addMessage({
+            role: "assistant",
+            content: response.content,
+            tool_calls: response.toolCalls.filter((tc) => tc.name !== "task_complete"),
+          });
+          continue;
+        }
+
+          // Filter task_complete from tool_calls — internal protocol signal without matching tool result
+        const nonProtocolCalls = response.toolCalls.filter((tc) => tc.name !== "task_complete");
         this.contextManager.addMessage({
           role: "assistant",
           content: response.content,
-          tool_calls: response.toolCalls,
+          tool_calls: nonProtocolCalls.length > 0 ? nonProtocolCalls : undefined,
         });
 
-        // FIX: Emit tool_result so TUI marks task_complete as "success" (stops BlinkingDot + LiveElapsed)
         this.emitEvent({
           kind: "agent:tool_result",
           tool: "task_complete",
@@ -2916,6 +2981,7 @@ this.emitEvent({
           durationMs: 0,
         });
 
+        dlog("AGENT-LOOP", `run() terminating`, { reason: "GOAL_ACHIEVED", tokensUsed: this.tokenUsage.total, iterations: this.iterationCount });
         this.emitEvent({
           kind: "agent:completed",
           summary: taskCompleteSummary,
@@ -2949,17 +3015,16 @@ this.emitEvent({
       // 4. 도구 실행
       const { results: toolResults, deferredFixPrompts } = await this.executeTools(response.toolCalls);
 
-      // Reflexion: 도구 결과 수집
       this.allToolResults.push(...toolResults);
-      // Phase 6: Record tool outcomes in capability graph
-      for (const tr of toolResults) {
+
+      const failedResults = toolResults.filter(r => !r.success);
+
+for (const tr of toolResults) {
         recordToolOutcomeInGraph(this.capabilityGraph, tr.name, tr.success);
       }
 
-      // Accumulate tool results for proactive replanning evaluation
       this.allToolResultsSinceLastReplan.push(...toolResults);
 
-      // Tool plan tracking: 실행된 도구 이름 기록
       for (const result of toolResults) {
         this.executedToolNames.push(result.name);
       }
@@ -3030,7 +3095,6 @@ this.emitEvent({
         });
       }
 
-      // Task 2: QAPipeline — run "quick" (structural only) after any WRITE tool call this iteration
       const projectPath = this.config.loop.projectPath;
       const qaMode = this.overheadGovernor.shouldRunQaPipeline(this.buildTriggerContext());
       if (this.iterationWriteToolPaths.length > 0 && projectPath && qaMode !== "OFF") {
@@ -3065,25 +3129,19 @@ this.emitEvent({
           });
 
           // Only inject into LLM context in BLOCKING mode (SHADOW = observe only)
-          if (qaMode === "BLOCKING" && failedChecks.length > 0 && this.iterationSystemMsgCount < 5) {
+          if (qaMode === "BLOCKING" && failedChecks.length > 0) {
             const checkSummary = failedChecks
               .slice(0, 5)
               .map((c) => `  - [${c.severity}] ${c.name}: ${c.message}`)
               .join("\n");
-            this.contextManager.addMessage({
-              role: "system",
-              content: `[QA Quick Check] ${failedChecks.length} issue(s) detected in modified files:\n${checkSummary}`,
-            });
-            this.iterationSystemMsgCount++;
+            this.ephemeralHints.push(`[QA Quick Check] ${failedChecks.length} issue(s) detected in modified files:\n${checkSummary}`);
           }
         } catch {
           // QAPipeline failure is non-fatal
         }
       }
-      // Reset per-iteration write tool tracking
       this.iterationWriteToolPaths = [];
 
-      // Phase 4: StallDetector check (non-blocking observer)
       if (this.stallDetector) {
         try {
           const stallResult = this.stallDetector.check(
@@ -3104,8 +3162,6 @@ this.emitEvent({
         } catch { /* non-fatal */ }
       }
 
-      // Task 3: Auto-run tsc --noEmit after 2+ TS files modified in this iteration
-      // Skip if tsc was already run in the previous iteration (cooldown)
       const tscFilesThisIteration = [...this.iterationTsFilesModified];
       this.iterationTsFilesModified = []; // reset for next iteration
       const tscRanPrev = this.tscRanLastIteration;
@@ -3135,15 +3191,11 @@ this.emitEvent({
                 content: `Auto-TSC: TypeScript errors found after editing ${tscFilesThisIteration.join(", ")}.`,
               });
               // Only inject into LLM context in BLOCKING mode
-              if (tscMode === "BLOCKING" && this.iterationSystemMsgCount < 5) {
+              if (tscMode === "BLOCKING") {
                 const truncated = tscOutput.length > 2000
                   ? tscOutput.slice(0, 2000) + "\n[...tsc output truncated]"
                   : tscOutput;
-                this.contextManager.addMessage({
-                  role: "system",
-                  content: `[Auto-TSC] TypeScript errors detected after modifying ${tscFilesThisIteration.length} files:\n\`\`\`\n${truncated}\n\`\`\`\nPlease fix these type errors.`,
-                });
-                this.iterationSystemMsgCount++;
+                this.ephemeralHints.push(`[Auto-TSC] TypeScript errors detected after modifying ${tscFilesThisIteration.length} files:\n\`\`\`\n${truncated}\n\`\`\`\nPlease fix these type errors.`);
               }
             } else {
               this.emitEvent({
@@ -3203,12 +3255,8 @@ if (this.sessionPersistence && this.sessionId) {
             (iterReflection.reflection.whatFailed.length > 0
               ? iterReflection.reflection.whatFailed.slice(0, 2).join("; ")
               : null);
-          if (insight && insight.length > 10 && this.iterationSystemMsgCount < 5) {
-            this.contextManager.addMessage({
-              role: "system",
-              content: `[Reflection] ${insight}`,
-            });
-            this.iterationSystemMsgCount++;
+          if (insight && insight.length > 10) {
+            this.ephemeralHints.push(`[Reflection] ${insight}`);
           }
         } catch {
           // Reflection failure is non-fatal
@@ -3244,10 +3292,7 @@ if (this.sessionPersistence && this.sessionId) {
               .flatMap(([, dim]) => dim.issues);
 
             if (issues.length > 0) {
-              this.contextManager.addMessage({
-                role: "system",
-                content: `[Self-Reflection L1] Issues detected: ${issues.join(", ")}. Confidence: ${quickResult.confidence}`,
-              });
+              this.ephemeralHints.push(`[Self-Reflection L1] Issues detected: ${issues.join(", ")}. Confidence: ${quickResult.confidence}`);
               this.emitSubagent("verifier", "done", `quick verification flagged ${issues.length} issues, confidence ${quickResult.confidence.toFixed(2)}`);
             } else {
               this.emitSubagent("verifier", "done", `quick verification passed, confidence ${quickResult.confidence.toFixed(2)}`);
@@ -3288,12 +3333,8 @@ if (this.sessionPersistence && this.sessionId) {
         this.failureRecovery.recordStrategyResult(decision.strategy, false);
 
         if (decision.strategy === "escalate") {
-          // 에스컬레이션: 유저에게 도움 요청
-          this.emitEvent({
-            kind: "agent:error",
-            message: `Recovery escalated: ${decision.reason}`,
-            retryable: false,
-          });
+          // 에스컬레이션: log only, don't surface as error (too noisy for UX)
+          dlog("AGENT-LOOP", `recovery escalated: ${decision.reason}`);
         } else if (decision.strategy === "rollback") {
           // 롤백 시도
           await this.failureRecovery.executeRollback(
@@ -3305,7 +3346,7 @@ if (this.sessionPersistence && this.sessionId) {
   text: `rollback executed: ${decision.reason}`,
   source: "agent",
           });
-        } else if (this.iterationSystemMsgCount < 5) {
+        } else {
           // retry, approach_change, scope_reduce → 복구 프롬프트 주입
           // Context Budget: consolidated error guidance (recovery + debug in one message)
           const recoveryPrompt = this.failureRecovery.buildRecoveryPrompt(
@@ -3330,7 +3371,6 @@ if (this.sessionPersistence && this.sessionId) {
                 iteration - 2,
                 [],
               );
-              // Bug 3 fix: use dynamic test command detection instead of hardcoded "pnpm build"
               const testCmd = (this.config.loop as unknown as Record<string, unknown>).testCommand as string | undefined
                 ?? this.detectTestCommand();
               const debugPrompt = this.selfDebugLoop.buildFixPrompt(debugStrategy, {
@@ -3343,7 +3383,6 @@ if (this.sessionPersistence && this.sessionId) {
               });
               debugSuffix = `\n\n[SelfDebug L${Math.min(iteration - 2, 5)}] Strategy: ${debugStrategy}\n${debugPrompt}`;
 
-              // Bug 2 fix: wire a real llmFixer so selfDebugLoop.debug() can call LLM
               if (debugStrategy !== "escalate") {
                 this.llmFixerRunCount++;
                 this.selfDebugLoop.debug({
@@ -3373,11 +3412,26 @@ if (this.sessionPersistence && this.sessionId) {
             }
           }
 
-          this.contextManager.addMessage({
-            role: "system",
-            content: recoveryPrompt + debugSuffix,
-          });
-          this.iterationSystemMsgCount++;
+          this.ephemeralHints.push(recoveryPrompt + debugSuffix);
+        }
+
+        // CausalChainResolver: root cause analysis for code-related errors
+        if (this.failureSigMemory && projectPath) {
+          try {
+            const resolver = new CausalChainResolver(this.failureSigMemory);
+            const causal = await resolver.resolve(
+              errorSummary,
+              this.changedFiles,
+              projectPath,
+            );
+            if (causal && causal.confidence > 0.5) {
+              this.ephemeralHints.push(
+                `[ROOT_CAUSE] ${causal.suspectedRootCause} (confidence: ${causal.confidence.toFixed(2)})` +
+                (causal.affectedFiles.length > 0 ? `\nAffected: ${causal.affectedFiles.join(", ")}` : "") +
+                (causal.recommendedStrategy ? `\nStrategy: ${causal.recommendedStrategy}` : "")
+              );
+            }
+          } catch { /* CausalChainResolver failure is non-fatal */ }
         }
 
         // HierarchicalPlanner 리플래닝도 시도
@@ -3391,7 +3445,7 @@ if (this.sessionPersistence && this.sessionId) {
           : 0;
 
         // Context Budget: skip all optional injections at 85%+ budget
-        if (errorTriggerBudgetRatio <= 0.85 && this.iterationSystemMsgCount < 5) {
+        if (errorTriggerBudgetRatio <= 0.85) {
           // SkillLearner: 학습된 스킬 중 현재 에러에 매칭되는 것 주입
           if (this.skillLearner && this.activeSkillIds.length < AgentLoop.MAX_ACTIVE_SKILLS) {
             try {
@@ -3401,23 +3455,18 @@ if (this.sessionPersistence && this.sessionId) {
               });
               for (const skill of relevantSkills.slice(0, 1)) {
                 if (this.activeSkillIds.includes(skill.id)) continue;
-                this.contextManager.addMessage({
-                  role: "system",
-                  content: `[Learned Skill: ${skill.id}] Diagnosis: ${skill.diagnosis}\nStrategy: ${skill.strategy}\nTools: ${skill.toolSequence.join(" → ")}`,
-                });
+                this.ephemeralHints.push(`[Learned Skill: ${skill.id}] Diagnosis: ${skill.diagnosis}\nStrategy: ${skill.strategy}\nTools: ${skill.toolSequence.join(" → ")}`);
                 this.activeSkillIds.push(skill.id);
-                this.iterationSystemMsgCount++;
                 this.skillLearner.updateConfidence(skill.id, false);
               }
             } catch {
-              // 학습 스킬 매칭 실패는 치명적이지 않음
+              /* non-fatal */
             }
           }
 
           // Plugin trigger matching — match errors/context to plugin skills
           if (
-            this.activeSkillIds.length < AgentLoop.MAX_ACTIVE_SKILLS &&
-            this.iterationSystemMsgCount < 5
+            this.activeSkillIds.length < AgentLoop.MAX_ACTIVE_SKILLS
           ) {
             const triggerMatches = this.pluginRegistry.matchTriggers({
               errorMessage: errorSummary,
@@ -3440,12 +3489,8 @@ if (this.sessionPersistence && this.sessionId) {
                   if (resolved.length > MAX_SKILL_INJECT_CHARS) {
                     resolved = resolved.slice(0, MAX_SKILL_INJECT_CHARS) + "\n[...truncated for token budget]";
                   }
-                  this.contextManager.addMessage({
-                    role: "system",
-                    content: `[Plugin Skill: ${bestMatch.pluginId}/${bestMatch.skill.name}]\n${resolved}`,
-                  });
+                  this.ephemeralHints.push(`[Plugin Skill: ${bestMatch.pluginId}/${bestMatch.skill.name}]\n${resolved}`);
                   this.activeSkillIds.push(bestMatch.skill.id);
-                  this.iterationSystemMsgCount++;
                   this.emitEvent({
                     kind: "agent:thinking",
                     content: `Activated plugin skill: ${bestMatch.skill.name} from ${bestMatch.pluginId}`,
@@ -3486,9 +3531,7 @@ if (this.sessionPersistence && this.sessionId) {
             iterationsCompleted: iteration,
             createdAt: new Date(),
           });
-        } catch {
-          // Checkpoint failure is non-fatal
-        }
+        } catch { /* non-fatal */ }
       }
 
       // ContinuousReflection: 매 5 iteration마다 비상 체크포인트 트리거
@@ -3500,9 +3543,7 @@ if (this.sessionPersistence && this.sessionId) {
       ) {
         try {
           await this.continuousReflection.emergencyCheckpoint();
-        } catch {
-          // reflection 체크포인트 실패는 치명적이지 않음
-        }
+        } catch { /* non-fatal */ }
       }
       // complex/massive task + 다중 변경 파일일 때만 aggregate impact hint 1회 주입
       if (
@@ -3513,6 +3554,8 @@ if (this.sessionPersistence && this.sessionId) {
       ) {
         await this.maybeInjectAggregateImpactHint();
       }
+      this.flushEphemeralHints();
+
       // 예산 초과 체크
       if (this.tokenUsage.total >= this.config.loop.totalTokenBudget) {
         return {
@@ -3536,7 +3579,7 @@ if (this.sessionPersistence && this.sessionId) {
     let usage = { input: 0, output: 0 };
     let finishReason = "stop";
 
-    const allTools = [...this.config.loop.tools, ...this.mcpToolDefinitions];
+    const allTools = [...this.config.loop.tools, ...this.mcpToolDefinitions, SPAWN_SUB_AGENT_TOOL];
     const stream = this.llmClient.chatStream(
       messages,
       allTools,
@@ -3686,9 +3729,257 @@ if (this.sessionPersistence && this.sessionId) {
     toolCalls: ToolCall[],
   ): Promise<{ result: ToolResult | null; deferredFixPrompt: string | null }> {
     const args = this.parseToolArgs(toolCall.arguments);
-    const allDefinitions = [...this.config.loop.tools, ...this.mcpToolDefinitions];
+    const allDefinitions = [...this.config.loop.tools, ...this.mcpToolDefinitions, SPAWN_SUB_AGENT_TOOL];
     const matchedDefinition = allDefinitions.find((t) => t.name === toolCall.name);
-    // Governor: 안전성 검증
+
+    // Security gate — deterministic pattern check (shell injection, credential leaks, etc.)
+    {
+      const secResult = securityCheck(toolCall.name, args as Record<string, unknown>);
+      if (secResult.verdict === "BLOCK") {
+        this.ephemeralHints.push(`[SECURITY] Blocked: ${secResult.reason}`);
+        // Log security block event to .yuan/logs/security-events.jsonl (non-fatal)
+        try {
+          const { mkdirSync, appendFileSync } = await import("node:fs");
+          const logDir = pathJoin(this.config.loop.projectPath, ".yuan", "logs");
+          mkdirSync(logDir, { recursive: true });
+          const logPath = pathJoin(logDir, "security-events.jsonl");
+          appendFileSync(logPath, JSON.stringify({
+            tool: toolCall.name,
+            verdict: "BLOCK",
+            reason: secResult.reason,
+            pattern: secResult.pattern,
+            timestamp: Date.now(),
+          }) + "\n");
+        } catch { /* non-fatal */ }
+        const blockResult: ToolResult = {
+          tool_call_id: toolCall.id,
+          name: toolCall.name,
+          output: `[SECURITY_BLOCKED] ${secResult.reason}. This operation is not allowed.`,
+          success: false,
+          durationMs: 0,
+        };
+        return { result: blockResult, deferredFixPrompt: null };
+      }
+      if (secResult.verdict === "WARN") {
+        this.ephemeralHints.push(`[SECURITY WARNING] ${secResult.reason} — proceeding with caution`);
+      }
+    }
+
+    // Workspace Mutation Policy — path-level safety zones (after security gate)
+    if (this.mutationPolicy && (toolCall.name === "file_edit" || toolCall.name === "file_write")) {
+      const filePath = String((args as Record<string, unknown>).path ?? (args as Record<string, unknown>).file_path ?? "");
+      const mutation = this.mutationPolicy.check(filePath);
+      if (!mutation.allowed) {
+        return {
+          result: {
+            tool_call_id: toolCall.id,
+            name: toolCall.name,
+            output: `[MUTATION_BLOCKED] ${mutation.reason}`,
+            success: false,
+            durationMs: 0,
+          },
+          deferredFixPrompt: null,
+        };
+      }
+      if (mutation.requiresApproval) {
+        this.ephemeralHints.push(`[MUTATION] ${filePath} is in ${mutation.zone} zone — approval recommended`);
+      }
+    }
+
+    // Judgment rules — deterministic rule-based tool approval (loaded from .yuan/judgment-rules.json)
+    if (this.judgmentRegistry) {
+      const judgment = this.judgmentRegistry.evaluate(toolCall.name, args as Record<string, unknown>);
+      if (judgment.action === "BLOCK") {
+        const judgmentResult: ToolResult = {
+          tool_call_id: toolCall.id,
+          name: toolCall.name,
+          output: `[JUDGMENT_BLOCKED] ${judgment.reason}`,
+          success: false,
+          durationMs: 0,
+        };
+        return { result: judgmentResult, deferredFixPrompt: null };
+      }
+      if (judgment.action === "WARN") {
+        this.ephemeralHints.push(`[JUDGMENT] ${judgment.reason}`);
+      }
+      if (judgment.action === "REQUIRE_APPROVAL") {
+        this.ephemeralHints.push(`[JUDGMENT] ${judgment.reason} — approval recommended`);
+      }
+    }
+
+    // ToolGate enforcement — block tools based on Decision Engine gate level
+    {
+      const gate = this.decision.core.toolGate;
+      if (gate.blockedTools.includes(toolCall.name)) {
+        const gateResult: ToolResult = {
+          tool_call_id: toolCall.id,
+          name: toolCall.name,
+          output: `[TOOL_GATE] ${toolCall.name} is blocked in ${gate.level} mode.`,
+          success: false,
+          durationMs: 0,
+        };
+        return { result: gateResult, deferredFixPrompt: null };
+      }
+    }
+
+    {
+      const vetoFlags = this.decision.core.vetoFlags;
+
+      // editVetoed → block file_edit/file_write tools
+      if (vetoFlags.editVetoed && (toolCall.name === "file_edit" || toolCall.name === "file_write")) {
+        const vetoResult: ToolResult = {
+          tool_call_id: toolCall.id,
+          name: toolCall.name,
+          output: "[Decision Engine] Edit vetoed: patch risk is too high without a plan. Please create a plan first or ask the user for clarification.",
+          success: false,
+          durationMs: 0,
+        };
+        return { result: vetoResult, deferredFixPrompt: null };
+      }
+    }
+
+    // Pre-edit quality gate: remind LLM to verify before writing
+    {
+      const cq = this.decision.core.codeQuality;
+      if (cq.preEditVerify && (toolCall.name === "file_edit" || toolCall.name === "file_write")) {
+        if (this.toolUsageCounter.edits === 0) {
+          this.ephemeralHints.push(
+            `[Code Quality] This is a ${cq.codeTaskType} task. ` +
+            `Primary risk: ${cq.primaryRisk}. ` +
+            `Verify your change is complete and correct before proceeding to the next file.`,
+          );
+        }
+      }
+    }
+
+    // Dependency guard — detect package installs and manifest changes
+    {
+      const depResult = checkDependencyChange(toolCall.name, args as Record<string, unknown>);
+      if (depResult.isDependencyChange) {
+        this.ephemeralHints.push(`[DEP CHANGE] ${depResult.reason}. Verify after: ${depResult.verifyAfter}`);
+
+        if (depResult.requiresApproval) {
+          this.ephemeralHints.push(`[DEP APPROVAL] Dependency change requires careful review. Budget multiplier: ${depResult.budgetMultiplier}x`);
+        }
+
+        if (depResult.kind) {
+          const depFilePath = String((args as Record<string, unknown>).path ?? (args as Record<string, unknown>).file_path ?? (args as Record<string, unknown>).command ?? "");
+          this.emitEvent({
+            kind: "agent:dependency_change_detected",
+            depKind: depResult.kind,
+            path: depFilePath.slice(0, 200),
+            requiresApproval: depResult.requiresApproval,
+          });
+        }
+      }
+    }
+
+    {
+      const budget = this.decision.core.toolBudget;
+      const counter = this.toolUsageCounter;
+      const toolName = toolCall.name;
+
+      if (toolName === "file_read") counter.reads++;
+      else if (toolName === "file_edit" || toolName === "file_write") {
+        counter.edits++;
+        const filePath = String((args as Record<string, unknown>).path ?? (args as Record<string, unknown>).file ?? "");
+        if (filePath) {
+          const prev = counter.sameFileEdits.get(filePath) ?? 0;
+          counter.sameFileEdits.set(filePath, prev + 1);
+          if (prev + 1 > budget.maxSameFileEdits) {
+            this.emitEvent({
+              kind: "agent:budget_warning",
+              tool: toolName,
+              used: prev + 1,
+              limit: budget.maxSameFileEdits,
+            });
+            this.contextManager.addMessage({
+              role: "system",
+              content: `[Budget Warning] Same-file edit limit approaching for ${filePath} (${prev + 1}/${budget.maxSameFileEdits}). Consider a different approach.`,
+            });
+          }
+        }
+      } else if (toolName === "shell_exec" || toolName === "bash") {
+        counter.shells++;
+        const cmd = String((args as Record<string, unknown>).command ?? "").toLowerCase();
+        if (/\b(test|jest|vitest|mocha|pytest|cargo test|go test)\b/.test(cmd)) {
+          counter.tests++;
+        }
+
+        // CommandPlanCompiler — validate LLM-proposed shell commands against deterministic compiled plan
+        const rawCmd = String((args as Record<string, unknown>).command ?? "");
+        const classified = classifyCommand(rawCmd);
+        if (classified.purpose && this.config.loop.projectPath) {
+          const compilerInput: CommandCompilerInput = {
+            verifyDepth: this.decision.core.verifyDepth,
+            packageManager: this.worldState?.deps?.packageManager ?? "npm",
+            testFramework: "unknown",
+            buildTool: "tsc",
+            hasStrictMode: false,
+            monorepo: false,
+          };
+          let compiled;
+          if (classified.purpose === "verify") compiled = compileVerifyCommands(compilerInput);
+          else if (classified.purpose === "build") compiled = compileVerifyCommands({ ...compilerInput, verifyDepth: "thorough" });
+          else compiled = null;
+
+          if (compiled && compiled.commands.length > 0) {
+            const validation = validateProposedCommand(rawCmd, compiled);
+            if (validation.recommendation === "use_compiled") {
+              this.ephemeralHints.push(`[CMD_PLAN] Command mismatch: ${validation.deviation}. Compiled: ${compiled.commands[0]}`);
+            } else if (validation.recommendation === "warn") {
+              this.ephemeralHints.push(`[CMD_PLAN] Note: ${validation.deviation ?? "Minor deviation from compiled command"}`);
+            }
+          }
+        }
+      }
+      else if (toolName === "grep" || toolName === "glob" || toolName === "file_search") counter.searches++;
+      else if (toolName === "web_search" || toolName === "parallel_web_search") counter.webLookups++;
+      else if (toolName === "test_run" || toolName === "run_tests") counter.tests++;
+
+      const checks: Array<{ name: string; used: number; limit: number }> = [
+        { name: "file_read", used: counter.reads, limit: budget.maxFileReads },
+        { name: "file_edit", used: counter.edits, limit: budget.maxEdits },
+        { name: "shell_exec", used: counter.shells, limit: budget.maxShellExecs },
+        { name: "search", used: counter.searches, limit: budget.maxSearches },
+        { name: "web_lookup", used: counter.webLookups, limit: budget.maxWebLookups },
+        { name: "test_run", used: counter.tests, limit: budget.maxTestRuns },
+      ];
+
+      for (const check of checks) {
+        if (check.limit <= 0) continue;
+        const ratio = check.used / check.limit;
+
+        if (ratio >= 1.0) {
+          this.emitEvent({ kind: "agent:budget_exceeded", tool: check.name });
+          const budgetResult: ToolResult = {
+            tool_call_id: toolCall.id,
+            name: toolCall.name,
+            output: `[Decision Engine] Tool budget exceeded for ${check.name} (${check.used}/${check.limit}). Try a different approach or wrap up.`,
+            success: false,
+            durationMs: 0,
+          };
+          return { result: budgetResult, deferredFixPrompt: null };
+        }
+
+        if (ratio >= 0.8) {
+          this.emitEvent({
+            kind: "agent:budget_warning",
+            tool: check.name,
+            used: check.used,
+            limit: check.limit,
+          });
+          if (this.iterationSystemMsgCount < 5) {
+            this.contextManager.addMessage({
+              role: "system",
+              content: `[Budget Warning] ${check.name} usage at ${Math.round(ratio * 100)}% (${check.used}/${check.limit}). Consider wrapping up or using fewer ${check.name} calls.`,
+            });
+            this.iterationSystemMsgCount++;
+          }
+        }
+      }
+    }
+
     try {
       this.governor.validateToolCall(toolCall);
     } catch (err) {
@@ -3697,7 +3988,7 @@ if (this.sessionPersistence && this.sessionId) {
         if (approvalResult) {
           return { result: approvalResult, deferredFixPrompt: null };
         }
-        // 승인됨 → 계속 실행
+        // Approved — continue execution
       }
       // Generic tool-definition approval gate
       if (matchedDefinition?.requiresApproval) {
@@ -3731,7 +4022,6 @@ if (this.sessionPersistence && this.sessionId) {
       }
     }
 
-    // ApprovalManager: 추가 승인 체크
     const approvalRequest = this.approvalManager.checkApproval(toolCall.name, args);
     if (approvalRequest) {
       const approvalResult = await this.handleApprovalRequest(toolCall, approvalRequest);
@@ -3740,7 +4030,6 @@ if (this.sessionPersistence && this.sessionId) {
       }
     }
 
-    // Plugin Tool Approval Gate
     const pluginTools = this.pluginRegistry.getAllTools();
     const matchedPluginTool = pluginTools.find((pt) => pt.tool.name === toolCall.name);
     if (
@@ -3766,7 +4055,11 @@ if (this.sessionPersistence && this.sessionId) {
       }
     }
 
-    // MCP 도구 호출 확인
+    if (toolCall.name === "spawn_sub_agent") {
+      const subAgentResult = await this.executeSpawnSubAgent(toolCall, args);
+      return { result: subAgentResult, deferredFixPrompt: null };
+    }
+
     if (this.mcpClient && this.isMCPTool(toolCall.name)) {
       // Emit tool_start before execution (required for trace, QA pipeline, replay)
       this.emitEvent({
@@ -3776,7 +4069,6 @@ if (this.sessionPersistence && this.sessionId) {
         source: "mcp",
       });
       const mcpResult = await this.executeMCPTool(toolCall);
-      // Normalize MCP result: wrap search tool output into structured JSON if applicable
       const normalizedOutput = this.normalizeMcpResult(toolCall.name, mcpResult.output);
       const finalResult: ToolResult = { ...mcpResult, output: normalizedOutput };
       this.emitEvent({
@@ -3792,7 +4084,44 @@ if (this.sessionPersistence && this.sessionId) {
       return { result: finalResult, deferredFixPrompt: null };
     }
 
-    // 도구 실행
+    // Pre-write validator — quality gate before actual file write (after all gates)
+    if ((toolCall.name === "file_edit" || toolCall.name === "file_write") && this.decision.core.codeQuality.strictMode) {
+      const filePath = String((args as Record<string, unknown>).path ?? (args as Record<string, unknown>).file_path ?? "");
+      const content = String((args as Record<string, unknown>).content ?? (args as Record<string, unknown>).new_string ?? "");
+      if (content) {
+        const fileRole = detectFileRole(filePath);
+        const validation = validateBeforeWrite(content, { path: filePath, fileRole, changedHunksOnly: true });
+        if (!validation.valid) {
+          this.ephemeralHints.push(`[QUALITY_BLOCK] ${validation.blockedReason}: ${validation.issues.filter(i => i.severity === "error").map(i => i.message).join("; ")}`);
+          // Record weakness patterns for learning
+          if (this.weaknessTracker) {
+            for (const issue of validation.issues.filter(i => i.severity === "error")) {
+              const pattern = issue.message.includes("TODO") ? "todo_in_code"
+                : issue.message.includes("empty function") ? "empty_function_body"
+                : issue.message.includes("any") ? "any_type_usage"
+                : issue.message.includes("console") ? "console_log_leak"
+                : issue.message.includes("stub") ? "stub_implementation"
+                : "unknown_quality_issue";
+              this.weaknessTracker.record(pattern, `CRITICAL: ${issue.message}. Fix this BEFORE writing.`);
+            }
+          }
+          return {
+            result: {
+              tool_call_id: toolCall.id,
+              name: toolCall.name,
+              output: `[QUALITY_BLOCKED] ${validation.blockedReason}. Fix these issues and try again.`,
+              success: false,
+              durationMs: 0,
+            },
+            deferredFixPrompt: null,
+          };
+        }
+        if (validation.issues.length > 0) {
+          this.ephemeralHints.push(`[QUALITY_WARN] ${validation.issues.map(i => i.message).join("; ")}`);
+        }
+      }
+    }
+
     const startTime = Date.now();
     const toolAbort = new AbortController();
     this.interruptManager.registerToolAbort(toolAbort);
@@ -3802,6 +4131,10 @@ if (this.sessionPersistence && this.sessionId) {
         (args as Record<string, unknown>).file;
       if (candidatePath) {
         const filePathStr = String(candidatePath);
+        // Record before snapshot in patch journal for atomic rollback
+        if (this.patchJournal) {
+          this.patchJournal.recordBefore(toolCall.name, filePathStr);
+        }
         if (!this.originalSnapshots.has(filePathStr)) {
           try {
             const { readFile } = await import("node:fs/promises");
@@ -3813,9 +4146,38 @@ if (this.sessionPersistence && this.sessionId) {
         }
       }
     }
+    const isSearchTool = toolCall.name === "web_search" || toolCall.name === "parallel_web_search";
+    if (isSearchTool) {
+      const searchArgs = typeof toolCall.arguments === "string"
+        ? (() => { try { return JSON.parse(toolCall.arguments) as Record<string, unknown>; } catch { return {}; } })()
+        : (toolCall.arguments as Record<string, unknown>) ?? {};
+      const queries: string[] = toolCall.name === "parallel_web_search"
+        ? (Array.isArray(searchArgs.queries) ? searchArgs.queries as string[] : [])
+        : (typeof searchArgs.query === "string" ? [searchArgs.query] : []);
+      if (queries.length > 0) {
+        this.emitEvent({ kind: "agent:search_start", queries });
+      }
+    }
+
     try {
       const result = await this.toolExecutor.execute(toolCall, toolAbort?.signal);
       this.interruptManager.clearToolAbort();
+
+      if (isSearchTool && result.success) {
+        const searchArgs = typeof toolCall.arguments === "string"
+          ? (() => { try { return JSON.parse(toolCall.arguments) as Record<string, unknown>; } catch { return {}; } })()
+          : (toolCall.arguments as Record<string, unknown>) ?? {};
+        const query = toolCall.name === "parallel_web_search"
+          ? `${(Array.isArray(searchArgs.queries) ? searchArgs.queries as string[] : []).length} queries`
+          : (typeof searchArgs.query === "string" ? searchArgs.query : "");
+        const sourceMatch = result.output.match(/\(via ([^)]+)\)/);
+        this.emitEvent({
+          kind: "agent:search_result",
+          query,
+          source: sourceMatch?.[1] ?? "web",
+          resultCount: (result.output.match(/^\d+\./gm) ?? []).length,
+        });
+      }
 
       if (this.skillLearner) {
         try {
@@ -3846,7 +4208,6 @@ if (this.sessionPersistence && this.sessionId) {
       this.reasoningTree.add("tool", `success: ${toolCall.name}`);
 
       if (["file_write", "file_edit"].includes(toolCall.name) && result.success) {
-        // Phase transition: explore → implement on first write
         if (this.taskPhase === "explore") {
           this.transitionPhase("implement", `first write: ${toolCall.name}`);
         }
@@ -3857,45 +4218,92 @@ if (this.sessionPersistence && this.sessionId) {
         const filePathStr = String(filePath);
         if (!this.changedFiles.includes(filePathStr)) {
           this.changedFiles.push(filePathStr);
-          // Cap changedFiles to prevent unbounded growth on massive refactors
           if (this.changedFiles.length > BOUNDS.changedFiles) {
             this.changedFiles = this.changedFiles.slice(-BOUNDS.changedFiles);
           }
         }
-        // Task 2: track write tool paths per-iteration for QA triggering
         if (!this.iterationWriteToolPaths.includes(filePathStr)) {
           this.iterationWriteToolPaths.push(filePathStr);
         }
-        // Task 3: track TS/TSX files modified this iteration for auto-tsc
         if (filePathStr.match(/\.[cm]?tsx?$/) && !this.iterationTsFilesModified.includes(filePathStr)) {
           this.iterationTsFilesModified.push(filePathStr);
         }
         this.emitEvent({ kind: "agent:file_change", path: filePathStr, diff: result.output });
-        // Emit evidence report (async, fire-and-forget — no loop complexity added)
         this.emitEvidenceReport(
           filePathStr,
           toolCall.name as "file_write" | "file_edit",
         ).catch(() => {/* non-fatal */});
-        // Update world state after file modification
+
+        // SemanticDiffReviewer — classify change meaning and recommend verification depth
+        if (this.originalSnapshots.has(filePathStr)) {
+          try {
+            const { readFile } = await import("node:fs/promises");
+            const newContent = await readFile(filePathStr, "utf-8");
+            const oldContent = this.originalSnapshots.get(filePathStr) ?? "";
+            const review = reviewFileDiff({
+              path: filePathStr,
+              oldContent,
+              newContent,
+              language: filePathStr.match(/\.[cm]?tsx?$/) ? "typescript" : undefined,
+            });
+            if (review.recommendedRiskBoost > 0) {
+              this.ephemeralHints.push(
+                `[SEMANTIC_DIFF] ${filePathStr}: ${review.changes.join(", ")} — risk +${review.recommendedRiskBoost.toFixed(2)}, recommend verify=${review.recommendedVerifyDepth}`,
+              );
+            }
+          } catch { /* non-fatal — file may have been deleted */ }
+        }
+
         if (this.config.loop.projectPath) {
           const wsProjectPath = this.config.loop.projectPath;
           new WorldStateCollector({ projectPath: wsProjectPath, skipTest: true })
             .collect()
             .then((snapshot) => { this.worldState = snapshot; })
-            .catch(() => {
-              // Non-fatal: world state update failure should not interrupt tool execution
-            });
+            .catch(() => {});
         }
         if (this.impactAnalyzer) {
-          this.analyzeFileImpact(filePathStr).catch((err: unknown) => {
-            // Non-fatal: impact analysis failure should not interrupt tool execution
-            const msg = err instanceof Error ? err.message : String(err);
-            console.warn(`[AgentLoop] impact analysis skipped for ${filePathStr}: ${msg}`);
+          this.analyzeFileImpact(filePathStr).catch(() => {});
+        }
+
+        // Auto-create rollback point based on Decision failureSurface
+        if (this.patchJournal && this.patchJournal.shouldCreateRollbackPoint(
+          this.decision.core.failureSurface.patchRisk,
+          this.changedFiles.length,
+        )) {
+          const point = this.patchJournal.createRollbackPoint(
+            `patchRisk=${this.decision.core.failureSurface.patchRisk}, files=${this.changedFiles.length}`,
+          );
+          this.emitEvent({
+            kind: "agent:rollback_point_created",
+            pointId: point.id,
+            reason: point.reason,
           });
+        }
+
+        // Patch scope tracking (after successful file mutation)
+        if (this.patchScopeController) {
+          const content = String((args as Record<string, unknown>).content ?? (args as Record<string, unknown>).new_string ?? "");
+          const isProtected = this.mutationPolicy?.check(filePathStr).zone === "PROTECTED" || this.mutationPolicy?.check(filePathStr).zone === "CAUTION";
+          this.patchScopeController.recordChange(filePathStr, content.split("\n").length, 0, isProtected ?? false);
+
+          const scopeCheck = this.patchScopeController.check();
+          if (!scopeCheck.allowed) {
+            this.ephemeralHints.push(`[SCOPE_LIMIT] ${scopeCheck.reason}. Consider splitting into smaller tasks or requesting plan escalation.`);
+          }
         }
       }
 
-      // StateUpdater: sync world model with actual tool execution result
+      // Verifier rules — deterministic check of tool output for success/failure patterns
+      {
+        const verification = verifyToolResult(toolCall.name, args as Record<string, unknown>, result.output, result.success);
+        if (verification.verdict === "FAIL") {
+          this.ephemeralHints.push(`[VERIFY FAIL] ${verification.reason}. Suggested: ${verification.suggestedAction}`);
+        }
+        if (verification.verdict === "WARN") {
+          this.ephemeralHints.push(`[VERIFY WARN] ${verification.reason}`);
+        }
+      }
+
       if (this.stateUpdater && result.success) {
         this.stateUpdater.applyToolResult(
           toolCall.name,
@@ -3904,7 +4312,10 @@ if (this.sessionPersistence && this.sessionId) {
         ).catch(() => {/* non-blocking */});
       }
 
-      const fixPrompt = await this.validateAndFeedback(toolCall.name, result);
+      const editedFilePath = (args as Record<string, unknown>)?.path as string
+        ?? (args as Record<string, unknown>)?.file_path as string
+        ?? undefined;
+      const fixPrompt = await this.validateAndFeedback(toolCall.name, result, editedFilePath);
       return { result, deferredFixPrompt: fixPrompt ?? null };
     } catch (err) {
       this.interruptManager.clearToolAbort();
@@ -3969,9 +4380,7 @@ if (this.sessionPersistence && this.sessionId) {
     // ─── Step 1: Build execution plan ───────────────────────────────────────
     // Strategy:
     //   • Read-only tools (low-risk)      → batch together, run all in parallel
-    //   • Write tools (independent files) → use DependencyAnalyzer to group,
-    //                                       run each independent group in parallel
-    //   • Write tools (dependent files)   → run sequentially after their deps
+    //   • Write tools                      → run sequentially (wave 99)
     //   • shell_exec / git_ops / etc.     → always sequential (side-effects)
 
     const READ_ONLY = new Set(['file_read', 'grep', 'glob', 'code_search', 'security_scan']);
@@ -3984,44 +4393,9 @@ if (this.sessionPersistence && this.sessionId) {
     // Map each write tool call to a "wave index" (0 = can run first, 1 = needs wave-0 done, etc.)
     const writeBatchMap = new Map<string, number>(); // tc.id → wave index
 
-    if (writeToolCalls.length > 1 && this.config.loop.projectPath) {
-      try {
-        const depAnalyzer = new DependencyAnalyzer();
-        const depGraph = await depAnalyzer.analyze(this.config.loop.projectPath);
-
-        // Collect target file paths from write tool args
-        const writeFilePaths = writeToolCalls.flatMap((tc) => {
-          const args = this.parseToolArgs(tc.arguments);
-          const p = typeof args.path === "string" ? args.path
-            : typeof args.file_path === "string" ? args.file_path
-            : null;
-          return p ? [p] : [];
-        });
-
-        if (writeFilePaths.length > 1) {
-          const groups = depAnalyzer.groupIndependentFiles(depGraph, writeFilePaths);
-
-          // Assign wave indices: independent groups get wave 0,
-          // dependent groups get wave = max(their dep waves) + 1
-          // For simplicity: canParallelize=true → wave 0, else sequential waves
-          let wave = 0;
-          for (const group of groups) {
-            if (!group.canParallelize) wave++;
-            for (const filePath of group.files) {
-              const tc = writeToolCalls.find((c) => {
-                const args = this.parseToolArgs(c.arguments);
-                const p = args.path ?? args.file_path;
-                return p === filePath;
-              });
-              if (tc) writeBatchMap.set(tc.id, wave);
-            }
-            if (group.canParallelize) wave = 0; // reset: next independent group is also wave 0
-          }
-        }
-      } catch {
-        // DependencyAnalyzer failure is non-fatal — all writes run sequentially
-      }
-    }
+    // DependencyAnalyzer removed: it scanned the entire filesystem (50-1000ms blocking).
+    // Write tools run sequentially (wave 0) — no dependency analysis overhead.
+    // writeBatchMap stays empty → all writes default to wave 99 (sequential).
 
     // ─── Step 3: Build ordered batch list ────────────────────────────────────
     // Final structure: array of batches, each batch runs in parallel.
@@ -4137,9 +4511,152 @@ if (this.sessionPersistence && this.sessionId) {
   }
 
   /**
-   * Governor의 ApprovalRequiredError를 ApprovalManager로 처리.
-   * 승인되면 null 반환 (실행 계속), 거부되면 ToolResult 반환 (실행 차단).
+   * Execute spawn_sub_agent tool — creates a SubAgent, runs it, returns result.
+   * The sub-agent inherits the parent's LLM config (provider, model, apiKey).
    */
+  private async executeSpawnSubAgent(
+    toolCall: ToolCall,
+    args: Record<string, unknown>,
+  ): Promise<ToolResult> {
+    const startTime = Date.now();
+    const goal = String(args.goal ?? "");
+    const roleInput = typeof args.role === "string" ? args.role : "coder";
+    const role = mapToSubAgentRole(roleInput);
+
+    if (!goal) {
+      return {
+        tool_call_id: toolCall.id,
+        name: toolCall.name,
+        output: "Error: 'goal' parameter is required for spawn_sub_agent.",
+        success: false,
+        durationMs: Date.now() - startTime,
+      };
+    }
+
+    // Emit tool_start
+    this.emitEvent({
+      kind: "agent:tool_start",
+      tool: toolCall.name,
+      input: args,
+      source: "builtin",
+    });
+
+    const taskId = `sub-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const projectPath = this.config.loop.projectPath || process.cwd();
+
+    try {
+      const subAgent = new SubAgent({
+        taskId,
+        goal,
+        targetFiles: [],  // sub-agent discovers files via tools
+        readFiles: [],
+        maxIterations: Math.min(this.config.loop.maxIterations, 15),
+        projectPath,
+        byokConfig: this.config.byok,
+        tools: this.config.loop.tools.map((t) => t.name),
+        createToolExecutor: (_workDir, _enabledTools) => this.toolExecutor,
+        role,
+      });
+
+      // Forward sub-agent events as bg_update for TUI visibility
+      subAgent.on("subagent:phase", (tid: string, phase: string) => {
+        this.emitEvent({
+          kind: "agent:bg_update",
+          agentId: taskId,
+          agentLabel: `sub-agent (${roleInput})`,
+          eventType: "info",
+          message: `Phase: ${phase}`,
+          timestamp: Date.now(),
+        });
+      });
+
+      subAgent.on("event", (event: import("./types.js").AgentEvent) => {
+        // Re-emit sub-agent text/thinking for observability
+        if (event.kind === "agent:text_delta") {
+          this.emitEvent({
+            kind: "agent:bg_update",
+            agentId: taskId,
+            agentLabel: `sub-agent (${roleInput})`,
+            eventType: "info",
+            message: String(event.text ?? ""),
+            timestamp: Date.now(),
+          });
+        } else if (event.kind === "agent:thinking") {
+          this.emitEvent({
+            kind: "agent:bg_update",
+            agentId: taskId,
+            agentLabel: `sub-agent (${roleInput})`,
+            eventType: "info",
+            message: String(event.content ?? ""),
+            timestamp: Date.now(),
+          });
+        }
+      });
+
+      // Build DAG context for the sub-agent
+      const dagContext: DAGContextLike = {
+        overallGoal: goal,
+        totalTasks: 1,
+        completedTasks: [],
+        runningTasks: [taskId],
+      };
+
+      // Run sub-agent
+      const result: SubAgentResult = await subAgent.run(dagContext);
+
+      // Build output summary
+      const changedFilesList = result.changedFiles.length > 0
+        ? result.changedFiles.map((f) => f.path).join(", ")
+        : "none";
+      const output = [
+        `## Sub-Agent Result (${roleInput})`,
+        `- Task ID: ${taskId}`,
+        `- Success: ${result.success}`,
+        `- Iterations: ${result.iterations}`,
+        `- Tokens: input=${result.tokensUsed.input}, output=${result.tokensUsed.output}`,
+        `- Changed files: ${changedFilesList}`,
+        ``,
+        `### Summary`,
+        result.summary,
+        result.error ? `\n### Error\n${result.error}` : "",
+      ].join("\n");
+
+      this.emitEvent({
+        kind: "agent:tool_result",
+        tool: toolCall.name,
+        output: output.length > 200 ? output.slice(0, 200) + "..." : output,
+        durationMs: Date.now() - startTime,
+      });
+
+      return {
+        tool_call_id: toolCall.id,
+        name: toolCall.name,
+        output,
+        success: result.success,
+        durationMs: Date.now() - startTime,
+      };
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+
+      this.emitEvent({
+        kind: "agent:bg_update",
+        agentId: taskId,
+        agentLabel: `sub-agent (${roleInput})`,
+        eventType: "error",
+        message: `Sub-agent failed: ${errorMsg}`,
+        timestamp: Date.now(),
+      });
+
+      return {
+        tool_call_id: toolCall.id,
+        name: toolCall.name,
+        output: `Sub-agent error: ${errorMsg}`,
+        success: false,
+        durationMs: Date.now() - startTime,
+      };
+    }
+  }
+
   private async handleApproval(
     toolCall: ToolCall,
     args: Record<string, unknown>,
@@ -4198,8 +4715,8 @@ if (this.sessionPersistence && this.sessionId) {
   private async validateAndFeedback(
     toolName: string,
     result: ToolResult,
+    filePath?: string,
   ): Promise<string | null> {
-    // file_write/file_edit/shell_exec만 검증
     if (!["file_write", "file_edit", "shell_exec"].includes(toolName)) {
       return null;
     }
@@ -4209,26 +4726,26 @@ if (this.sessionPersistence && this.sessionId) {
       result.output,
       result.success,
       this.config.loop.projectPath,
+      filePath,
     );
 
     if (validation.passed) {
-      // 검증 통과 → 수정 시도 기록 초기화
       this.autoFixLoop.resetAttempts();
       return null;
     }
 
-    // 검증 실패 → 에러 피드백
     if (!this.autoFixLoop.canRetry()) {
-      // 재시도 한도 초과 → 에러 이벤트만 emit
+      const failMsg = validation.failures
+        .map((f) => `[${f.type}] ${f.message}`)
+        .join("; ");
       this.emitEvent({
-        kind: "agent:error",
-        message: `Auto-fix exhausted (${this.autoFixLoop.getAttempts().length} attempts): ${validation.failures[0]?.message ?? "Unknown error"}`,
-        retryable: false,
+        kind: "agent:thinking",
+        content: `Auto-fix exhausted (${this.autoFixLoop.getAttempts().length} attempts): ${failMsg}`,
       });
-      return null;
+      this.autoFixLoop.resetAttempts();
+      return `[LINT VALIDATION FAILED after 3 auto-fix attempts — SKIP lint for this file and continue with the main task. Do NOT retry fixing lint errors. Move on to the next step.]\nFailures: ${failMsg}`;
     }
 
-    // 수정 프롬프트 생성 — 히스토리 추가는 caller가 tool result 추가 후 수행
     const errorMsg = validation.failures
       .map((f) => `[${f.type}] ${f.message}\n${f.rawOutput}`)
       .join("\n\n");
@@ -4238,7 +4755,6 @@ if (this.sessionPersistence && this.sessionId) {
       `After ${toolName} execution on project at ${this.config.loop.projectPath}`,
     );
 
-    // 수정 시도 기록
     this.autoFixLoop.recordAttempt(
       errorMsg,
       "Requesting LLM fix",
@@ -4246,7 +4762,6 @@ if (this.sessionPersistence && this.sessionId) {
       0,
     );
 
-    // fixPrompt를 반환 — caller가 tool result 메시지 추가 후 context에 넣음
     return fixPrompt;
   }
 
@@ -4270,12 +4785,6 @@ if (this.sessionPersistence && this.sessionId) {
     return args;
   }
 
-  // ─── Continuation Helpers ───
-
-  /**
-   * 토큰 예산 소진 임박 시 자동 체크포인트를 저장한다.
-   * 현재 진행 상태, 변경 파일, 에러 등을 직렬화.
-   */
   private async saveAutoCheckpoint(iteration: number): Promise<void> {
     if (!this.continuationEngine) return;
 
@@ -4310,15 +4819,9 @@ if (this.sessionPersistence && this.sessionId) {
           content: `Auto-checkpoint saved at ${Math.round(checkpoint.contextUsageAtSave * 100)}% token usage (iteration ${iteration}).`,
         });
       }
-    } catch {
-      // 체크포인트 저장 실패는 치명적이지 않음
-    }
+    } catch { /* non-fatal */ }
   }
 
-  /**
-   * 매 iteration 시작 시 현재 플랜 진행 상황을 컨텍스트에 주입.
-   * 같은 태스크 인덱스라면 3 iteration마다만 주입 (컨텍스트 bloat 방지).
-   */
   private injectPlanProgress(iteration: number): void {
     if (!this.activePlan) return;
     const tasks = this.activePlan.tactical;
@@ -4357,17 +4860,9 @@ if (this.sessionPersistence && this.sessionId) {
       lines.push(`\nAll tasks complete — verify and wrap up.`);
     }
 
-    this.contextManager.addMessage({
-      role: "system",
-      content: lines.join("\n"),
-    });
-    this.iterationSystemMsgCount++;
+    this.ephemeralHints.push(lines.join("\n"));
   }
 
-  /**
-   * 현재 태스크의 targetFiles가 changedFiles에 포함됐는지 확인해
-   * 완료 감지 시 다음 태스크로 자동 전진.
-   */
   private tryAdvancePlanTask(): void {
     if (!this.activePlan) return;
     const tasks = this.activePlan.tactical;
@@ -4494,13 +4989,6 @@ if (this.sessionPersistence && this.sessionId) {
     return this.worldState;
   }
 
-  // ─── Interrupt Helpers ───
-
-  /**
-   * InterruptManager 이벤트를 AgentLoop에 연결한다.
-   * - soft interrupt: 피드백을 user 메시지로 주입
-   * - hard interrupt: 루프 즉시 중단
-   */
   private setupInterruptListeners(): void {
     // soft interrupt: 피드백을 대화 히스토리에 주입
     this.interruptManager.on("interrupt:feedback", (feedback: string) => {
@@ -4516,10 +5004,6 @@ if (this.sessionPersistence && this.sessionId) {
     });
   }
 
-  /**
-   * pause 상태일 때 resume 시그널을 대기한다.
-   * resume 또는 hard interrupt가 올 때까지 블로킹.
-   */
   private waitForResume(): Promise<void> {
     return new Promise<void>((resolve) => {
       // 이미 resume 상태이면 즉시 반환
@@ -4545,12 +5029,6 @@ if (this.sessionPersistence && this.sessionId) {
     });
   }
 
-  // ─── Impact Analysis ───
-
-  /**
-   * Returns a cached ImpactReport if the same files were already analyzed,
-   * otherwise computes and caches a fresh report.
-   */
   private async getOrComputeImpact(
     files: string[],
   ): Promise<import("./impact-analyzer.js").ImpactReport | null> {
@@ -4585,12 +5063,8 @@ if (this.sessionPersistence && this.sessionId) {
         content: `Impact analysis: ${report.riskLevel} risk. ${report.affectedFiles.length} affected files, ${report.breakingChanges.length} breaking changes.`,
       });
 
-      // 고위험 변경 정보를 LLM에 주입
       const impactPrompt = this.impactAnalyzer.formatForPrompt(report);
-      this.contextManager.addMessage({
-        role: "system",
-        content: impactPrompt,
-      });
+      this.ephemeralHints.push(impactPrompt);
     }
   }
   /**
@@ -4630,10 +5104,7 @@ if (this.sessionPersistence && this.sessionId) {
         hintLines.push("", "Suggested refactor order:", planPreview);
       }
 
-      this.contextManager.addMessage({
-        role: "system",
-        content: hintLines.join("\n"),
-      });
+      this.ephemeralHints.push(hintLines.join("\n"));
 
       this.impactHintInjected = true;
 
@@ -4644,15 +5115,9 @@ if (this.sessionPersistence && this.sessionId) {
           `${report.breakingChanges.length} breaking changes, ` +
           `${report.deadCodeCandidates.length} dead code candidates.`,
       });
-    } catch {
-      // aggregate impact 실패는 치명적이지 않음
-    }
+    } catch { /* non-fatal */ }
   }
 
-  /**
-   * 종료 직전 최종 impact 요약 생성.
-   * assistant final summary에만 붙이고 system prompt 오염은 하지 않는다.
-   */
   private async buildFinalImpactSummary(): Promise<string | null> {
     if (!this.impactAnalyzer || this.changedFiles.length === 0) return null;
 
@@ -4720,14 +5185,6 @@ if (this.sessionPersistence && this.sessionId) {
     return this.mcpClient!.callToolAsYuan(toolCall.name, args, toolCall.id);
   }
 
-  /**
-   * Normalize an MCP tool result for consistent downstream consumption.
-   *
-   * - Search tools (tool name contains "search"): if the output is unstructured text,
-   *   wrap it into a JSON array of `{ title, url, snippet, source }` objects.
-   *   Each non-empty line is treated as a snippet entry when structured data is absent.
-   * - All other tools: pass through unchanged.
-   */
   private normalizeMcpResult(toolName: string, output: string): string {
     const isSearch = /search/i.test(toolName);
     if (!isSearch) return output;
@@ -4760,11 +5217,7 @@ if (this.sessionPersistence && this.sessionId) {
 
     return JSON.stringify(structured, null, 2);
   }
-  /**
-   * ContinuousReflection overflow signal을 soft rollover로 처리한다.
-   * 절대 abort하지 않고, 체크포인트 저장 후 다음 iteration에서
-   * ContextManager가 압축된 컨텍스트를 사용하도록 둔다.
-   */
+
   private async handleSoftContextOverflow(): Promise<void> {
     try {
       await this.saveAutoCheckpoint(this.iterationCount);
@@ -4791,9 +5244,6 @@ if (this.sessionPersistence && this.sessionId) {
     }
     this.traceRecorder?.stop();
   }
-
-  // ─── Helpers ───
-
   /**
    * Builds a Map<filePath, toolOutput> for all changed files from write/edit tool results.
    * Used by selfReflection deepVerify and quickVerify.
@@ -4840,6 +5290,7 @@ if (this.sessionPersistence && this.sessionId) {
   if (this.sessionPersistence && this.sessionId) {
     void this.sessionPersistence.updateStatus(this.sessionId, "crashed");
   }
+    dlog("AGENT-LOOP", `run() terminating`, { reason: "ERROR", tokensUsed: this.tokenUsage.total, iterations: this.iterationCount });
     this.emitEvent({
       kind: "agent:error",
       message,
@@ -4849,12 +5300,7 @@ if (this.sessionPersistence && this.sessionId) {
     return { reason: "ERROR", error: message };
   }
 
-  // ─── Task phase transitions ───────────────────────────────────────────────
 
-  /**
-   * Deterministic phase transition — no LLM involved.
-   * Emits agent:phase_transition event for TUI trace.
-   */
   private transitionPhase(to: TaskPhase, trigger: string): void {
     if (this.taskPhase === to) return;
     const from = this.taskPhase;
@@ -4868,10 +5314,6 @@ if (this.sessionPersistence && this.sessionId) {
     });
   }
 
-  /**
-   * Cheap local checks run in verify phase — no LLM.
-   * Returns true if all checks pass (safe to advance to finalize).
-   */
   private async runCheapChecks(): Promise<boolean> {
     const projectPath = this.config.loop.projectPath;
 
@@ -4906,16 +5348,10 @@ if (this.sessionPersistence && this.sessionId) {
           if (hasErrors) {
             // cheap check: tsc errors found — staying in verify
             // Inject TS errors so LLM sees them and fixes them
-            if (this.iterationSystemMsgCount < 5) {
-              const truncated = result.output.length > 1000
-                ? result.output.slice(0, 1000) + "\n[truncated]"
-                : result.output;
-              this.contextManager.addMessage({
-                role: "system",
-                content: `[Verify Phase] TypeScript errors found:\n\`\`\`\n${truncated}\n\`\`\`\nPlease fix before completion.`,
-              });
-              this.iterationSystemMsgCount++;
-            }
+            const truncated = result.output.length > 1000
+              ? result.output.slice(0, 1000) + "\n[truncated]"
+              : result.output;
+            this.ephemeralHints.push(`[Verify Phase] TypeScript errors found:\n\`\`\`\n${truncated}\n\`\`\`\nPlease fix before completion.`);
             return false;
           }
         }
@@ -4927,12 +5363,6 @@ if (this.sessionPersistence && this.sessionId) {
     return true;
   }
 
-  // ─── Evidence Report ───────────────────────────────────────────────────────
-
-  /**
-   * After a file write/edit, collect diff stats + syntax signal and emit
-   * `agent:evidence_report`. Runs async and never blocks the main loop.
-   */
   private async emitEvidenceReport(
     filePath: string,
     tool: "file_write" | "file_edit",
@@ -4960,10 +5390,6 @@ if (this.sessionPersistence && this.sessionId) {
       }
     } catch { /* non-fatal */ }
 
-    // 2. Syntax check — skipped here to avoid spawning a duplicate tsc process.
-    // runCheapChecks() already runs tsc at the implement→verify boundary and
-    // the result flows to the QA pipeline. Spawning tsc per-write would
-    // create N parallel tsc processes for bulk refactors.
     const syntax: "ok" | "error" | "skipped" = "skipped";
 
     this.emitEvent({
@@ -4976,15 +5402,11 @@ if (this.sessionPersistence && this.sessionId) {
       timestamp,
     });
 
-    // If a dep-graph file changed, invalidate arch summary cache
     const isDepsChange = filePath.includes("package.json") || filePath.includes("tsconfig");
     if (isDepsChange && this.archSummarizer) {
       this.archSummarizer.regenerate().catch(() => {/* non-fatal */});
     }
   }
-
-  // ─── OverheadGovernor helpers ─────────────────────────────────────────────
-
   /**
    * 현재 런타임 상태로 TriggerContext 빌드.
    */
@@ -5026,17 +5448,8 @@ if (this.sessionPersistence && this.sessionId) {
     }
   }
 
-  // ─── Message pruning — GPT recommendation ────────────────────────────────
-
   private static readonly MAX_MESSAGES = 40;
   private static readonly PRUNE_KEEP_RECENT = 10;
-
-  /**
-   * 메시지 배열이 MAX_MESSAGES를 초과하면 prune.
-   * 구조: [system] + [task summary] + [last PRUNE_KEEP_RECENT turns]
-   *
-   * "turns" = user/assistant 쌍 (tool messages는 해당 assistant 메시지에 귀속)
-   */
   private pruneMessagesIfNeeded(): void {
     const msgs = this.contextManager.getMessages();
     if (msgs.length <= AgentLoop.MAX_MESSAGES) return;

@@ -136,9 +136,9 @@ export const YUAN_MD_SEARCH_PATHS: string[] = [
  * 기본 AgentLoop 설정값
  */
 export const DEFAULT_LOOP_CONFIG = {
-  maxIterations: 25,
-  maxTokensPerIteration: 8_000,
-  totalTokenBudget: 200_000,
+  maxIterations: 50,
+  maxTokensPerIteration: 16_000,
+  totalTokenBudget: 1_000_000,
 } as const;
 
 /**

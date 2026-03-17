@@ -1,146 +1,209 @@
 /**
- * useMouseScroll — enables X10 mouse wheel scrolling in the TUI.
+ * useMouseScroll — stable mouse wheel scrolling for Ink TUI.
  *
- * Problem: Ink's useInput doesn't handle mouse events, and enabling mouse
- * tracking causes raw escape sequences to leak into Ink's readline → garbage
- * text in InputBox.
+ * Handles:
+ * - X10 mouse protocol: ESC [ M + 3 bytes
+ * - SGR mouse protocol: ESC [ < btn ; col ; row M/m
  *
- * Solution: Enable X10 basic mouse protocol (scroll wheel only), then
- * monkey-patch process.stdin.emit to intercept and strip mouse sequences
- * before Ink's readline processes them. Scroll events are routed to callbacks.
- *
- * X10 protocol: \x1b[M <button> <col> <row>  (3 bytes after \x1b[M)
- * Scroll up   : button byte = 96 (64 + 32 offset)
- * Scroll down : button byte = 97 (65 + 32 offset)
+ * Key fixes:
+ * - Buffers partial mouse sequences across stdin chunks
+ * - Prevents raw mouse escape codes from leaking into Ink/readline
+ * - Avoids swallowing normal ESC / non-mouse input
  */
 
 import { useEffect, useRef } from "react";
 
-const MOUSE_ENABLE  = "\x1b[?1000h\x1b[?1006h"; // basic click tracking + SGR encoding (no drag)
+const MOUSE_ENABLE = "\x1b[?1000h\x1b[?1006h";
 const MOUSE_DISABLE = "\x1b[?1006l\x1b[?1000l";
 
-// Button codes after the 32-offset encoding (X10 protocol)
-const SCROLL_UP_BTN   = 96; // button 64 + 32
-const SCROLL_DOWN_BTN = 97; // button 65 + 32
-
-// Matches a complete X10 mouse sequence: ESC [ M + 3 bytes
-const MOUSE_PATTERN = /\x1b\[M[\s\S]{3}/g;
-
-// Matches SGR mouse sequences: ESC [ < digits ; digits ; digits M/m
-const SGR_MOUSE_PATTERN = /\x1b\[<\d+;\d+;\d+[Mm]/g;
-
-// Matches orphaned SGR tails (when \x1b was consumed by partial buffer in prior chunk)
-const ORPHANED_SGR_TAIL = /\[<\d+;\d+;\d+[Mm]/g;
+// X10 button byte values already include the +32 offset
+const SCROLL_UP_BTN = 96; // 64 + 32
+const SCROLL_DOWN_BTN = 97; // 65 + 32
 
 type StdinEmit = typeof process.stdin.emit;
+
+type ParsedMouseChunk = {
+  clean: string;
+  ups: number;
+  downs: number;
+  tail: string;
+};
+
+function isPotentialMouseTail(text: string): boolean {
+  return (
+    text === "\x1b[M" ||
+    text === "\x1b[<" ||
+    /^\x1b\[<\d*;?\d*;?\d*$/.test(text)
+  );
+}
+
+function parseMouseChunk(input: string): ParsedMouseChunk {
+  let clean = "";
+  let ups = 0;
+  let downs = 0;
+  let i = 0;
+
+  while (i < input.length) {
+    // X10: ESC [ M + 3 bytes
+    if (input.startsWith("\x1b[M", i)) {
+      if (i + 6 > input.length) {
+        break; // incomplete X10 packet
+      }
+
+      const btn = input.charCodeAt(i + 3);
+      if (btn === SCROLL_UP_BTN) ups++;
+      else if (btn === SCROLL_DOWN_BTN) downs++;
+
+      i += 6;
+      continue;
+    }
+
+    // SGR: ESC [ < btn ; col ; row M/m
+    if (input.startsWith("\x1b[<", i)) {
+      const rest = input.slice(i);
+      const match = rest.match(/^\x1b\[<(\d+);(\d+);(\d+)([Mm])/);
+
+      if (match) {
+        const btn = Number.parseInt(match[1], 10);
+        if (btn === 64) ups++;
+        else if (btn === 65) downs++;
+
+        i += match[0].length;
+        continue;
+      }
+
+      if (isPotentialMouseTail(rest)) {
+        break; // incomplete SGR packet
+      }
+    }
+
+    // Strip orphaned SGR fragments: "[<digits;digits;digitsM/m" without ESC prefix
+    // This happens when ESC is consumed by Ink/readline and only the tail arrives
+    if (input[i] === "[" && i + 1 < input.length && input[i + 1] === "<") {
+      const rest = input.slice(i);
+      const orphanMatch = rest.match(/^\[<(\d+);(\d+);(\d+)([Mm])/);
+      if (orphanMatch) {
+        const btn = Number.parseInt(orphanMatch[1], 10);
+        if (btn === 64) ups++;
+        else if (btn === 65) downs++;
+        i += orphanMatch[0].length;
+        continue;
+      }
+      // Potential incomplete orphan — check if it looks like start of mouse seq
+      if (/^\[<\d*;?\d*;?\d*$/.test(rest)) {
+        break; // incomplete, save as tail
+      }
+    }
+
+    clean += input[i];
+    i++;
+  }
+
+  return {
+    clean,
+    ups,
+    downs,
+    tail: input.slice(i),
+  };
+}
 
 export function useMouseScroll(
   onScrollUp: () => void,
   onScrollDown: () => void,
 ): void {
-  // Keep callback refs stable so the effect only runs once
-  const upRef   = useRef(onScrollUp);
+  const upRef = useRef(onScrollUp);
   const downRef = useRef(onScrollDown);
-  upRef.current   = onScrollUp;
+
+  upRef.current = onScrollUp;
   downRef.current = onScrollDown;
 
   useEffect(() => {
-    // Guard: only patch once even in strict-mode double-invoke
-    if ((process.stdin as { _yuanMousePatched?: boolean })._yuanMousePatched) {
-      return;
-    }
-    (process.stdin as { _yuanMousePatched?: boolean })._yuanMousePatched = true;
+    const stdin = process.stdin as typeof process.stdin & {
+      _yuanMousePatched?: boolean;
+    };
+
+    if (stdin._yuanMousePatched) return;
+    stdin._yuanMousePatched = true;
+
+    let pendingTail = "";
+
+    const disableMouse = () => {
+      try {
+        process.stdout.write(MOUSE_DISABLE);
+      } catch {
+        // ignore
+      }
+    };
 
     process.stdout.write(MOUSE_ENABLE);
 
+    const handleExit = () => disableMouse();
+    const handleSigint = () => disableMouse();
+    const handleSigterm = () => disableMouse();
+    const handleCrash = () => disableMouse();
+
+    process.once("exit", handleExit);
+    process.once("SIGINT", handleSigint);
+    process.once("SIGTERM", handleSigterm);
+    process.once("uncaughtException", handleCrash);
+
     const originalEmit = process.stdin.emit.bind(process.stdin) as StdinEmit;
 
-    (process.stdin as { emit: StdinEmit }).emit = function (
+    stdin.emit = function patchedEmit(
       event: string | symbol,
       ...args: unknown[]
     ): boolean {
-      if (event === "data") {
-        const raw = args[0];
-        const str: string =
-          raw instanceof Buffer
-            ? raw.toString("binary")
-            : typeof raw === "string"
+      if (event !== "data") {
+        return (originalEmit as (...a: unknown[]) => boolean)(event, ...args);
+      }
+
+      const raw = args[0];
+      const str =
+        raw instanceof Buffer
+          ? raw.toString("binary")
+          : typeof raw === "string"
             ? raw
             : "";
 
-        const hasMouse =
-          str.includes("\x1b[M") ||
-          str.includes("\x1b[<") ||
-          // orphaned SGR tails (missing \x1b prefix)
-          /\[<\d+;\d+;\d+[Mm]/.test(str);
+      const hasMouseCandidate =
+        pendingTail.length > 0 ||
+        str.includes("\x1b[M") ||
+        str.includes("\x1b[<");
 
-        if (hasMouse) {
-          let ups   = 0;
-          let downs = 0;
-
-          // First pass: strip X10 sequences and detect scroll direction
-          let stripped = str.replace(MOUSE_PATTERN, (match) => {
-            // byte index 3 = button byte
-            const btn = match.charCodeAt(3);
-            if (btn === SCROLL_UP_BTN)   ups++;
-            else if (btn === SCROLL_DOWN_BTN) downs++;
-            return ""; // remove from stream
-          });
-
-          // Second pass: strip SGR mouse sequences (ESC[<...M/m)
-          // SGR button 64 = scroll up, 65 = scroll down
-          stripped = stripped.replace(SGR_MOUSE_PATTERN, (match) => {
-            // extract button number from ESC[<BTN;COL;ROWm
-            const m = match.match(/\[<(\d+);/);
-            if (m) {
-              const btn = parseInt(m[1], 10);
-              if (btn === 64) ups++;
-              else if (btn === 65) downs++;
-            }
-            return "";
-          });
-
-          // Third pass: orphaned SGR mouse tails (when \x1b was consumed by
-          // partial buffer in a prior chunk and only the tail arrived here)
-          stripped = stripped.replace(ORPHANED_SGR_TAIL, (match) => {
-            const m = match.match(/\[<(\d+);/);
-            if (m) {
-              const btn = parseInt(m[1], 10);
-              if (btn === 64) ups++;
-              else if (btn === 65) downs++;
-            }
-            return "";
-          });
-
-          // Fire scroll callbacks
-          for (let i = 0; i < ups;   i++) upRef.current();
-          for (let i = 0; i < downs; i++) downRef.current();
-
-          // Drop lone ESC — split TCP packet: \x1b arrived before [<...;...;...m
-          // A lone ESC byte inside the hasMouse branch is always a mouse prefix fragment,
-          // not a real ESC keypress (real ESC wouldn't land here alongside a mouse seq).
-          if (stripped === "\x1b") return true;
-
-          // Swallow event entirely if nothing left after stripping
-          if (stripped.length === 0) return true;
-
-          // Pass stripped data onward to Ink's readline
-          const newData =
-            raw instanceof Buffer
-              ? Buffer.from(stripped, "binary")
-              : stripped;
-          return originalEmit(event as string, newData);
-        }
+      if (!hasMouseCandidate) {
+        return (originalEmit as (...a: unknown[]) => boolean)(event, ...args);
       }
 
-      // All other events pass through unchanged
-      return (originalEmit as (...a: unknown[]) => boolean)(event, ...args);
+      const combined = pendingTail + str;
+      const parsed = parseMouseChunk(combined);
+      pendingTail = parsed.tail;
+
+      for (let i = 0; i < parsed.ups; i++) upRef.current();
+      for (let i = 0; i < parsed.downs; i++) downRef.current();
+
+      // only mouse data / incomplete mouse prefix
+      if (parsed.clean.length === 0) {
+        return true;
+      }
+
+      const newData =
+        raw instanceof Buffer
+          ? Buffer.from(parsed.clean, "binary")
+          : parsed.clean;
+
+      return originalEmit(event, newData);
     } as StdinEmit;
 
     return () => {
-      process.stdout.write(MOUSE_DISABLE);
-      (process.stdin as { emit: StdinEmit; _yuanMousePatched?: boolean }).emit = originalEmit;
-      delete (process.stdin as { _yuanMousePatched?: boolean })._yuanMousePatched;
+      disableMouse();
+
+      process.removeListener("exit", handleExit);
+      process.removeListener("SIGINT", handleSigint);
+      process.removeListener("SIGTERM", handleSigterm);
+      process.removeListener("uncaughtException", handleCrash);
+
+      stdin.emit = originalEmit;
+      delete stdin._yuanMousePatched;
     };
-  }, []); // run once — callbacks accessed via refs
+  }, []);
 }

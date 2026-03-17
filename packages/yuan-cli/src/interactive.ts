@@ -27,6 +27,7 @@ import {
   type RunAgentCallback,
 } from "@yuaone/core";
 import { createDefaultRegistry } from "@yuaone/tools";
+import type { RegistryOptions } from "@yuaone/tools";
 import { CloudClient, type AgentEvent as CloudAgentEvent } from "./cloud-client.js";
 import { executeCommand, type CommandContext } from "./commands/index.js";
 
@@ -224,7 +225,7 @@ export class InteractiveSession {
     const sigintHandler = (): void => {
       abortController.abort();
     };
-    process.on("SIGINT", sigintHandler);
+    process.once("SIGINT", sigintHandler);
 
     const spinner = this.renderer.thinking();
     this.isStreaming = false;
@@ -407,8 +408,11 @@ export class InteractiveSession {
       baseUrl: config.baseUrl,
     };
 
-    // Create tool registry and executor
-    const registry = createDefaultRegistry();
+    // Create tool registry and executor — inject Gemini native search when provider is Google
+    const registryOpts: RegistryOptions = config.provider === "google"
+      ? { geminiSearch: { apiKey: config.apiKey, model: this.configManager.getModel() ?? "gemini-2.0-flash" } }
+      : {};
+    const registry = createDefaultRegistry(registryOpts);
     const workDir = this.session.workDir;
     const toolExecutor = registry.toExecutor(workDir);
 

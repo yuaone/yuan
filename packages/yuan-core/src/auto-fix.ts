@@ -100,9 +100,9 @@ export interface BuildResult {
 /** 기본 자동 수정 설정 */
 export const DEFAULT_AUTO_FIX_CONFIG: AutoFixConfig = {
   maxRetries: 3,
-  autoLint: true,
-  autoTest: false, // Phase 1b
-  autoBuild: true,
+  autoLint: true,   // 수정된 파일만 lint (전체 프로젝트 오염 없음)
+  autoTest: false,  // Phase 1b
+  autoBuild: false, // tsc 전체 체크는 기존 에러 오염 위험 — 비활성화 유지
 };
 
 // ─── AutoFixLoop ───
@@ -152,6 +152,7 @@ export class AutoFixLoop {
     toolOutput: string,
     success: boolean,
     workDir: string,
+    filePath?: string,
   ): Promise<ValidationResult> {
     const failures: ValidationFailure[] = [];
 
@@ -168,9 +169,9 @@ export class AutoFixLoop {
 
     // file_write / file_edit 후 검증
     if (["file_write", "file_edit"].includes(toolName)) {
-      // 자동 lint
+      // 자동 lint — 수정된 파일만 (전체 프로젝트 오염 방지)
       if (this.config.autoLint) {
-        const lintResult = await this.runLint(workDir);
+        const lintResult = await this.runLint(workDir, filePath);
         if (!lintResult.passed) {
           failures.push({
             type: "LINT_ERROR",
@@ -180,9 +181,9 @@ export class AutoFixLoop {
         }
       }
 
-      // 자동 빌드 체크
+      // 자동 빌드 체크 — 수정된 파일만
       if (this.config.autoBuild) {
-        const buildResult = await this.runBuildCheck(workDir);
+        const buildResult = await this.runBuildCheck(workDir, filePath);
         if (!buildResult.passed) {
           failures.push({
             type: this.isBuildTypeError(buildResult.output)
@@ -193,17 +194,21 @@ export class AutoFixLoop {
           });
         }
       }
+
+      // TODO 패턴 감지 — 코드 생성 품질 강제
+      const todoPattern = /\b(TODO|FIXME|HACK|XXX)\b/gi;
+      const todoMatches = toolOutput.match(todoPattern);
+      if (todoMatches && todoMatches.length > 0) {
+        failures.push({
+          type: "LINT_ERROR",
+          message: `Generated code contains ${todoMatches.length} TODO/FIXME comment(s). Implement fully or remove.`,
+          rawOutput: toolOutput,
+        });
+      }
     }
 
     // shell_exec 결과에서 에러 감지
     if (toolName === "shell_exec" && success) {
-  if (!success) {
-    failures.push({
-      type: "RUNTIME_ERROR",
-      message: "Shell command failed",
-      rawOutput: toolOutput,
-    });
-  }
       const shellErrors = this.detectShellErrors(toolOutput);
       failures.push(...shellErrors);
     }
@@ -315,14 +320,15 @@ export class AutoFixLoop {
    * 순서: eslint → npx tsc --noEmit (lint 대체)
    * @param workDir 프로젝트 루트 경로
    */
-  async runLint(workDir: string): Promise<LintResult> {
-    // eslint 먼저 시도
+  async runLint(workDir: string, filePath?: string): Promise<LintResult> {
     const hasEslint = await this.fileExists(
       path.join(workDir, "node_modules/.bin/eslint"),
     );
 
     if (hasEslint) {
-      const result = await this.exec("npx", ["eslint", ".", "--quiet"], workDir);
+      // 파일 경로가 있으면 해당 파일만 lint — 프로젝트 전체 오염 방지
+      const target = filePath ?? ".";
+      const result = await this.exec("npx", ["eslint", target, "--quiet"], workDir);
       const errorCount = (result.output.match(/\d+ error/g) || []).length;
       return {
         passed: result.exitCode === 0,
@@ -339,8 +345,10 @@ export class AutoFixLoop {
   /**
    * 프로젝트에서 빌드 체크 (tsc --noEmit) 를 실행.
    * @param workDir 프로젝트 루트 경로
+   * @param filePath 특정 파일만 체크할 경우 (미지원 시 전체)
    */
-  async runBuildCheck(workDir: string): Promise<BuildResult> {
+  async runBuildCheck(workDir: string, _filePath?: string): Promise<BuildResult> {
+    // tsc --noEmit은 파일 단위 지원 안 함 — 전체 체크 (기존 동작 유지)
     const result = await this.runTscCheck(workDir);
     return {
       passed: result.passed,

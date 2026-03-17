@@ -189,8 +189,8 @@ export async function runDesignMode(
     process.exit(0);
   };
 
-  process.on("SIGINT", cleanup);
-  process.on("SIGTERM", cleanup);
+  process.once("SIGINT", cleanup);
+  process.once("SIGTERM", cleanup);
 
   const askQuestion = (): void => {
     renderer.showPrompt().then(() => {

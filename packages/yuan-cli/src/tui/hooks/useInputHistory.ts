@@ -40,8 +40,10 @@ export function useInputHistory(): InputHistoryHook {
       if (history.length === 0) return null;
       const newIndex = index === -1 ? history.length - 1 : Math.max(0, index - 1);
       if (index === -1) setSavedInput(currentInput);
-      setIndex(newIndex);
-      return history[newIndex] ?? null;
+      // Clamp to valid range in case history was cleared while index > 0
+      const clamped = Math.min(newIndex, history.length - 1);
+      setIndex(clamped);
+      return history[clamped] ?? null;
     },
     [history, index],
   );

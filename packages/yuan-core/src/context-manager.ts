@@ -31,6 +31,15 @@ export interface ContextManagerConfig {
  * - 오래된 메시지를 요약으로 교체하여 컨텍스트 내에 유지
  */
 export class ContextManager {
+  /** CJK 범위 정규식 — 모듈 로드 시 한 번만 컴파일. match()와 함께 사용 시 lastIndex 무관. */
+  private static readonly CJK_REGEX = /[\u3000-\u9fff\uac00-\ud7af]/g;
+
+  /** 문자열 → 토큰 수 캐시 (최대 500개, LRU-evict) */
+  private readonly _tokenCache = new Map<string, number>();
+
+  /** 메시지 → 토큰 수 캐시. 키: tool_call_id 또는 content의 앞 64자 해시 */
+  private readonly _msgTokenCache = new Map<string, number>();
+
   private messages: Message[] = [];
   private readonly maxTokens: number;
   private readonly outputReserve: number;
@@ -39,7 +48,7 @@ export class ContextManager {
 
   constructor(config: ContextManagerConfig) {
     this.maxTokens = config.maxContextTokens;
-    this.outputReserve = config.outputReserveTokens ?? 4096;
+    this.outputReserve = config.outputReserveTokens ?? 8192;
     this.recentWindow =
       config.compaction?.recentWindow ?? HISTORY_COMPACTION.recentWindow;
     this.summaryWindow =
@@ -140,42 +149,95 @@ export class ContextManager {
   /**
    * 메시지 목록의 대략적인 토큰 수를 추정.
    * tiktoken 없이 근사치 사용 (영어 ~4자/토큰, 한국어 ~2자/토큰).
+   * 메시지별 캐시(_msgTokenCache)로 반복 계산을 방지.
    * @param messages 토큰 수를 추정할 메시지 목록
    */
   estimateTokens(messages: Message[]): number {
     let total = 0;
     for (const msg of messages) {
-      // 메시지 오버헤드 (~4 토큰)
-      total += 4;
-      if (msg.content !== undefined) {
-        if (typeof msg.content === "string") {
-          total += this.estimateStringTokens(msg.content);
-        } else if (Array.isArray(msg.content)) {
-          // 멀티모달 콘텐츠 블록
-          for (const block of msg.content) {
-            if (block.type === "text") {
-              total += this.estimateStringTokens(block.text);
-            } else if (block.type === "image") {
-              // 이미지는 대략 85 토큰 (low detail) ~ 1000+ (high detail)
-              total += 300;
-            } else if (block.type === "file") {
-              total += this.estimateStringTokens(block.content) + 10;
-            }
+      total += this.estimateMessageTokens(msg);
+    }
+    return total;
+  }
+
+  /**
+   * 메시지 하나의 토큰 수를 추정 (캐시 적용).
+   * 캐시 키: tool_call_id가 있으면 그것, 아니면 role + content 앞 64자.
+   */
+  private estimateMessageTokens(msg: Message): number {
+    // 캐시 키 생성
+    const cacheKey = this.msgCacheKey(msg);
+    if (cacheKey !== null) {
+      const cached = this._msgTokenCache.get(cacheKey);
+      if (cached !== undefined) return cached;
+    }
+
+    // 메시지 오버헤드 (~4 토큰)
+    let tokens = 4;
+    if (msg.content !== undefined) {
+      if (typeof msg.content === "string") {
+        tokens += this.estimateStringTokens(msg.content);
+      } else if (Array.isArray(msg.content)) {
+        // 멀티모달 콘텐츠 블록
+        for (const block of msg.content) {
+          if (block.type === "text") {
+            tokens += this.estimateStringTokens(block.text);
+          } else if (block.type === "image") {
+            // 이미지는 대략 85 토큰 (low detail) ~ 1000+ (high detail)
+            tokens += 300;
+          } else if (block.type === "file") {
+            tokens += this.estimateStringTokens(block.content) + 10;
           }
         }
       }
-      if (msg.tool_calls) {
-        for (const tc of msg.tool_calls) {
-          total += this.estimateStringTokens(tc.name) + 4;
-          const argsStr =
-            typeof tc.arguments === "string"
-              ? tc.arguments
-              : JSON.stringify(tc.arguments);
-          total += this.estimateStringTokens(argsStr);
-        }
+    }
+    if (msg.tool_calls) {
+      for (const tc of msg.tool_calls) {
+        tokens += this.estimateStringTokens(tc.name) + 4;
+        const argsStr =
+          typeof tc.arguments === "string"
+            ? tc.arguments
+            : JSON.stringify(tc.arguments);
+        tokens += this.estimateStringTokens(argsStr);
       }
     }
-    return total;
+
+    if (cacheKey !== null) {
+      this._msgTokenCache.set(cacheKey, tokens);
+    }
+    return tokens;
+  }
+
+  /**
+   * 메시지 캐시 키 생성.
+   * - tool 메시지: tool_call_id (고유 식별자)
+   * - 그 외: role + content 앞 64자 + tool_calls 개수 (변경 감지용)
+   * 내용이 자주 변하는 메시지는 null 반환 → 캐시 스킵.
+   */
+  private msgCacheKey(msg: Message): string | null {
+    if (msg.role === "tool" && msg.tool_call_id) {
+      return `tool:${msg.tool_call_id}`;
+    }
+    if (msg.role === "system") {
+      // system 메시지는 replaceSystemMessage로 통째로 교체되므로
+      // content 앞 128자로 키를 만들어 캐시
+      const preview = typeof msg.content === "string"
+        ? msg.content.slice(0, 128)
+        : null;
+      if (preview !== null) return `sys:${preview}`;
+    }
+    if (msg.role === "user" || msg.role === "assistant") {
+      const contentPart = typeof msg.content === "string"
+        ? msg.content.slice(0, 64)
+        : null;
+      const tcPart = msg.tool_calls
+        ? msg.tool_calls.map((tc) => tc.id ?? tc.name).join(",")
+        : "";
+      if (contentPart !== null || tcPart) {
+        return `${msg.role}:${contentPart ?? ""}:${tcPart}`;
+      }
+    }
+    return null;
   }
 
   /**
@@ -297,9 +359,16 @@ export class ContextManager {
         }
         // If some tool results are missing, find them in original messages
         if (expectedIds.size > 0) {
+          // Build a set of tool_call_ids already present in repaired to avoid duplicates (L8 fix)
+          const alreadyInRepaired = new Set(
+            repaired.filter(m => m.role === "tool" && m.tool_call_id).map(m => m.tool_call_id!),
+          );
           for (const origMsg of this.messages) {
             if (origMsg.role === "tool" && expectedIds.has(origMsg.tool_call_id ?? "")) {
-              repaired.push(origMsg);
+              if (!alreadyInRepaired.has(origMsg.tool_call_id!)) {
+                repaired.push(origMsg);
+                alreadyInRepaired.add(origMsg.tool_call_id!);
+              }
               expectedIds.delete(origMsg.tool_call_id ?? "");
             }
           }
@@ -407,7 +476,34 @@ export class ContextManager {
       const minimalRecent = this.takeRecentConversationWindow(nonSystemMessages, 3).map((msg) =>
         this.truncateMessageForBudget(msg, 250),
       );
-      return [...systemMessages, ...minimalRecent];
+
+      // Repair orphaned tool_calls: if an assistant message has tool_calls
+      // but the matching tool result messages are not in minimalRecent, include them.
+      const repairedMinimal: Message[] = [];
+      for (let i = 0; i < minimalRecent.length; i++) {
+        repairedMinimal.push(minimalRecent[i]);
+        const msg = minimalRecent[i];
+        if (msg.role === "assistant" && msg.tool_calls?.length) {
+          const expectedIds = new Set(msg.tool_calls.map((tc) => tc.id));
+          // Remove IDs already covered by subsequent tool messages in minimalRecent
+          for (let j = i + 1; j < minimalRecent.length; j++) {
+            if (minimalRecent[j].role === "tool") {
+              expectedIds.delete(minimalRecent[j].tool_call_id ?? "");
+            }
+          }
+          // Find missing tool results from the full nonSystemMessages
+          if (expectedIds.size > 0) {
+            for (const origMsg of nonSystemMessages) {
+              if (origMsg.role === "tool" && expectedIds.has(origMsg.tool_call_id ?? "")) {
+                repairedMinimal.push(this.truncateMessageForBudget(origMsg, 250));
+                expectedIds.delete(origMsg.tool_call_id ?? "");
+              }
+            }
+          }
+        }
+      }
+
+      return [...systemMessages, ...repairedMinimal];
     }
 
     return result;
@@ -547,9 +643,21 @@ export class ContextManager {
    * 컨텍스트 오버플로우는 outputReserve 마진으로 방어한다.
    */
   private estimateStringTokens(str: string): number {
-    // CJK 문자 비율 체크
-    const cjkCount = (str.match(/[\u3000-\u9fff\uac00-\ud7af]/g) ?? []).length;
+    // 캐시 히트 확인
+    const cached = this._tokenCache.get(str);
+    if (cached !== undefined) return cached;
+
+    // CJK 문자 비율 체크 — static regex 재사용 (match()는 lastIndex 무관)
+    const cjkCount = (str.match(ContextManager.CJK_REGEX) ?? []).length;
     const nonCjkCount = str.length - cjkCount;
-    return Math.ceil(nonCjkCount / 4 + cjkCount / 2);
+    const result = Math.ceil(nonCjkCount / 4 + cjkCount / 2);
+
+    // LRU-evict: 최대 500개 유지
+    if (this._tokenCache.size >= 500) {
+      const firstKey = this._tokenCache.keys().next().value;
+      if (firstKey !== undefined) this._tokenCache.delete(firstKey);
+    }
+    this._tokenCache.set(str, result);
+    return result;
   }
 }

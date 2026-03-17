@@ -2,6 +2,9 @@
  * useAgentStream — bridges AgentLoop events to TUI React state.
  * Converts agent events into TUIMessage updates, tracks streaming state,
  * real-time elapsed timer, reasoning stream, and status indicator metadata.
+ *
+ * v2: Single-lane architecture — no more narration/final split.
+ * One assistant message per agent turn. Tool calls attach to the same bubble.
  */
 
 import { useState, useCallback, useRef, useEffect } from "react";
@@ -16,6 +19,19 @@ import type {
   TUIBGStep,
 } from "../types.js";
 
+// Debug logger — writes to ~/.yuan/logs/debug.log
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+const _DLOG_FILE = path.join(os.homedir(), ".yuan", "logs", "debug.log");
+function dlog(layer: string, msg: string, data?: unknown) {
+  const now = new Date();
+  const ts = `${now.getHours().toString().padStart(2,"0")}:${now.getMinutes().toString().padStart(2,"0")}:${now.getSeconds().toString().padStart(2,"0")}.${now.getMilliseconds().toString().padStart(3,"0")}`;
+  const extra = data !== undefined ? " " + JSON.stringify(data) : "";
+  const line = `[${ts}] [${layer}] ${msg}${extra}\n`;
+  try { fs.appendFileSync(_DLOG_FILE, line); } catch {} // file only — no stderr (causes TUI jump)
+}
+
 export interface UseAgentStreamReturn {
   state: AgentStreamState;
   handleEvent: (event: AgentEventLike) => void;
@@ -23,6 +39,7 @@ export interface UseAgentStreamReturn {
   addSystemMessage: (content: string) => void;
   addQueuedMessage: (content: string, id: string) => void;
   promoteQueuedMessage: (id: string) => void;
+  updateQueuedMessage: (id: string, newContent: string) => void;
   startAgent: () => void;
   interrupt: () => void;
   clearMessages: () => void;
@@ -52,6 +69,7 @@ export function useAgentStream(): UseAgentStreamReturn {
   const [progressLabel, setProgressLabel] = useState<string | undefined>(undefined);
   const [currentPhase, setCurrentPhase] = useState<"explore" | "implement" | "verify" | "finalize" | undefined>(undefined);
 
+  // Single-lane: one current assistant message per agent turn
   const currentMsgIdRef = useRef<string | null>(null);
   const tokenWindowRef = useRef<{ time: number; tokens: number }[]>([]);
   const currentThinkingMsgIdRef = useRef<string | null>(null);
@@ -89,7 +107,7 @@ export function useAgentStream(): UseAgentStreamReturn {
       if (startTimeRef.current) {
         setElapsedMs(Date.now() - startTimeRef.current);
       }
-    }, 200);
+    }, 1000);
   }, []);
 
   const stopTimer = useCallback(() => {
@@ -164,10 +182,13 @@ export function useAgentStream(): UseAgentStreamReturn {
     }
   }, [updateCurrentMessage]);
 
-  const pendingTextRef = useRef("");
+  // ── Single-lane text pipeline ─────────────────────────────────────────────
+  // Raw tokens accumulate here. Every 60ms, whatever accumulated gets flushed
+  // to the single current assistant message.
+  const rawTextBufRef = useRef("");          // incoming token accumulator
+  const pendingTextRef = rawTextBufRef;      // alias for flush call sites
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastChunkRef = useRef<string>(""); // for dedup: track previous chunk
-  const FLUSH_INTERVAL = 40;
 
   // Debounce buffer for thinking/reasoning lines to avoid per-token re-renders
   const pendingThinkingRef = useRef<string[]>([]);
@@ -180,29 +201,77 @@ export function useAgentStream(): UseAgentStreamReturn {
   const reasoningRawBufRef = useRef(""); // incoming raw token accumulator
   const reasoningSentenceQRef = useRef<string[]>([]); // sentences ready to show
   const reasoningDrainTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /* M10: idle timer ref to prevent race when startAgent clears previous timer */
+  const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  /** Extract complete sentences from text, returning {sentences, remainder} */
+  /** Extract complete sentences from text, returning {sentences, remainder}.
+   * Used only for reasoning/thinking pacing (not for main text). */
   const extractSentences = (text: string): { sentences: string[]; remainder: string } => {
-    // Match up to and including a sentence-terminator (. ! ? \n)
     const re = /[^.!?\n]*[.!?\n]+\s*/g;
     const matches = text.match(re);
     if (!matches) return { sentences: [], remainder: text };
     const matched = matches.join("");
-    return { sentences: matches.map((s) => s.trim()).filter(Boolean), remainder: text.slice(matched.length) };
+    return { sentences: matches.map((s) => s.trim()).filter(Boolean), remainder: text.slice(matched.length).trimStart() };
   };
 
-  const flushPendingText = useCallback(() => {
-    if (flushTimerRef.current) {
-      clearTimeout(flushTimerRef.current);
+  /**
+   * Ensure a single assistant message exists for the current agent turn.
+   * Creates it lazily on first text/tool call — no empty bubbles.
+   * Returns the message id.
+   */
+  function ensureAssistantMessage(): string {
+    if (currentMsgIdRef.current) return currentMsgIdRef.current;
+    const id = `asst-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    currentMsgIdRef.current = id;
+    const msg: TUIMessage = {
+      id,
+      role: "assistant",
+      streamKind: "final",
+      content: "",
+      timestamp: Date.now(),
+      isStreaming: true,
+      toolCalls: [],
+    };
+    setMessages((prev) => [...prev, msg]);
+    return id;
+  }
+
+  /**
+   * Throttled text flush — 60ms INTERVAL (not debounce).
+   * Key difference: does NOT reset timer on each token.
+   * Tokens accumulate in rawTextBufRef; every 60ms whatever has accumulated gets flushed.
+   * This gives smooth, steady text output instead of dumping everything at once.
+   */
+  const scheduleTextFlush = useCallback(() => {
+    // If timer already scheduled, don't reset — let it fire on schedule
+    if (flushTimerRef.current) return;
+    flushTimerRef.current = setTimeout(() => {
       flushTimerRef.current = null;
+      const buf = rawTextBufRef.current;
+      if (!buf) return;
+      rawTextBufRef.current = "";
+      updateCurrentMessage((msg) => ({
+        ...msg,
+        content: msg.content + buf,
+      }));
+    }, 60);
+  }, [updateCurrentMessage]);
+
+  // Legacy alias so call sites that used scheduleSentenceExtract still work
+  const scheduleSentenceExtract = scheduleTextFlush;
+
+  /** Force-flush: drain raw buffer to message content immediately. */
+  const flushPendingText = useCallback(() => {
+    if (flushTimerRef.current) { clearTimeout(flushTimerRef.current); flushTimerRef.current = null; }
+
+    const raw = rawTextBufRef.current;
+    if (raw) {
+      rawTextBufRef.current = "";
+      updateCurrentMessage((msg) => ({
+        ...msg,
+        content: msg.content + raw,
+      }));
     }
-    const text = pendingTextRef.current;
-    if (text.length === 0) return;
-    pendingTextRef.current = "";
-    updateCurrentMessage((msg) => ({
-      ...msg,
-      content: msg.content + text,
-    }));
   }, [updateCurrentMessage]);
 
   const flushThinkingLines = useCallback(() => {
@@ -217,7 +286,7 @@ export function useAgentStream(): UseAgentStreamReturn {
     const currentId = currentThinkingMsgIdRef.current;
 
     if (!currentId) {
-      const id = `thinking-${Date.now()}`;
+      const id = `thinking-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       currentThinkingMsgIdRef.current = id;
       const msg: TUIMessage = {
         id,
@@ -269,7 +338,7 @@ export function useAgentStream(): UseAgentStreamReturn {
 
   const addUserMessage = useCallback((content: string) => {
     const msg: TUIMessage = {
-      id: `user-${Date.now()}`,
+      id: `user-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       role: "user",
       content,
       timestamp: Date.now(),
@@ -279,7 +348,7 @@ export function useAgentStream(): UseAgentStreamReturn {
 
   const addSystemMessage = useCallback((content: string) => {
     const msg: TUIMessage = {
-      id: `sys-${Date.now()}`,
+      id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       role: "system",
       content,
       timestamp: Date.now(),
@@ -303,7 +372,14 @@ export function useAgentStream(): UseAgentStreamReturn {
     );
   }, []);
 
+  const updateQueuedMessage = useCallback((id: string, newContent: string) => {
+    setMessages((prev) =>
+      prev.map((m) => (m.id === id ? { ...m, content: newContent } : m))
+    );
+  }, []);
+
   const startAgent = useCallback(() => {
+    dlog("STREAM", `startAgent called`, { msgLength: 0 });
     statusRef.current = "thinking";
     setStatus("thinking");
     lastEventAtRef.current = Date.now();
@@ -316,6 +392,15 @@ export function useAgentStream(): UseAgentStreamReturn {
     setTokensPerSecond(0);
     setCurrentPhase("explore");
     tokenWindowRef.current = [];
+    // BUG #14 fix: finalize any orphaned streaming/thinking message from previous run
+    if (currentThinkingMsgIdRef.current) {
+      const orphanedThinkingId = currentThinkingMsgIdRef.current;
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === orphanedThinkingId ? { ...m, isStreaming: false } : m,
+        ),
+      );
+    }
     currentThinkingMsgIdRef.current = null;
     activeToolBatchIdRef.current = null;
     lastToolCallAtRef.current = 0;
@@ -326,23 +411,27 @@ export function useAgentStream(): UseAgentStreamReturn {
       clearTimeout(reasoningDrainTimerRef.current);
       reasoningDrainTimerRef.current = null;
     }
+    /* M10 fix: clear previous idle timer to prevent stale idle transition */
+    if (idleTimerRef.current) {
+      clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = null;
+    }
+
+    // Reset text buffer
+    rawTextBufRef.current = "";
+    if (flushTimerRef.current) { clearTimeout(flushTimerRef.current); flushTimerRef.current = null; }
+
     startTimer();
 
-    const msgId = `assistant-${Date.now()}`;
-    currentMsgIdRef.current = msgId;
-    const msg: TUIMessage = {
-      id: msgId,
-      role: "assistant",
-      content: "",
-      timestamp: Date.now(),
-      isStreaming: true,
-      toolCalls: [],
-    };
-    setMessages((prev) => [...prev, msg]);
+    // Deferred bubble creation: no assistant message created here.
+    // ensureAssistantMessage() will create it lazily when the first
+    // text_delta or tool_call arrives. This prevents empty bubbles.
+    currentMsgIdRef.current = null;
   }, [startTimer]);
 
   const handleEvent = useCallback(
     (event: AgentEventLike) => {
+      dlog("STREAM", `event received`, { kind: (event as {kind?: string}).kind ?? "unknown" });
       // Reset stall timer on every event
       lastEventAtRef.current = Date.now();
       setStalledMs(0);
@@ -351,6 +440,11 @@ export function useAgentStream(): UseAgentStreamReturn {
   case "agent:reasoning_delta": {
     const rText = String((event as { text?: string }).text ?? "");
     if (!rText) break;
+    // BUG #28 fix: cap reasoning buffer to prevent unbounded memory growth
+    const MAX_BUF = 50_000;
+    if (reasoningRawBufRef.current.length > MAX_BUF) {
+      reasoningRawBufRef.current = reasoningRawBufRef.current.slice(-40_000);
+    }
     reasoningRawBufRef.current += rText;
     const { sentences, remainder } = extractSentences(reasoningRawBufRef.current);
     if (sentences.length > 0) {
@@ -358,6 +452,7 @@ export function useAgentStream(): UseAgentStreamReturn {
       reasoningRawBufRef.current = remainder;
       scheduleReasoningDrain();
     }
+    // reasoning_delta goes to thinkingContent ONLY — never to message.content
     break;
   }
         case "agent:thinking": {
@@ -392,7 +487,7 @@ export function useAgentStream(): UseAgentStreamReturn {
         }
 
         case "agent:text_delta": {
-          const text = event.text as string;
+          const text = typeof event.text === "string" ? event.text : String(event.text ?? "");
           if (!text) break;
           // Only update status/tool state on the FIRST token of a stream — not every token
           if (!isStreamingRef.current) {
@@ -405,29 +500,40 @@ export function useAgentStream(): UseAgentStreamReturn {
             setCurrentToolArgs(null);
           }
           // Dedup: skip ONLY if this chunk is identical to the previous chunk
-          // (pure repeat at chunk boundary). Avoid buffer-suffix matching which
-          // incorrectly drops legitimate text that happens to match the buffer tail.
           if (text === lastChunkRef.current && text.length <= 20 && lastChunkRef.current.length > 0) {
             break;
           }
           lastChunkRef.current = text;
-          pendingTextRef.current += text;
-          if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
-          flushTimerRef.current = setTimeout(flushPendingText, FLUSH_INTERVAL);
+
+          // Ensure single assistant message exists (lazy creation)
+          ensureAssistantMessage();
+
+          // Accumulate in buffer; flush every 60ms
+          rawTextBufRef.current += text;
+          scheduleTextFlush();
           break;
         }
+
  case "agent:reasoning_timeline": {
   setReasoningTree(event.tree as ReasoningNode);
   break;
  }
         case "agent:tool_call": {
+          // Flush any pending text BEFORE adding the tool call block.
+          flushPendingText();
           isStreamingRef.current = false;
-          statusRef.current = "tool_running";
-          setStatus("tool_running");
+
+          // Ensure single assistant message exists (tool-only response)
+          ensureAssistantMessage();
+
           const toolName = event.tool as string;
+          dlog("STREAM", `tool call`, { toolName: (event as {toolName?: string}).toolName ?? toolName ?? "?" });
 
           // Filter internal protocol tools — task_complete is a completion signal, not a user-visible tool
           if (toolName === "task_complete") break;
+
+          statusRef.current = "tool_running";
+          setStatus("tool_running");
 
           const args = summarizeArgs(event.input as Record<string, unknown>);
           setCurrentToolName(toolName);
@@ -476,6 +582,7 @@ export function useAgentStream(): UseAgentStreamReturn {
 
         case "agent:tool_result": {
           const toolName = event.tool as string;
+          const resultCallId = typeof event.callId === "string" ? event.callId : undefined;
           const output = event.output as string;
           const durationMs = event.durationMs as number;
 
@@ -491,7 +598,11 @@ export function useAgentStream(): UseAgentStreamReturn {
               const call = toolCalls[i];
               if (!call) continue;
 
-              if (call.toolName === toolName && call.status === "running") {
+              /* M9 fix: match by callId first (unique per invocation), fall back to toolName */
+              const isMatch = resultCallId
+                ? (call.callId === resultCallId && call.status === "running")
+                : (call.toolName === toolName && call.status === "running");
+              if (isMatch) {
                 const completedAt = Date.now();
 
                 let duration: number | undefined;
@@ -501,15 +612,32 @@ export function useAgentStream(): UseAgentStreamReturn {
                   duration = (completedAt - call.startedAt) / 1000;
                 }
 
+                // Truncate result content — storing full file content in React state
+                // causes OOM when agent reads hundreds of files (each up to 100KB+).
+                // TUI only shows a preview; full content is not needed in heap.
+                const RESULT_PREVIEW_LIMIT = 1500;
+                const truncatedOutput = output.length > RESULT_PREVIEW_LIMIT
+                  ? output.slice(0, RESULT_PREVIEW_LIMIT) + `\n… (${output.length - RESULT_PREVIEW_LIMIT} chars truncated)`
+                  : output;
+                const kind = detectResultKind(toolName, output);
+                const meta: { exitCode?: number; matchCount?: number; engine?: string } = {};
+                if (kind === "bash_output") {
+                  const ec = parseBashExitCode(output);
+                  if (ec !== undefined) meta.exitCode = ec;
+                } else if (kind === "grep_output") {
+                  const mc = parseGrepMatchCount(output);
+                  if (mc !== undefined) meta.matchCount = mc;
+                }
                 toolCalls[i] = {
                   ...call,
                   status: "success",
                   completedAt,
                   duration,
                   result: {
-                    kind: detectResultKind(toolName, output),
-                    content: output,
+                    kind,
+                    content: truncatedOutput,
                     lineCount: output.split("\n").length,
+                    meta: Object.keys(meta).length > 0 ? meta : undefined,
                   },
                 };
                 break;
@@ -525,6 +653,7 @@ export function useAgentStream(): UseAgentStreamReturn {
         }
 
         case "agent:error": {
+          dlog("STREAM", `agent:error`, { message: (event as {message?: string}).message?.slice(0, 200) });
           flushReasoningQueue();
           const errMsg = event.message as string;
           setLastError(errMsg);
@@ -535,25 +664,53 @@ export function useAgentStream(): UseAgentStreamReturn {
           setCurrentToolName(null);
           setCurrentToolArgs(null);
 
-          updateCurrentMessage((msg) => ({
-            ...msg,
-            content: msg.content + `\n\nError: ${errMsg}`,
-            isStreaming: false,
-          }));
+          // Flush text buffer
+          if (flushTimerRef.current) { clearTimeout(flushTimerRef.current); flushTimerRef.current = null; }
+          rawTextBufRef.current = "";
+
+          if (currentMsgIdRef.current) {
+            updateCurrentMessage((msg) => ({
+              ...msg,
+              content: msg.content + `\n\nError: ${errMsg}`,
+              isStreaming: false,
+            }));
+          } else {
+            // No active message — show error as system message
+            const errSysMsg: TUIMessage = {
+              id: `err-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              role: "system",
+              content: `Error: ${errMsg}`,
+              timestamp: Date.now(),
+            };
+            setMessages((prev) => [...prev, errSysMsg]);
+          }
 
           currentMsgIdRef.current = null;
           currentThinkingMsgIdRef.current = null;
           activeToolBatchIdRef.current = null;
 
-          setTimeout(() => {
+          /* M10 fix: store idle timer ref for cancellation */
+          if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+          idleTimerRef.current = setTimeout(() => {
+            idleTimerRef.current = null;
             setStatus("idle");
           }, 3000);
           break;
         }
 
         case "agent:completed": {
+          dlog("STREAM", `agent:complete`, { reason: (event as {reason?: string}).reason, tokensUsed: (event as {tokensUsed?: number}).tokensUsed });
           flushReasoningQueue();
-          flushPendingText();
+
+          // Drain any pending text INLINE (not via flushPendingText) to avoid React batching
+          // issue where completed's setMessages sees the pre-flush state (content still "").
+          const pendingAtComplete = pendingTextRef.current;
+          pendingTextRef.current = "";
+          if (flushTimerRef.current) {
+            clearTimeout(flushTimerRef.current);
+            flushTimerRef.current = null;
+          }
+
           flushThinkingLines();
           stopTimer();
           statusRef.current = "completed";
@@ -563,24 +720,31 @@ export function useAgentStream(): UseAgentStreamReturn {
           setCurrentToolArgs(null);
 
           const summary = (event.summary as string) ?? "";
-          updateCurrentMessage((msg) => {
-            // When the agent only made tool calls (no text output), content is "".
-            // Emit a synthetic "Done." so the user sees a completion indication.
-            const hasText = msg.content && msg.content.trim().length > 0;
-            const hasSummary = summary && summary.trim().length > 0;
-            return {
-              ...msg,
-              content: hasText ? msg.content : hasSummary ? summary : "Done.",
-              isStreaming: false,
-            };
-          });
+
+          if (currentMsgIdRef.current) {
+            const id = currentMsgIdRef.current;
+            setMessages((prev) => prev.map((m) => {
+              if (m.id !== id) return m;
+              const combined = m.content + pendingAtComplete;
+              const hasText = combined.trim().length > 0;
+              const hasSummary = summary && summary.trim().length > 0;
+              return {
+                ...m,
+                content: hasText ? combined : hasSummary ? summary : "Done.",
+                isStreaming: false,
+              };
+            }));
+          }
 
           isStreamingRef.current = false;
           currentMsgIdRef.current = null;
           currentThinkingMsgIdRef.current = null;
           activeToolBatchIdRef.current = null;
 
-          setTimeout(() => {
+          /* M10 fix: store idle timer ref for cancellation */
+          if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+          idleTimerRef.current = setTimeout(() => {
+            idleTimerRef.current = null;
             setStatus("idle");
           }, 3000);
           break;
@@ -637,7 +801,7 @@ export function useAgentStream(): UseAgentStreamReturn {
           const now = Date.now();
           const step: TUIBGStep = {
             id: `qa-${now}-${Math.random().toString(36).slice(2, 6)}`,
-            label: `[QA ${stage}] ${summary}`,
+            label: `QA ${stage}: ${summary}`,
             type: stepType,
             timestamp: now,
           };
@@ -665,44 +829,8 @@ export function useAgentStream(): UseAgentStreamReturn {
         }
 
         case "agent:evidence_report": {
-          const ev = event as unknown as {
-            filePath: string; tool: string;
-            syntax: "ok" | "error" | "skipped";
-            diffStats: { added: number; removed: number } | null;
-            timestamp: number;
-          };
-          const { filePath, syntax, diffStats } = ev;
-          const fileName = filePath.split("/").pop() ?? filePath;
-          const syntaxLabel = syntax === "ok" ? "✓ syntax" : syntax === "error" ? "✗ syntax err" : "";
-          const diffLabel = diffStats ? `+${diffStats.added}/-${diffStats.removed}` : "";
-          const parts = [syntaxLabel, diffLabel].filter(Boolean).join("  ");
-          const now = Date.now();
-          const step: TUIBGStep = {
-            id: `ev-${now}-${Math.random().toString(36).slice(2, 6)}`,
-            label: `[evidence] ${fileName}${parts ? "  " + parts : ""}`,
-            type: syntax === "error" ? "warning" : "success",
-            timestamp: now,
-          };
-          setBackgroundTasks((prev) => {
-            const existing = prev.find((t) => t.id === "evidence");
-            const newSteps = existing
-              ? [...existing.steps, step].slice(-20)
-              : [step];
-            if (existing) {
-              return prev.map((t) =>
-                t.id === "evidence"
-                  ? { ...t, steps: newSteps, lastUpdatedAt: now }
-                  : t,
-              );
-            }
-            return [...prev, {
-              id: "evidence",
-              label: "Evidence",
-              status: "idle" as const,
-              steps: newSteps,
-              lastUpdatedAt: now,
-            }];
-          });
+          // Disabled — File Activity panel reserved for sub-agent background tasks only.
+          // Regular file_read/tool results are already shown in the tool call tree.
           break;
         }
 
@@ -946,10 +1074,15 @@ export function useAgentStream(): UseAgentStreamReturn {
         setProgressLabel(undefined);
       }
     },
-    [appendThinkingLines, updateCurrentMessage, flushPendingText, flushThinkingLines, stopTimer],
+    [appendThinkingLines, updateCurrentMessage, flushPendingText, flushThinkingLines, flushReasoningQueue, scheduleReasoningDrain, scheduleSentenceExtract, scheduleTextFlush, stopTimer],
   );
 
   const interrupt = useCallback(() => {
+    // BUG #9 fix: clear ALL timers including reasoningDrainTimerRef
+    if (reasoningDrainTimerRef.current) {
+      clearTimeout(reasoningDrainTimerRef.current);
+      reasoningDrainTimerRef.current = null;
+    }
     flushPendingText();
     flushThinkingLines();
     stopTimer();
@@ -971,17 +1104,20 @@ export function useAgentStream(): UseAgentStreamReturn {
     activeToolBatchIdRef.current = null;
 
     const sysMsg: TUIMessage = {
-      id: `sys-${Date.now()}`,
+      id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       role: "system",
       content: "Agent interrupted.",
       timestamp: Date.now(),
     };
     setMessages((prev) => [...prev, sysMsg]);
 
-    setTimeout(() => {
+    /* M10 fix: store idle timer ref for cancellation */
+    if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+    idleTimerRef.current = setTimeout(() => {
+      idleTimerRef.current = null;
       setStatus("idle");
     }, 2000);
-  }, [updateCurrentMessage, flushPendingText, stopTimer]);
+  }, [updateCurrentMessage, flushPendingText, flushThinkingLines, stopTimer]);
 
   const clearMessages = useCallback(() => {
     if (flushTimerRef.current) {
@@ -991,6 +1127,16 @@ export function useAgentStream(): UseAgentStreamReturn {
     if (thinkingFlushTimerRef.current) {
       clearTimeout(thinkingFlushTimerRef.current);
       thinkingFlushTimerRef.current = null;
+    }
+    /* M11 fix: clear reasoningDrainTimer to prevent stale drain after /clear */
+    if (reasoningDrainTimerRef.current) {
+      clearTimeout(reasoningDrainTimerRef.current);
+      reasoningDrainTimerRef.current = null;
+    }
+    /* M10 fix: also clear idle timer on /clear */
+    if (idleTimerRef.current) {
+      clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = null;
     }
     if (timerRef.current) {
       clearInterval(timerRef.current);
@@ -1040,6 +1186,7 @@ export function useAgentStream(): UseAgentStreamReturn {
     addSystemMessage,
     addQueuedMessage,
     promoteQueuedMessage,
+    updateQueuedMessage,
     startAgent,
     interrupt,
     clearMessages,
@@ -1047,8 +1194,17 @@ export function useAgentStream(): UseAgentStreamReturn {
 }
 
 function summarizeArgs(input: unknown): string {
-  if (!input || typeof input !== "object") return "";
-  const obj = input as Record<string, unknown>;
+  if (!input) return "";
+  // LLM clients may emit arguments as a JSON string — parse it first
+  let obj: Record<string, unknown>;
+  if (typeof input === "string") {
+    try { obj = JSON.parse(input) as Record<string, unknown>; }
+    catch { return input.slice(0, 60); }
+  } else if (typeof input === "object") {
+    obj = input as Record<string, unknown>;
+  } else {
+    return "";
+  }
   if (obj.path) return String(obj.path);
   if (obj.file_path) return String(obj.file_path);
   if (obj.command) return String(obj.command).slice(0, 60);
@@ -1060,10 +1216,26 @@ function summarizeArgs(input: unknown): string {
 function detectResultKind(
   toolName: string,
   _output: string,
-): "text" | "diff" | "bash_output" | "file_content" | "error" {
+): "text" | "diff" | "bash_output" | "grep_output" | "file_content" | "error" {
   const name = toolName.toLowerCase();
   if (name.includes("edit") || name.includes("diff")) return "diff";
-  if (name.includes("bash") || name.includes("shell") || name.includes("exec")) return "bash_output";
+  if (name === "bash" || name.includes("shell") || name.includes("exec")) return "bash_output";
+  if (name === "grep") return "grep_output";
   if (name.includes("read") || name.includes("file")) return "file_content";
   return "text";
+}
+
+/** Parse bash exit code from output string "[exit 0] [123ms]" */
+function parseBashExitCode(output: string): number | undefined {
+  const m = output.match(/\[exit\s+(-?\d+)\]/);
+  return m ? parseInt(m[1], 10) : undefined;
+}
+
+/** Parse grep match count from output string "(showing N of M total matches)" */
+function parseGrepMatchCount(output: string): number | undefined {
+  const m = output.match(/\(showing \d+ of (\d+) total matches\)/);
+  if (m) return parseInt(m[1], 10);
+  // No truncation message: count lines that look like "file:line: content"
+  const lines = output.split("\n").filter(l => /^[^:]+:\d+:/.test(l));
+  return lines.length > 0 ? lines.length : undefined;
 }

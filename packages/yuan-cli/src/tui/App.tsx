@@ -2,35 +2,54 @@
  * YUAN TUI — Root App component.
  * Fully wired to AgentBridge for real LLM-powered agent execution.
  *
- * Layout (top to bottom):
- *   StatusBar  (1 row)
- *   MessageList (dynamic height — shrinks when SlashMenu opens)
- *   SlashMenu  (0 or N rows — pushes input down, squeezes messages up)
- *   InputBox   (1 row)
- *   FooterBar  (1 row)
+ * Layout (top to bottom, Claude Code style):
+ *   MessageList  (flexGrow=1 — all remaining space, includes banner as first item)
+ *   StatusLine   (1 row, fixed)
+ *   ApprovalPrompt (conditional)
+ *   InputBox     (4 rows, fixed)
+ *   FooterBar    (1 row, fixed)
+ *   SlashMenu    (conditional)
+ *   TaskPanel    (conditional)
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import os from "node:os";
-import { render, Box, useApp, useInput } from "ink";
+import { render, Box, Text, useApp, useInput } from "ink";
 import { enterTUI, exitTUI } from "./lib/ansi.js";
 import { useTerminalSize } from "./hooks/useTerminalSize.js";
 import { useAgentStream } from "./hooks/useAgentStream.js";
 import { useKeyHandler } from "./hooks/useKeyHandler.js";
 import { MessageList } from "./components/MessageList.js";
+import { StatusLine } from "./components/StatusLine.js";
 import { InputBox } from "./components/InputBox.js";
 import { FooterBar } from "./components/FooterBar.js";
 import { SlashMenu } from "./components/SlashMenu.js";
-import { ApprovalPrompt, type ApprovalChoice } from "./components/ApprovalPrompt.js";
+import {
+  ApprovalPrompt,
+  APPROVAL_PROMPT_HEIGHT,
+  type ApprovalChoice,
+} from "./components/ApprovalPrompt.js";
 import { useSlashCommands } from "./hooks/useSlashCommands.js";
 import { useTaskPanel } from "./hooks/useTaskPanel.js";
 import { TaskPanel } from "./components/TaskPanel.js";
-import { WelcomeBanner, WELCOME_BANNER_ROWS } from "./components/WelcomeBanner.js";
 import { AgentBridge } from "./agent-bridge.js";
 import type { AgentEvent, ApprovalResponse } from "@yuaone/core";
 import { checkForUpdate, loadSettings, saveSettings } from "./lib/update-checker.js";
+import { CompactBanner, COMPACT_BANNER_ROWS } from "./components/CompactBanner.js";
 import { executeCommand, type CommandContext } from "../commands/index.js";
 import type { ConfigManager } from "../config.js";
+
+// Debug logger — writes to ~/.yuan/logs/debug.log
+import fs from "node:fs";
+import path from "node:path";
+const _DLOG_FILE = path.join(os.homedir(), ".yuan", "logs", "debug.log");
+function dlog(layer: string, msg: string, data?: unknown) {
+  const now = new Date();
+  const ts = `${now.getHours().toString().padStart(2,"0")}:${now.getMinutes().toString().padStart(2,"0")}:${now.getSeconds().toString().padStart(2,"0")}.${now.getMilliseconds().toString().padStart(3,"0")}`;
+  const extra = data !== undefined ? " " + JSON.stringify(data) : "";
+  const line = `[${ts}] [${layer}] ${msg}${extra}\n`;
+  try { fs.appendFileSync(_DLOG_FILE, line); } catch {} // file only — no stderr
+}
 
 export interface AppProps {
   version: string;
@@ -104,6 +123,13 @@ function App({
           setReasoningContent((prev) => prev ? `${prev}${text}` : text);
         }
       }
+
+      // Clear approval state if agent errors while approval is pending
+      if (event.kind === "agent:error") {
+        approvalResolverRef.current = null;
+        setApprovalToolName(null);
+        setApprovalToolArgs(null);
+      }
     });
 
     bridge.onTermination(() => {
@@ -145,7 +171,10 @@ function App({
       setReasoningContent("");
 
       lastMessageRef.current = value;
-      bridgeRef.current.sendMessage(value).catch((err: Error) => {
+      dlog("APP", `user submitted message`, { msgLength: value?.length ?? 0, isAgentRunning: agentStream.state.status !== "idle" && agentStream.state.status !== "completed" && agentStream.state.status !== "error" && agentStream.state.status !== "interrupted" });
+      bridgeRef.current.sendMessage(value).then(() => {
+        dlog("APP", `sendMessage returned`);
+      }).catch((err: Error) => {
         agentStream.handleEvent({
           kind: "agent:error",
           message: err.message,
@@ -191,16 +220,17 @@ const moveQueued = useCallback((from: number, to: number) => {
   });
 }, []);
 const replaceQueued = useCallback((index: number, newContent: string) => {
-  const newId = `queued-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-  agentStream.addQueuedMessage(newContent, newId);
-  setQueuedMessageIds((prev) => {
-    const next = [...prev];
-    next.splice(index, 1, newId); // replace at same position → preserve execution order
-    return next;
-  });
-}, [agentStream]);
+  const oldId = queuedMessageIds[index];
+  if (!oldId) return;
+  // Update content in-place — no ghost messages, same ID preserved
+  agentStream.updateQueuedMessage(oldId, newContent);
+}, [agentStream, queuedMessageIds]);
 
   // Auto-send pending message when agent becomes idle/completed/interrupted
+  // Ref to always read the latest messages inside dequeue timer (avoids stale closure)
+  const latestMessagesRef = useRef(agentStream.state.messages);
+  latestMessagesRef.current = agentStream.state.messages;
+
   const prevStatusRef = useRef(agentStream.state.status);
   useEffect(() => {
     const prev = prevStatusRef.current;
@@ -214,9 +244,11 @@ const replaceQueued = useCallback((index: number, newContent: string) => {
 
     // Fast path: fire immediately on completed when queue has items (skip 3s idle delay)
     // Fallback: fire on idle transition (catches interrupted / manual stop)
+    // Only fire on idle if it was NOT already handled by the completed transition
+    const wasCompleted = prev === "completed";
     const shouldDequeue =
       (isNowCompleted && wasActivelyRunning && queuedMessageIds.length > 0) ||
-      (isNowIdle && wasRunning);
+      (isNowIdle && wasRunning && !wasCompleted);
 
     if (!shouldDequeue) return;
     if (dequeueInFlightRef.current) return;
@@ -231,10 +263,13 @@ const replaceQueued = useCallback((index: number, newContent: string) => {
       return;
     }
 
-    const content = queuedMsg.content;
     dequeueInFlightRef.current = true;
 
     const timer = setTimeout(() => {
+      // Read the LATEST content from the ref to avoid stale closure (H8 fix)
+      const freshMsg = latestMessagesRef.current.find((m) => m.id === queuedId);
+      const content = freshMsg?.content ?? queuedMsg.content;
+
       // Remove from queue first so the next queued item becomes visible immediately
       setQueuedMessageIds((prevIds) => prevIds.filter((id) => id !== queuedId));
 
@@ -245,6 +280,13 @@ const replaceQueued = useCallback((index: number, newContent: string) => {
       setReasoningContent("");
       lastMessageRef.current = content;
 
+      // Reset flag HERE — not in .finally(). sendMessage may be a long-running promise
+      // (resolves only when agent completes), keeping the flag true for the entire run.
+      // Resetting synchronously after dispatch lets the next queued message dequeue
+      // when this agent's completed→idle transition fires.
+      dequeueInFlightRef.current = false;
+
+      dlog("APP", `dequeuing message`, { queueLen: queuedMessageIds.length });
       Promise.resolve(bridgeRef.current.sendMessage(content))
         .catch((err: Error) => {
           agentStream.handleEvent({
@@ -252,9 +294,6 @@ const replaceQueued = useCallback((index: number, newContent: string) => {
             message: err.message,
             retryable: false,
           });
-        })
-        .finally(() => {
-          dequeueInFlightRef.current = false;
         });
     }, 100);
 
@@ -424,11 +463,13 @@ const replaceQueued = useCallback((index: number, newContent: string) => {
     (value: string) => {
       if (value.startsWith("/")) {
         slashActions.filter(value);
-      } else {
+      } else if (slashState.isOpen) {
+        // Only close if actually open — prevents unnecessary state updates on every keystroke
         slashActions.close();
       }
+      // If neither condition: slash menu closed + no slash prefix → no state change → no re-render
     },
-    [slashActions],
+    [slashActions, slashState.isOpen],
   );
 
   // Slash menu navigation
@@ -470,7 +511,7 @@ const replaceQueued = useCallback((index: number, newContent: string) => {
   const st = agentStream.state.status;
   const isRunning = st !== "idle" && st !== "completed" && st !== "error" && st !== "interrupted";
   const isAwaitingApproval = st === "awaiting_approval";
-
+  const approvalSlotHeight = isAwaitingApproval ? APPROVAL_PROMPT_HEIGHT : 0;
   // U key — one-key update when a new version is available
   const isUpdatingRef = useRef(false);
   useInput((input, key) => {
@@ -502,73 +543,54 @@ const replaceQueued = useCallback((index: number, newContent: string) => {
       });
   });
 
-  // Calculate how many rows the slash menu takes
-  // items (max 8) + top/bottom border (2) + up/down "more" indicators (0-2)
-  const slashMenuRows = useMemo(() => {
-    if (!slashState.isOpen) return 0;
-    const itemCount = Math.min(slashState.filtered.length, 8);
-    const moreIndicators = slashState.filtered.length > 8 ? 2 : 0; // ↑ more + ↓ more
-    return itemCount + 2 + moreIndicators;
-  }, [slashState.isOpen, slashState.filtered.length]);
+  const messages = agentStream.state.messages;
+
+  // Show banner only when terminal is tall enough
+  const showBanner = rows >= 16;
 
   // Task panel height when open
   const bgTasks = agentStream.state.backgroundTasks;
-  const taskPanelRows = useMemo(() => {
-    if (!taskPanel.isOpen || bgTasks.length === 0) return 0;
-    if (taskPanel.mode === "detail") {
-      const task = bgTasks.find((t) => t.id === taskPanel.detailTaskId);
-      return Math.min(10, (task?.steps.length ?? 0) + 4);
-    }
-    return Math.min(bgTasks.length + 3, 8); // header + rows + footer padding
-  }, [taskPanel.isOpen, taskPanel.mode, taskPanel.detailTaskId, bgTasks]);
 
-  const messages = agentStream.state.messages;
+return (
+  <Box flexDirection="column" width={columns} height={rows}>
 
-  const hasConversationMessages = useMemo(
-    () => messages.some((m) => m.role === "user" || m.role === "assistant"),
-    [messages],
-  );
-
-  const contentHeight = useMemo(
-    () =>
-      Math.max(
-        3,
-        rows
-          - 5
-          - slashMenuRows
-          - taskPanelRows,
-      ),
-    [rows, slashMenuRows, taskPanelRows],
-  );
-
-  return (
-    <Box flexDirection="column" width={columns} height={rows}>
-      <Box height={contentHeight} overflow="hidden">
-        <MessageList
-          messages={messages}
-          isThinking={isRunning}
-          maxHeight={contentHeight}
-          hasConversationMessages={hasConversationMessages}
-          welcomeBanner={
-            <WelcomeBanner
-              width={columns}
-              version={version}
-              model={currentModel}
-              provider={provider}
-              cwd={cwd}
-            />
-          }
-          welcomeBannerRows={WELCOME_BANNER_ROWS}
+    {/* Banner — fixed at top, always visible */}
+    {showBanner && (
+      <Box flexShrink={0}>
+        <CompactBanner
+          version={version}
+          model={currentModel}
+          provider={provider}
+          cwd={cwd}
+          width={columns}
         />
       </Box>
+    )}
 
-      {/* Approval prompt — shown when agent needs user approval for a tool call */}
-      {agentStream.state.status === "awaiting_approval" && (
-        <ApprovalPrompt
-     toolName={agentStream.state.currentToolName ?? "tool"}
-     toolArgs={agentStream.state.currentToolArgs ?? undefined}
-          onSelect={handleApproval}
-        />
+    {/* MessageList gets ALL remaining space via flexGrow */}
+    <Box flexGrow={1} flexShrink={1} overflow="hidden">
+      <MessageList
+        messages={messages}
+        isThinking={isRunning}
+        width={columns}
+        reservedTopRows={showBanner ? COMPACT_BANNER_ROWS : 0}
+      />
+    </Box>
+
+      {/* StatusLine — always 1 row */}
+      <Box height={1} flexShrink={0} overflow="hidden">
+        <StatusLine agentState={agentStream.state} />
+      </Box>
+
+      {/* Approval — only when needed */}
+      {isAwaitingApproval && (
+        <Box height={approvalSlotHeight} flexShrink={0} overflow="hidden">
+          <ApprovalPrompt
+            toolName={agentStream.state.currentToolName ?? "tool"}
+            toolArgs={agentStream.state.currentToolArgs ?? undefined}
+            onSelect={handleApproval}
+          />
+        </Box>
       )}
 
       {/* Input — above footer */}
@@ -582,6 +604,7 @@ const replaceQueued = useCallback((index: number, newContent: string) => {
         onSlashSelect={handleSlashSelect}
         onSlashClose={slashActions.close}
         isRunning={isRunning}
+        disabled={isAwaitingApproval}
         onQueueMessage={handleQueueMessage}
         pendingMessage={pendingMessage ?? undefined}
         pendingCount={pendingMessageCount}
@@ -589,7 +612,7 @@ const replaceQueued = useCallback((index: number, newContent: string) => {
 
   onQueueEdit={(index)=>{
     const id = queuedMessageIds[index];
-    if(!id) return null;
+    if(!id) return "";
     return getQueuedContent(id);
   }}
 
@@ -614,8 +637,8 @@ const replaceQueued = useCallback((index: number, newContent: string) => {
         hasBackgroundTasks={bgTasks.length > 0}
       />
 
-      {/* Status indicator — below input */}
-      <FooterBar agentState={agentStream.state} slashMenuOpen={slashState.isOpen} hasReasoning={false} />
+      {/* Footer — below input */}
+      <FooterBar agentState={agentStream.state} slashMenuOpen={slashState.isOpen} hasReasoning={reasoningContent.length > 0} />
 
       {/* Task panel — background agent list / detail view */}
       {taskPanel.isOpen && bgTasks.length > 0 && (
@@ -653,26 +676,36 @@ export interface TUIController {
  * Launch the TUI. Returns a controller.
  */
 export function launchTUI(props: Omit<AppProps, "bridge"> & { bridge: AgentBridge }): TUIController {
+  dlog("APP", "launchTUI: enterTUI");
   enterTUI();
+  dlog("APP", "launchTUI: calling render()");
 
   const { unmount } = render(
     <App {...props} />,
     { exitOnCtrlC: false },  // We handle Ctrl+C manually (double-press to exit)
   );
+  dlog("APP", "launchTUI: render() returned");
 
   const cleanup = () => {
     exitTUI();
     unmount();
   };
 
-  process.on("exit", cleanup);
-  process.on("SIGINT", () => {
+  const sigintHandler = () => {
     cleanup();
     process.exit(0);
-  });
+  };
+
+  /* M8 fix: use .once() to prevent listener accumulation */
+  process.once("exit", cleanup);
+  process.once("SIGINT", sigintHandler);
 
   return {
-    unmount: cleanup,
+    unmount: () => {
+      process.removeListener("exit", cleanup);
+      process.removeListener("SIGINT", sigintHandler);
+      cleanup();
+    },
     bridge: props.bridge,
   };
 }

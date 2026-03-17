@@ -1,5 +1,21 @@
 #!/usr/bin/env node
 
+// ─── Heap size guard ───────────────────────────────────────────────────────
+// Linux env shebang doesn't support args (--max-old-space-size=4096).
+// If NODE_OPTIONS doesn't include max-old-space-size, re-exec with it set.
+if (!process.env.NODE_OPTIONS?.includes("max-old-space-size")) {
+  const { execFileSync } = await import("node:child_process");
+  try {
+    execFileSync(process.execPath, process.argv.slice(1), {
+      stdio: "inherit",
+      env: { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --max-old-space-size=4096`.trim() },
+    });
+  } catch (e: unknown) {
+    process.exit((e as { status?: number }).status ?? 1);
+  }
+  process.exit(0);
+}
+
 /**
  * YUAN CLI — Main Entry Point
  *
@@ -22,6 +38,20 @@ import { SessionManager } from "./session.js";
 import { runOneshot } from "./oneshot.js";
 import { login, logout, getAuth } from "./auth.js";
 import { createRequire } from "node:module";
+import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, appendFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+function cliLog(msg: string): void {
+  try {
+    mkdirSync(join(homedir(), ".yuan"), { recursive: true });
+    const line = `[${new Date().toISOString()}] [CLI] ${msg}\n`;
+    appendFileSync(join(homedir(), ".yuan", "debug.log"), line);
+  } catch { /* non-fatal */ }
+}
+
+// Module-level log: runs immediately on import
+cliLog("cli.ts module loaded");
 
 const require = createRequire(import.meta.url);
 const PKG_VERSION: string = (require("../package.json") as { version: string }).version;
@@ -35,12 +65,73 @@ program
   .description("YUAN — Coding Agent")
   .version(PKG_VERSION);
 
-// ─── Default: Interactive mode (TUI) ───
+// ─── PID lock — kills zombie yuan on next launch ───────────────────────────
+
+const YUAN_DIR = join(homedir(), ".yuan");
+const PID_FILE = join(YUAN_DIR, "yuan.pid");
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function killZombieYuan(): void {
+  if (!existsSync(PID_FILE)) return;
+  try {
+    const raw = readFileSync(PID_FILE, "utf-8").trim();
+    const pid = parseInt(raw, 10);
+    if (!pid || pid === process.pid) return;
+
+    if (isProcessAlive(pid)) {
+      try { process.kill(pid, "SIGTERM"); } catch { /* already dead */ }
+      // Give it 800ms to die, then SIGKILL
+      const deadline = Date.now() + 800;
+      while (Date.now() < deadline && isProcessAlive(pid)) {
+        // busy wait is fine — this is startup, runs once
+      }
+      if (isProcessAlive(pid)) {
+        try { process.kill(pid, "SIGKILL"); } catch { /* ignore */ }
+      }
+    }
+  } catch { /* corrupt PID file — ignore */ }
+}
+
+function writePidFile(): void {
+  try {
+    mkdirSync(YUAN_DIR, { recursive: true });
+    writeFileSync(PID_FILE, String(process.pid), "utf-8");
+  } catch { /* non-fatal */ }
+}
+
+function removePidFile(): void {
+  try { unlinkSync(PID_FILE); } catch { /* already gone */ }
+}
+
+// ─── Default: Interactive mode ───
 program
-  .option("--classic", "Use classic readline REPL instead of full-screen TUI")
-  .action(async (options: { classic?: boolean }) => {
+  .option("--classic", "Use classic readline REPL instead of stream renderer")
+  .option("--tui-legacy", "Use legacy full-screen Ink TUI (deprecated)")
+  .action(async (options: { classic?: boolean; tuiLegacy?: boolean }) => {
+    // Kill any zombie yuan from a previous crashed session, then claim the PID slot
+    cliLog("action start: killZombieYuan");
+    killZombieYuan();
+    cliLog("killZombieYuan done: writePidFile");
+    writePidFile();
+    cliLog("writePidFile done");
+    // Clean up PID file on any exit (normal, crash, signal)
+    const _cleanup = () => removePidFile();
+    process.once("exit", _cleanup);
+    process.once("SIGINT",  () => { removePidFile(); process.exit(130); });
+    process.once("SIGTERM", () => { removePidFile(); process.exit(143); });
+    process.once("uncaughtException", (err) => { removePidFile(); console.error(err); process.exit(1); });
+
     const configManager = new ConfigManager();
     const sessionManager = new SessionManager();
+    cliLog(`isConfigured: ${configManager.isConfigured()}`);
 
     if (!configManager.isConfigured()) {
       renderer.banner();
@@ -49,7 +140,11 @@ program
       console.log();
     }
 
-    // Use classic mode if requested or not a TTY
+    const config = configManager.get();
+
+    cliLog(`isTTY: ${process.stdout.isTTY}, classic: ${options.classic}, tuiLegacy: ${options.tuiLegacy}`);
+
+    // Classic mode: old readline REPL (for piped/non-TTY or explicit)
     if (options.classic || !process.stdout.isTTY) {
       const session = new InteractiveSession(
         renderer,
@@ -60,10 +155,42 @@ program
       return;
     }
 
-    // Full-screen TUI mode (default)
-    const { launchTUI } = await import("./tui/App.js");
+    // Legacy Ink TUI mode (deprecated — kept for --tui-legacy flag only)
+    if (options.tuiLegacy) {
+      cliLog("legacy TUI mode requested");
+      try {
+        if (process.stdin.isTTY && (process.stdin as NodeJS.ReadStream & { isRaw?: boolean }).isRaw) {
+          process.stdin.setRawMode(false);
+        }
+        const { execSync } = await import("node:child_process");
+        execSync("stty sane 2>/dev/null", { stdio: "inherit" });
+      } catch { /* non-TTY or stty unavailable */ }
+
+      const { launchTUI } = await import("./tui/App.js");
+      const { AgentBridge } = await import("./tui/agent-bridge.js");
+      const bridge = new AgentBridge({
+        provider: config.provider || "openai",
+        apiKey: config.apiKey,
+        apiKeys: config.apiKeys,
+        model: config.model,
+        baseUrl: config.baseUrl,
+        workDir: process.cwd(),
+      });
+      launchTUI({
+        version: PKG_VERSION,
+        model: configManager.getModel(),
+        provider: config.provider || "openai",
+        bridge,
+        configManager,
+        onExit: () => { process.exit(0); },
+      });
+      return;
+    }
+
+    // ── Default: Native stream renderer (NEW — no Ink, no Yoga) ──
+    cliLog("stream renderer mode (default)");
     const { AgentBridge } = await import("./tui/agent-bridge.js");
-    const config = configManager.get();
+    const { launchStreamRenderer } = await import("./stream-renderer.js");
 
     const bridge = new AgentBridge({
       provider: config.provider || "openai",
@@ -74,15 +201,14 @@ program
       workDir: process.cwd(),
     });
 
-    launchTUI({
+    cliLog("bridge created, launching stream renderer...");
+    launchStreamRenderer({
       version: PKG_VERSION,
       model: configManager.getModel(),
       provider: config.provider || "openai",
       bridge,
       configManager,
-      onExit: () => {
-        process.exit(0);
-      },
+      onExit: () => { process.exit(0); },
     });
   });
 

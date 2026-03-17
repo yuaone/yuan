@@ -49,6 +49,7 @@ export { FileReadTool } from './file-read.js';
 export { FileWriteTool } from './file-write.js';
 export { FileEditTool } from './file-edit.js';
 export { ShellExecTool } from './shell-exec.js';
+export { BashTool } from './bash.js';
 export { GrepTool } from './grep.js';
 export { GlobTool } from './glob.js';
 export { GitOpsTool } from './git-ops.js';
@@ -58,9 +59,12 @@ export { SecurityScanTool } from './security-scan.js';
 export type { SecurityFinding, SecurityReport, FindingSeverity } from './security-scan.js';
 export { BrowserTool } from './browser-tool.js';
 export { WebSearchTool } from './web-search.js';
+export type { GeminiSearchConfig } from './web-search.js';
+export { ParallelWebSearchTool } from './parallel-web-search.js';
 
 // Registry
 export { ToolRegistry, createDefaultRegistry, createDesignRegistry } from './tool-registry.js';
+export type { RegistryOptions } from './tool-registry.js';
 
 // Dev Server Manager (Design Mode)
 export { DevServerManager } from './dev-server-manager.js';

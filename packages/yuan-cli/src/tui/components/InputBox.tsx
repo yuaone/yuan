@@ -6,8 +6,9 @@
  * Esc → close slash menu or interrupt agent.
  */
 
-import React, { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import React, { memo, useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { Box, Text, useInput } from "ink";
+import stringWidth from "string-width";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
 import { useInputHistory } from "../hooks/useInputHistory.js";
 import { isKnownCommand } from "../hooks/useSlashCommands.js";
@@ -46,7 +47,7 @@ export interface InputBoxProps {
   hasBackgroundTasks?: boolean;
 }
 
-export function InputBox({
+export const InputBox = memo(function InputBox({
   onSubmit,
   onInterrupt,
   onSlashCommand,
@@ -153,8 +154,21 @@ export function InputBox({
 
   // Sync cursor + content when queuedMessages prop changes while in queue mode
   // (e.g. after delete, the parent re-renders with the new array — this corrects stale reads)
+  // Use a content hash ref to prevent re-triggering when array reference changes but content is same
+  const prevQueueHashRef = useRef("");
+  const queueLen = queuedMessages?.length ?? 0;
+  const queueHash = useMemo(() => {
+    if (!queuedMessages?.length) return "";
+    // Simple content hash: join lengths + first 20 chars of each item
+    return queuedMessages.map((m) => `${m.length}:${m.slice(0, 20)}`).join("|");
+  }, [queuedMessages]);
+
   useEffect(() => {
     if (!queueMode) return;
+    // Skip if content hasn't actually changed
+    if (queueHash === prevQueueHashRef.current && queueLen > 0) return;
+    prevQueueHashRef.current = queueHash;
+
     const msgs = queuedMessages;
     if (!msgs?.length) {
       exitQueueMode(true);
@@ -163,8 +177,7 @@ export function InputBox({
     const clamped = Math.min(queueCursor, msgs.length - 1);
     if (clamped !== queueCursor) setQueueCursor(clamped);
     updateValue(msgs[clamped] ?? "");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [queuedMessages]); // intentionally only on queuedMessages change
+  }, [queueHash, queueLen, queueMode, queueCursor, exitQueueMode, updateValue, queuedMessages]);
 
   useInput(
     (input, key) => {
@@ -172,11 +185,11 @@ export function InputBox({
 
      // ---- terminal escape guard (mouse / wheel / ssh fragments) ----
    if (typeof input === "string") {
-  // GCP Web SSH mouse fragments
-  if (/^[\[<;0-9mM]+$/.test(input)) {
+  // GCP Web SSH mouse fragments — must start with '[' or '<' to avoid catching ';' alone
+  if (/^\[<[\d;]+[mM]?$/.test(input) || /^\[[\d;]+[mM]$/.test(input)) {
     return;
   }
-  // residual SGR mouse fragments (Ink sometimes strips ESC)
+  // residual SGR mouse fragments (Ink sometimes strips ESC): digits;digits;digitsM
   if (/^\d+;\d+;\d+[mM]$/.test(input)) {
     return;
   }
@@ -411,12 +424,25 @@ export function InputBox({
           }
           return;
         }
-        if (cursorPos > 0) {
-          const newVal = value.slice(0, cursorPos - 1) + value.slice(cursorPos);
-          updateValue(newVal, cursorPos - 1);
-          if (!newVal.startsWith("/") && slashMenuOpen) {
-            onSlashClose?.();
+        // Functional update: each rapid backspace operates on the LATEST state,
+        // not stale closure values. Fixes rapid-delete and text-reversal bugs.
+        setInputState((s) => {
+          if (s.cursor <= 0) return s;
+          const nv = s.value.slice(0, s.cursor - 1) + s.value.slice(s.cursor);
+          const nc = s.cursor - 1;
+          if (onInputChange) {
+            if (inputChangeTimerRef.current) clearTimeout(inputChangeTimerRef.current);
+            inputChangeTimerRef.current = setTimeout(() => {
+              onInputChange(nv);
+              inputChangeTimerRef.current = null;
+            }, 80);
           }
+          return { value: nv, cursor: nc };
+        });
+        // Slash close: approximate with current render values (acceptable)
+        if (cursorPos > 0) {
+          const approxNew = value.slice(0, cursorPos - 1) + value.slice(cursorPos);
+          if (!approxNew.startsWith("/") && slashMenuOpen) onSlashClose?.();
         }
         return;
       }
@@ -428,7 +454,8 @@ export function InputBox({
         // Also filter residual [ABCD] from SSH (ESC consumed by Ink, leaving "[D" etc.)
         // Completely ignore residual mouse / wheel fragments
         // Common in GCP Web SSH where ESC gets stripped
-        if (/^[\[<;0-9mM]+$/.test(input)) {
+        // Mouse fragment filter: requires digits (e.g. "64;3m") — standalone "m"/"M" must pass through
+        if (/^[\[<;0-9mM]+$/.test(input) && /\d/.test(input)) {
           return;
         }
 
@@ -458,9 +485,21 @@ export function InputBox({
             showPasteBadge(cleaned.length);
           }
 
-          // Insert at cursor position
-          const newVal = value.slice(0, cursorPos) + normalized + value.slice(cursorPos);
-          updateValue(newVal, cursorPos + normalized.length);
+          // Functional update: each keypress inserts at the LATEST cursor,
+          // not a stale closure value. Fixes text-reversal on rapid typing.
+          const norm = normalized;
+          setInputState((s) => {
+            const nv = s.value.slice(0, s.cursor) + norm + s.value.slice(s.cursor);
+            const nc = s.cursor + norm.length;
+            if (onInputChange) {
+              if (inputChangeTimerRef.current) clearTimeout(inputChangeTimerRef.current);
+              inputChangeTimerRef.current = setTimeout(() => {
+                onInputChange(nv);
+                inputChangeTimerRef.current = null;
+              }, 80);
+            }
+            return { value: nv, cursor: nc };
+          });
         }
       }
     },
@@ -546,7 +585,7 @@ const separator = useMemo(() => {
   }, [columns]);
 
   return (
-    <Box width={columns} flexDirection="column" flexShrink={0}>
+    <Box width={columns} flexDirection="column" flexShrink={0} height={4} overflow="hidden">
       {/* Queue nav header (queue mode) OR pending message hint — fixed 1 row */}
       <Box height={1}>
         {queueMode && queuedMessages ? (
@@ -574,37 +613,114 @@ const separator = useMemo(() => {
       </Box>
       {/* Top border */}
       <Text dimColor>{boxTop}</Text>
-      {/* Input row inside box */}
-      <Box justifyContent="space-between">
-        <Box flexShrink={1}>
-          <Text dimColor>{"\u2502"} </Text>
-          {queueMode ? (
-            <>
-              <Text color="#6366f1">✎ </Text>
-              <Text wrap="truncate">{inputLine}</Text>
-            </>
-          ) : isRunning && !value ? (
-            <Text dimColor wrap="truncate">Message YUAN...</Text>
-          ) : !value && !isRunning ? (
-            <>
-              <Text dimColor>{prompt} </Text>
-              <Text wrap="truncate">{inputLine}</Text>
-              {!inputLine && <Text dimColor wrap="truncate">Message YUAN...</Text>}
-            </>
-          ) : (
-            <>
-              <Text dimColor>{prompt} </Text>
-              <Text wrap="truncate">{inputLine}</Text>
-            </>
-          )}
-        </Box>
-        <Box flexShrink={0}>
-          {pasteBadge ? <Text dimColor>{pasteBadge} </Text> : null}
-          <Text dimColor>{"\u2502"}</Text>
-        </Box>
-      </Box>
+      {/* Input rows — multi-line support */}
+      {(() => {
+        // Calculate available content width:
+        // columns - 2 (box borders "│") - 2 (spaces after/before "│") - prefix width
+        // prefix = "│ " (2) already counted, then "> " or "✎ " (2) = 4 total overhead
+        const prefixWidth = queueMode ? 2 : isSlash ? 0 : (prompt.length + 1); // "> " or "" for slash
+        // "│ " left border (2) + prefix + " │" right border (2) = 4 + prefixWidth
+        const contentWidth = Math.max(20, columns - 4 - prefixWidth);
+
+        // Split displayValue into wrapped lines (CJK-aware via stringWidth)
+        const wrappedLines: string[] = [];
+        if (!displayValue) {
+          wrappedLines.push("");
+        } else {
+          let remaining = displayValue;
+          while (remaining.length > 0) {
+            let cutAt = remaining.length;
+            let w = 0;
+            for (let i = 0; i < remaining.length; i++) {
+              const charW = stringWidth(remaining[i] ?? "");
+              if (w + charW > contentWidth) { cutAt = i; break; }
+              w += charW;
+            }
+            if (cutAt === 0) cutAt = 1; // guard: always advance at least 1 char
+            wrappedLines.push(remaining.slice(0, cutAt));
+            remaining = remaining.slice(cutAt);
+          }
+        }
+
+        return wrappedLines.map((line, lineIdx) => {
+          const lineStart = wrappedLines.slice(0, lineIdx).reduce((s, l) => s + l.length, 0);
+          const lineEnd = lineStart + line.length;
+          const isFirstLine = lineIdx === 0;
+
+          // Build line content with cursor inserted at correct position
+          let lineContent: string;
+          if (showCursor && clampedCursor >= lineStart && clampedCursor <= lineEnd) {
+            const localCursor = clampedCursor - lineStart;
+            if (isSlash) {
+              // Re-apply slash coloring for this line segment
+              const color = cmdRecognized ? FG_CYAN : FG_RED;
+              const absStart = lineStart;
+              const tokenEndInLine = Math.max(0, cmdToken.length - absStart);
+              const localBefore = line.slice(0, localCursor);
+              const cursorChar = line[localCursor] ?? " ";
+              const localAfter = line.slice(localCursor + 1);
+              if (localCursor <= tokenEndInLine) {
+                // cursor is inside the command token portion
+                const leftToken = localBefore;
+                const rightToken = line.slice(localCursor, tokenEndInLine);
+                const rest = line.slice(tokenEndInLine);
+                lineContent = `${color}${leftToken}${CURSOR_OFF}${CURSOR_ON}${cursorChar}${CURSOR_OFF}${color}${rightToken}${FG_RESET}${rest}`;
+              } else {
+                lineContent = `${color}${line.slice(0, tokenEndInLine)}${FG_RESET}${localBefore.slice(tokenEndInLine)}${CURSOR_ON}${cursorChar}${CURSOR_OFF}${localAfter}`;
+              }
+            } else {
+              const before = line.slice(0, localCursor);
+              const cursorChar = line[localCursor] ?? " ";
+              const after = line.slice(localCursor + 1);
+              lineContent = `${before}${CURSOR_ON}${cursorChar}${CURSOR_OFF}${after}`;
+            }
+          } else {
+            // No cursor on this line — apply slash coloring if needed
+            if (isSlash && isFirstLine) {
+              const color = cmdRecognized ? FG_CYAN : FG_RED;
+              const tokenPart = line.slice(0, cmdToken.length);
+              const restPart = line.slice(cmdToken.length);
+              lineContent = `${color}${tokenPart}${FG_RESET}${restPart}`;
+            } else {
+              lineContent = line;
+            }
+          }
+
+          return (
+            <Box key={lineIdx} justifyContent="space-between">
+              <Box flexShrink={1}>
+                <Text dimColor>{"│"} </Text>
+                {isFirstLine && queueMode && <Text color="#6366f1">✎ </Text>}
+                {!isFirstLine && <Text>{"  "}</Text>}
+                {isFirstLine && isRunning && !displayValue
+                  ? <Text dimColor>Message YUAN...</Text>
+                  : isFirstLine && !displayValue && !isRunning
+                  ? (
+                    <>
+                      {!queueMode && <Text dimColor>{prompt} </Text>}
+                      <Text dimColor>Message YUAN...</Text>
+                    </>
+                  )
+                  : isFirstLine && !queueMode
+                  ? (
+                    <>
+                      {!isSlash && <Text dimColor>{prompt} </Text>}
+                      <Text>{lineContent}</Text>
+                    </>
+                  )
+                  : <Text>{lineContent}</Text>
+                }
+              </Box>
+              <Box flexShrink={0}>
+                {isFirstLine && pasteBadge ? <Text dimColor>{pasteBadge} </Text> : null}
+                <Text dimColor>{"│"}</Text>
+              </Box>
+            </Box>
+          );
+        });
+      })()}
       {/* Bottom border */}
       <Text dimColor>{boxBottom}</Text>
     </Box>
   );
-}
+});

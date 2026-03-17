@@ -48,14 +48,46 @@ function clipDisplay(text: string, maxWidth: number): string {
   let out = "";
   let width = 0;
 
-  for (const ch of text) {
+  for (const ch of [...text]) {
     const w = stringWidth(ch);
     if (width + w >= maxWidth) break;
     out += ch;
     width += w;
   }
 
-  return out + "…";
+  return width < stringWidth(text) ? out + "…" : out;
+}
+
+/**
+ * CJK-aware soft wrap: breaks text at character boundaries respecting display width.
+ * Unlike Ink's built-in wrap which only breaks on spaces, this handles Korean/Chinese/Japanese
+ * where words have no spaces between them.
+ */
+function cjkWrap(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) return text;
+  const lines: string[] = [];
+  let current = "";
+  let currentWidth = 0;
+
+  for (const ch of [...text]) {
+    if (ch === "\n") {
+      lines.push(current);
+      current = "";
+      currentWidth = 0;
+      continue;
+    }
+    const w = stringWidth(ch);
+    if (currentWidth + w > maxWidth) {
+      lines.push(current);
+      current = ch;
+      currentWidth = w;
+    } else {
+      current += ch;
+      currentWidth += w;
+    }
+  }
+  if (current) lines.push(current);
+  return lines.join("\n");
 }
 
 function padDisplay(text: string, width: number, align: "left" | "center" | "right"): string {
@@ -196,6 +228,148 @@ function CodeLine({
       ))}
     </Text>
   );
+}
+
+/**
+ * splitKoreanSentenceBoundaries — splits sentence runs within a single line.
+ *
+ * "볼게.어, 있네!" → "볼게.\n어, 있네!"
+ * "있어. 아" → "있어.\n아"
+ *
+ * Only applies outside code fences. Only splits before Korean characters
+ * (가-힣) to avoid false positives on URLs, numbers, English abbreviations.
+ */
+function splitKoreanSentenceBoundaries(text: string): string {
+  const isFence = (s: string) => /^\s*`{3,}/.test(s);
+  const isBlock = (s: string) =>
+    /^(\s*)(```|#{1,6}\s|>|- |\* |\||\d{1,2}[.)]\s+)/.test(s.trim()) ||
+    /[↓→⇒├└│]/.test(s);
+
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let inFence = false;
+
+  for (const raw of lines) {
+    const trimmed = raw.trim();
+    if (isFence(trimmed)) {
+      inFence = !inFence;
+      out.push(raw);
+      continue;
+    }
+    if (inFence || isBlock(trimmed) || !trimmed) {
+      out.push(raw);
+      continue;
+    }
+    // Split at [.?!。] followed by optional whitespace then Korean character
+    const parts = raw.split(/(?<=[.?!。])\s*(?=[가-힣])/);
+    for (const part of parts) {
+      const p = part.trim();
+      if (p) out.push(p);
+    }
+  }
+
+  return out.join("\n");
+}
+
+/**
+ * normalizeChatParagraphs — ported from yua-web/src/components/common/Markdown.tsx
+ *
+ * Inserts blank lines at natural paragraph boundaries so parseBlocks
+ * gets clean paragraph separation:
+ *   - sentence endings (., 다., ?, !, …) → new paragraph
+ *   - numbered list leads → forced blank before
+ *   - colon + list transition → blank inserted
+ *   - label patterns (요약:, 결론:, etc.) → structured output
+ * Code fences are protected throughout.
+ *
+ * Pre-processes with splitKoreanSentenceBoundaries to handle sentences
+ * on the same line (e.g. "볼게.어, 있네!").
+ */
+function normalizeChatParagraphs(input: string): string {
+  const lines = splitKoreanSentenceBoundaries(
+    (input ?? "").replace(/\r\n/g, "\n"),
+  ).split("\n");
+  const out: string[] = [];
+  let inFence = false;
+
+  const isFence = (s: string) => /^\s*`{3,}[a-zA-Z0-9_-]*\s*$/.test(s);
+  const isBlockLine = (s: string) =>
+    /^(\s*)(```|#{1,6}\s|>|- |\* |\||\d{1,2}[.)]\s+)/.test(s.trim()) ||
+    /^\d+\s*단계[:.\-]?\s*/.test(s.trim()) ||
+    /^\//.test(s) ||
+    /[↓→⇒├└│]/.test(s);
+  const isPlain = (s: string) => s.trim() !== "" && !isBlockLine(s);
+
+  const lastOutLine = () => {
+    for (let i = out.length - 1; i >= 0; i--) {
+      if (out[i] !== "") return out[i];
+    }
+    return "";
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i] ?? "";
+    const line = raw.replace(/\s+$/g, "");
+    const trimmed = line.trim();
+
+    // fence toggle — don't process inside code blocks
+    if (isFence(trimmed)) {
+      out.push(line);
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) {
+      out.push(raw);
+      continue;
+    }
+
+    if (trimmed === "") {
+      out.push("");
+      continue;
+    }
+
+    // Label patterns: "요약: 내용" → structured bold label
+    const label = trimmed.match(/^(요약|결론|핵심|정리|주의|중요)\s*[:：]\s*(.+)$/);
+    if (label) {
+      const prev = lastOutLine();
+      if (prev && isPlain(prev)) out.push("");
+      out.push(`**${label[1]}:**`);
+      out.push("");
+      out.push(label[2] ?? "");
+      continue;
+    }
+
+    const prev = lastOutLine();
+
+    // Sentence-ending based paragraph break
+    const endsLikeSentence =
+      prev && /(\.|다\.|\?|!|…|。)$/.test(prev.trim());
+    if (
+      prev &&
+      isPlain(prev) &&
+      isPlain(line) &&
+      endsLikeSentence &&
+      !/^#{1,6}\s/.test(prev.trim())
+    ) {
+      out.push("");
+    }
+
+    // Numbered lead → forced blank before
+    if (prev && /^\d{1,2}[.)]\s+/.test(trimmed)) {
+      out.push("");
+    }
+
+    // Colon ending + list start → blank
+    const endsWithColon = prev && /[:：]\s*$/.test(prev.trim());
+    const startsLikeList = /^([-*]\s|✅)/.test(trimmed);
+    if (prev && isPlain(prev) && isPlain(line) && endsWithColon && startsLikeList) {
+      out.push("");
+    }
+
+    out.push(line);
+  }
+
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]+\n/g, "\n");
 }
 
 function parseBlocks(content: string): RenderedBlock[] {
@@ -409,7 +583,7 @@ function InlineText({ text }: { text: string }): React.JSX.Element {
 
   while ((match = regex.exec(text)) !== null) {
     if (match.index > lastIndex) {
-      parts.push(<Text key={key++}>{text.slice(lastIndex, match.index)}</Text>);
+      parts.push(<Text key={key++} color="white">{text.slice(lastIndex, match.index)}</Text>);
     }
 
     if (match[2]) {
@@ -425,20 +599,38 @@ function InlineText({ text }: { text: string }): React.JSX.Element {
         </Text>,
       );
     } else if (match[4]) {
-      parts.push(
-        <Text key={key++} color="white" backgroundColor="#1f2937">
-          {" "}
-          {match[4]}
-          {" "}
-        </Text>,
-      );
+      // Long inline code: render on its own line to prevent mid-backtick wrapping
+      const codeWidth = stringWidth(match[4]) + 2; // +2 for padding spaces
+      if (codeWidth > 60) {
+        parts.push(
+          <Text key={key++}>{"\n"}</Text>,
+        );
+        parts.push(
+          <Text key={key++} color="white" backgroundColor="#1f2937">
+            {" "}
+            {match[4]}
+            {" "}
+          </Text>,
+        );
+        parts.push(
+          <Text key={key++}>{"\n"}</Text>,
+        );
+      } else {
+        parts.push(
+          <Text key={key++} color="white" backgroundColor="#1f2937">
+            {" "}
+            {match[4]}
+            {" "}
+          </Text>,
+        );
+      }
     }
 
     lastIndex = match.index + match[0].length;
   }
 
   if (lastIndex < text.length) {
-    parts.push(<Text key={key++}>{text.slice(lastIndex)}</Text>);
+    parts.push(<Text key={key++} color="white">{text.slice(lastIndex)}</Text>);
   }
 
   return <Text>{parts}</Text>;
@@ -456,7 +648,9 @@ function TableBlock({
   if (rows.length === 0) return <Box />;
 
   const numCols = Math.max(...rows.map((row) => row.length));
-  const usableWidth = Math.max(20, width - (numCols + 1));
+  const rawUsableWidth = Math.max(20, width - (numCols * 3 + 1));
+  // Ensure at least 8 chars per column so widths never underflow
+  const usableWidth = Math.max(numCols * 8, rawUsableWidth);
   const colWidths: number[] = [];
 
   for (let c = 0; c < numCols; c += 1) {
@@ -519,7 +713,7 @@ function renderBlock(block: RenderedBlock, idx: number, width: number): React.JS
     }
 
     case "code": {
-      const maxW = Math.max(10, width - 4);
+      const maxW = Math.max(10, width - 6);
       const lines = block.content.split("\n");
 
       return (
@@ -579,12 +773,20 @@ function renderBlock(block: RenderedBlock, idx: number, width: number): React.JS
 
     case "paragraph":
     default: {
-      const lines = block.content.split("\n");
+      // Join soft line breaks, then CJK-aware wrap to terminal width
+      const joined = block.content
+        .split("\n")
+        .map(l => l.trim())
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s{2,}/g, " ")
+        .trim();
+      const wrapped = cjkWrap(joined, width);
 
       return (
-        <Box key={idx} flexDirection="column" marginBottom={1}>
-          {lines.map((line, lineIdx) => (
-            <InlineText key={lineIdx} text={line} />
+        <Box key={idx} marginBottom={1} flexDirection="column">
+          {wrapped.split("\n").map((line, li) => (
+            <InlineText key={li} text={line} />
           ))}
         </Box>
       );
@@ -596,11 +798,13 @@ export const MarkdownRenderer = React.memo(function MarkdownRenderer({
   content,
   width,
 }: MarkdownRendererProps): React.JSX.Element {
-  const blocks = parseBlocks(content);
+  const safeWidth = Math.max(24, width - 1);
+  // Normalize paragraph breaks using yua-web's battle-tested logic before parsing
+  const blocks = parseBlocks(normalizeChatParagraphs(content));
 
   return (
     <Box flexDirection="column">
-      {blocks.map((block, i) => renderBlock(block, i, width))}
+      {blocks.map((block, i) => renderBlock(block, i, safeWidth))}
     </Box>
   );
 });

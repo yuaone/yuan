@@ -215,6 +215,10 @@ export type {
   FailureRecoveryConfig,
 } from "./failure-recovery.js";
 
+// ─── Patch Transaction Journal ───
+export { PatchTransactionJournal } from "./patch-transaction.js";
+export type { PatchJournalEntry, RollbackPoint } from "./patch-transaction.js";
+
 // ─── Dependency Analyzer ───
 export { DependencyAnalyzer } from "./dependency-analyzer.js";
 export type {
@@ -715,6 +719,18 @@ export type { DesignLoopOptions } from "./design-loop.js";
 export { TaskClassifier, TaskType } from "./task-classifier.js";
 export type { TaskClassification } from "./task-classifier.js";
 
+// ─── Security Gate (Tool Input Checker) ───
+export { securityCheck, checkShellSecurity, checkFileSecurity } from "./security-gate.js";
+export type { SecurityVerdict, SecurityCheckResult } from "./security-gate.js";
+
+// ─── Verifier Rules (Deterministic Tool Result Verification) ───
+export { verifyToolResult } from "./verifier-rules.js";
+export type { VerifyVerdict, VerifyResult as ToolVerifyResult } from "./verifier-rules.js";
+
+// ─── Dependency Guard (Dependency Change Detection) ───
+export { checkDependencyChange } from "./dependency-guard.js";
+export type { DependencyChangeKind, DepGuardResult } from "./dependency-guard.js";
+
 // ─── Prompt Defense ───
 export { PromptDefense } from "./prompt-defense.js";
 export type {
@@ -1055,3 +1071,129 @@ export type { CausalChainResult } from "./causal-chain-resolver.js";
 // ─── Vision Intent Detector ───
 export { VisionIntentDetector } from "./vision-intent-detector.js";
 export type { VisionIntent } from "./vision-intent-detector.js";
+
+// ─── Image Observer ───
+export { observeImage } from "./image-observer.js";
+export type { ImageHint, ImageObservation } from "./image-observer.js";
+
+// ─── Code Orchestrator (SSOT) ───
+export { CodeOrchestrator, codeOrchestrator } from "./code-orchestrator.js";
+export type { TodoMatch, QualityReport } from "./code-orchestrator.js";
+
+// ─── Prompt 3-Layer Architecture ───
+export { compilePromptEnvelope } from "./prompt-runtime.js";
+export type { PromptRuntimeInput } from "./prompt-runtime.js";
+export { buildPrompt } from "./prompt-builder.js";
+export type { PromptEnvelope, PromptSection } from "./prompt-envelope.js";
+export { section } from "./prompt-envelope.js";
+export { SYSTEM_CORE, SYSTEM_REINFORCE, getSystemCoreSections, getReinforceSections } from "./system-core.js";
+
+// ─── Judgment Rules ───
+export { JudgmentRuleRegistry } from "./judgment-rules.js";
+export type { JudgmentRule, JudgmentAction, JudgmentResult } from "./judgment-rules.js";
+
+// ─── Memory Decay ───
+export { decayConfidence, applyDecayToEntries, detectConflict } from "./memory-decay.js";
+export type { DecayableEntry, DecayConfig } from "./memory-decay.js";
+
+// ─── Agent Decision Engine ───
+export { agentDecide, deriveInteractionMode, worldStateToProjectContext, DEFAULT_DECISION } from "./agent-decision.js";
+export { agentReason, sanitizeForReasoning } from "./agent-reasoning-engine.js";
+export type { CodeErrorType, CodeFeatures } from "./agent-reasoning-engine.js";
+export { computeAgentAffordance } from "./agent-affordance.js";
+export type {
+  AgentDecisionContext,
+  AgentDecisionCore,
+  AgentDecisionMeta,
+  AgentReasoningResult,
+  AgentAffordanceVector,
+  AgentProjectContext,
+  AgentIntent,
+  IntentFamily,
+  InteractionMode,
+  AgentTaskStage,
+  AgentComplexity,
+  AgentFlowAnchor,
+  AgentNextAction,
+  ClarificationRequest,
+  AgentComputePolicy,
+  AgentFailureSurface,
+  AgentVetoFlags,
+  AgentToolBudget,
+  AgentMemoryIntent,
+  AgentMemoryCategory,
+  AgentTaskContinuation,
+  AgentSubAgentPlan,
+  AgentSkillActivation,
+  AgentCodeQualityPolicy,
+  AgentPersonaHint,
+  AgentMemoryLoad,
+  RecoveryHint,
+  BudgetEnforcementMode,
+  AgentLeadHint,
+  AgentResponseHint,
+  AgentToolLevel,
+  AgentToolGate,
+  AgentResponsePressure,
+  AgentPressureDecision,
+  AgentContinuityCapsule,
+  AgentStyleHint,
+} from "./agent-decision-types.js";
+export { INTENT_FAMILY } from "./agent-decision-types.js";
+export { applyStuckBreaker, cosineEase, cosineSimilarity } from "./agent-affordance.js";
+
+// ─── Test Impact Planner ───
+export { resolveVerificationScope } from "./test-impact-planner.js";
+export type { VerificationScope, VerificationScopeLevel } from "./test-impact-planner.js";
+
+// ─── Execution Receipt ───
+export { buildReceipt, saveReceipt } from "./execution-receipt.js";
+export type { ExecutionReceipt } from "./execution-receipt.js";
+
+// ─── Repo Capability Profile ───
+export { scanRepoCapability, loadOrScanProfile } from "./repo-capability-profile.js";
+export type { RepoCapabilityProfile } from "./repo-capability-profile.js";
+
+// ─── Failure Surface Writer (P2-1 Telemetry) ───
+export { writeFailureSurface, classifyFailure } from "./failure-surface-writer.js";
+export type { FailureSurfaceEntry } from "./failure-surface-writer.js";
+
+// ─── Self Evaluation (P2-2) ───
+export { selfEvaluate } from "./self-evaluation.js";
+export type { SelfEvalResult } from "./self-evaluation.js";
+
+// ─── File Chunker (P2-3) ───
+export { chunkFile, chunkSummary } from "./file-chunker.js";
+export type { FileChunk, ChunkResult } from "./file-chunker.js";
+
+// ─── Tool Outcome Cache (P2-5) ───
+export { ToolOutcomeCache } from "./tool-outcome-cache.js";
+export type { CachedOutcome } from "./tool-outcome-cache.js";
+
+// ─── Workspace Mutation Policy (Safety Floor) ───
+export { WorkspaceMutationPolicy } from "./workspace-mutation-policy.js";
+export type { MutationZone, PathMutationPolicy, MutationCheckResult } from "./workspace-mutation-policy.js";
+
+// ─── Pre-Write Validator (Quality Gate) ───
+export { validateBeforeWrite, detectFileRole } from "./pre-write-validator.js";
+export type { FileRole, ValidationContext, PreWriteResult, PreWriteIssue } from "./pre-write-validator.js";
+
+// ─── Patch Scope Controller (Scope Limiter) ───
+export { PatchScopeController, deriveScopeLimit, detectRepoLifecycle } from "./patch-scope-controller.js";
+export type { PatchScopeLimit, PatchScopeState, ScopeCheckResult, RepoLifecycle } from "./patch-scope-controller.js";
+
+// ─── Command Plan Compiler (Execution Control) ───
+export { compileVerifyCommands, compileBuildCommands, compileTestCommands, classifyCommand, validateProposedCommand } from "./command-plan-compiler.js";
+export type { CommandPurpose, CommandPlanMode, CommandPlan, CommandCompilerInput } from "./command-plan-compiler.js";
+
+// ─── Semantic Diff Reviewer (Execution Control) ───
+export { reviewFileDiff, reviewDiffBatch } from "./semantic-diff-reviewer.js";
+export type { SemanticChangeKind, SemanticDiffReview } from "./semantic-diff-reviewer.js";
+
+// ─── Target File Ranker (Post-Retrieval Reranker) ───
+export { rankFileCandidates, formatRankingHint } from "./target-file-ranker.js";
+export type { FileCandidateScore, RankerInput } from "./target-file-ranker.js";
+
+// ─── Model Weakness Tracker (Learning Layer) ───
+export { ModelWeaknessTracker } from "./model-weakness-tracker.js";
+export type { ModelWeaknessEntry, ModelWeaknessScope } from "./model-weakness-tracker.js";

@@ -49,6 +49,7 @@ import {
   YUAN_GITIGNORE_ENTRY,
   YUAN_MD_SEARCH_PATHS,
 } from "./constants.js";
+import { applyDecayToEntries } from "./memory-decay.js";
 // ─── Types ───
 
 /** 코드베이스에서 발견된 패턴 */
@@ -162,6 +163,40 @@ export class MemoryManager {
       await access(memoryJsonPath);
       const raw = await readFile(memoryJsonPath, "utf-8");
       this.memory = this.parseMemoryJson(raw);
+
+      // Apply memory decay: older learnings lose confidence, prune below threshold
+      if (this.memory.learnings.length > 0) {
+        const { kept, pruned } = applyDecayToEntries(
+          this.memory.learnings.map(l => ({
+            ...l,
+            confidence: l.confidence ?? 1.0,
+            timestamp: l.createdAt ?? Date.now(),
+            category: l.category,
+          })),
+          { halfLifeDays: 30, minConfidence: 0.15, protectedCategories: ["project_rule"] },
+        );
+
+        if (pruned.length > 0) {
+          // Map back to Learning shape (restore createdAt from timestamp)
+          this.memory.learnings = kept.map(entry => ({
+            category: entry.category ?? "general",
+            content: (entry as unknown as Learning).content,
+            confidence: entry.confidence,
+            sessionCount: (entry as unknown as Learning).sessionCount ?? 1,
+            createdAt: entry.timestamp,
+          }));
+          // Save pruned result back
+          await this.save(this.memory);
+        } else {
+          // Update confidence values in-place (decay applied but nothing pruned)
+          for (let i = 0; i < this.memory.learnings.length; i++) {
+            if (kept[i]) {
+              this.memory.learnings[i]!.confidence = kept[i]!.confidence;
+            }
+          }
+        }
+      }
+
       return { ...this.memory };
     } catch {
       // continue

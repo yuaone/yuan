@@ -39,6 +39,8 @@ export interface TUIMessage {
   toolCalls?: TUIToolCall[];
   /** Whether the assistant is still generating this message */
   isStreaming?: boolean;
+  /** Lane separation: narration (ephemeral thinking-aloud) vs final (structured output) */
+  streamKind?: "narration" | "final";
   /** Extended thinking / reasoning content (shown dimmed below the main content) */
   thinkingContent?: string;
   /** Tool-specific fields */
@@ -69,10 +71,16 @@ export interface TUIToolCall {
 
 /** The result of a tool call */
 export interface TUIToolResult {
-  kind: "text" | "diff" | "bash_output" | "file_content" | "error";
+  kind: "text" | "diff" | "bash_output" | "grep_output" | "file_content" | "error";
   content: string;
   diff?: ParsedDiff;
   lineCount: number;
+  /** Structured metadata for rich tree display */
+  meta?: {
+    exitCode?: number;    // bash: exit code from [exit N]
+    matchCount?: number;  // grep: total matches found
+    engine?: string;      // grep: "ripgrep" | "node"
+  };
 }
 
 /** Parsed diff structure */

@@ -167,31 +167,43 @@ import { FileReadTool } from './file-read.js';
 import { FileWriteTool } from './file-write.js';
 import { FileEditTool } from './file-edit.js';
 import { ShellExecTool } from './shell-exec.js';
+import { BashTool } from './bash.js';
 import { GrepTool } from './grep.js';
 import { GlobTool } from './glob.js';
 import { GitOpsTool } from './git-ops.js';
 import { TestRunTool } from './test-run.js';
 import { CodeSearchTool } from './code-search.js';
 import { SecurityScanTool } from './security-scan.js';
-import { WebSearchTool } from './web-search.js';
+import { WebSearchTool, type GeminiSearchConfig } from './web-search.js';
+import { ParallelWebSearchTool } from './parallel-web-search.js';
+import { TaskCompleteTool } from './task-complete.js';
+
+export interface RegistryOptions {
+  /** Pass Gemini config to enable native Google Search for web_search and parallel_web_search */
+  geminiSearch?: GeminiSearchConfig;
+}
 
 /**
  * Create a ToolRegistry pre-loaded with all built-in YUAN tools.
+ * Pass `opts.geminiSearch` to enable Gemini native Google Search as the search backend.
  */
-export function createDefaultRegistry(): ToolRegistry {
+export function createDefaultRegistry(opts?: RegistryOptions): ToolRegistry {
   const registry = new ToolRegistry();
   registry.registerAll([
     new FileReadTool(),
     new FileWriteTool(),
     new FileEditTool(),
     new ShellExecTool(),
+    new BashTool(),
     new GrepTool(),
     new GlobTool(),
     new GitOpsTool(),
     new TestRunTool(),
     new CodeSearchTool(),
     new SecurityScanTool(),
-    new WebSearchTool(),
+    new WebSearchTool(opts?.geminiSearch),
+    new ParallelWebSearchTool(opts?.geminiSearch),
+    new TaskCompleteTool(),
   ]);
   return registry;
 }

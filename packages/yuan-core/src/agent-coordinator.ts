@@ -159,7 +159,7 @@ export class AgentCoordinator extends EventEmitter {
    */
   async dispatch(
     task: CoordinatorTask,
-    runAgent: (goal: string, role: RoleAgentType) => Promise<string>,
+    runAgent: (goal: string, role: RoleAgentType) => Promise<string | { output: string; tokensUsed: number }>,
   ): Promise<CoordinatorResult> {
     // 1. Dependency check
     const unmet = this.getUnmetDependencies(task);
@@ -211,19 +211,29 @@ export class AgentCoordinator extends EventEmitter {
     let output = "";
     let tokenUsed = 0;
 
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
     try {
       const agentPromise = runAgent(task.goal, task.requiredRole);
 
+      let rawResult: string | { output: string; tokensUsed: number };
       if (task.timeoutMs != null) {
-        const timeoutPromise = new Promise<never>((_, reject) =>
-          setTimeout(
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timeoutTimer = setTimeout(
             () => reject(new Error(`Task timed out after ${task.timeoutMs}ms`)),
             task.timeoutMs,
-          ),
-        );
-        output = await Promise.race([agentPromise, timeoutPromise]);
+          );
+        });
+        rawResult = await Promise.race([agentPromise, timeoutPromise]);
       } else {
-        output = await agentPromise;
+        rawResult = await agentPromise;
+      }
+
+      // Extract output and token usage from callback result
+      if (typeof rawResult === "string") {
+        output = rawResult;
+      } else {
+        output = rawResult.output;
+        tokenUsed = rawResult.tokensUsed;
       }
 
       this.completedIds.add(task.id);
@@ -233,6 +243,8 @@ export class AgentCoordinator extends EventEmitter {
       output = errMsg;
       this.failedIds.add(task.id);
     } finally {
+      // Clear timeout timer to prevent leak / unhandled rejection
+      if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
       // 5. Release locks
       for (const resourceId of resourceIds) {
         this.releaseResource(resourceId);
@@ -280,36 +292,73 @@ export class AgentCoordinator extends EventEmitter {
    */
   async dispatchBatch(
     tasks: CoordinatorTask[],
-    runAgent: (goal: string, role: RoleAgentType) => Promise<string>,
+    runAgent: (goal: string, role: RoleAgentType) => Promise<string | { output: string; tokensUsed: number }>,
   ): Promise<CoordinatorResult[]> {
     const sorted = this.topoSort(tasks);
     const results: CoordinatorResult[] = [];
 
-    // Sequential execution (maxConcurrent=1 is default and the safe path)
-    // Future: implement concurrent slot tracking when maxConcurrent > 1
-    for (const task of sorted) {
-      // Skip if a dependency failed
-      const hasFailed = (task.dependencies ?? []).some((dep) =>
-        this.failedIds.has(dep),
-      );
-      if (hasFailed) {
-        const skipped: CoordinatorResult = {
-          taskId: task.id,
-          role: task.requiredRole,
-          outcome: "skipped",
-          output: `Skipped: dependency failed`,
-          tokenUsed: 0,
-          latencyMs: 0,
-          conflicts: [],
-        };
-        this.failedIds.add(task.id); // propagate skip as failure for downstream
-        this.appendHistory(task, skipped);
-        results.push(skipped);
-        continue;
+    // Process tasks in chunks of maxConcurrent, respecting dependency order
+    let remaining = [...sorted];
+
+    while (remaining.length > 0) {
+      // Collect ready tasks (dependencies met, not failed)
+      const ready: CoordinatorTask[] = [];
+      const deferred: CoordinatorTask[] = [];
+
+      for (const task of remaining) {
+        const hasFailed = (task.dependencies ?? []).some((dep) =>
+          this.failedIds.has(dep),
+        );
+        if (hasFailed) {
+          const skipped: CoordinatorResult = {
+            taskId: task.id,
+            role: task.requiredRole,
+            outcome: "skipped",
+            output: `Skipped: dependency failed`,
+            tokenUsed: 0,
+            latencyMs: 0,
+            conflicts: [],
+          };
+          this.failedIds.add(task.id);
+          this.appendHistory(task, skipped);
+          results.push(skipped);
+          continue;
+        }
+
+        const unmet = this.getUnmetDependencies(task);
+        if (unmet.length === 0 && ready.length < this.maxConcurrent) {
+          ready.push(task);
+        } else {
+          deferred.push(task);
+        }
       }
 
-      const result = await this.dispatch(task, runAgent);
-      results.push(result);
+      if (ready.length === 0) {
+        // No tasks are ready — remaining tasks have unresolvable dependencies
+        for (const task of deferred) {
+          const skipped: CoordinatorResult = {
+            taskId: task.id,
+            role: task.requiredRole,
+            outcome: "skipped",
+            output: `Skipped: unresolvable dependencies`,
+            tokenUsed: 0,
+            latencyMs: 0,
+            conflicts: [],
+          };
+          this.failedIds.add(task.id);
+          this.appendHistory(task, skipped);
+          results.push(skipped);
+        }
+        break;
+      }
+
+      // Execute ready chunk concurrently (up to maxConcurrent)
+      const chunkResults = await Promise.all(
+        ready.map((task) => this.dispatch(task, runAgent)),
+      );
+      results.push(...chunkResults);
+
+      remaining = deferred;
     }
 
     return results;
@@ -382,12 +431,15 @@ export class AgentCoordinator extends EventEmitter {
     const stopWords = new Set([
       "the", "and", "for", "with", "that", "this", "from", "into",
       "have", "will", "should", "must", "also", "only", "then",
+      "implement", "update", "create", "delete", "check", "verify",
+      "build", "write", "read", "fix", "add", "remove", "change",
+      "make", "use", "set", "get",
     ]);
     return goal
       .toLowerCase()
       .replace(/[^a-z0-9\s_/-]/g, " ")
       .split(/\s+/)
-      .filter((w) => w.length > 3 && !stopWords.has(w))
+      .filter((w) => w.length > 4 && !stopWords.has(w))
       .slice(0, 5); // cap to 5 resource IDs per task
   }
 

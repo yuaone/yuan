@@ -214,12 +214,20 @@ export class CapabilityGraph extends EventEmitter {
   // Adjacency list keyed by fromId
   private edges: Map<string, CapabilityEdge[]> = new Map();
 
+  private _saveTimer: ReturnType<typeof setTimeout> | null = null;
+
   constructor(storageDir?: string) {
     super();
     this.storageDir =
       storageDir ?? join(homedir(), ".yuan");
     this.storageFile = join(this.storageDir, "capability-graph.json");
     this._load();
+    process.on("exit", () => {
+      if (this._saveTimer) {
+        clearTimeout(this._saveTimer);
+        this._flushSave();
+      }
+    });
   }
 
   // ─── Public API ───
@@ -237,7 +245,7 @@ export class CapabilityGraph extends EventEmitter {
       addedAt: node.addedAt ?? new Date().toISOString(),
     };
     this.nodes.set(node.id, resolved);
-    this._save();
+    this._scheduleSave();
     this.emit("event", {
       kind: "agent:capability_graph_updated",
       nodeId: node.id,
@@ -276,7 +284,7 @@ export class CapabilityGraph extends EventEmitter {
       list.push(edge);
     }
     this.edges.set(fromId, list);
-    this._save();
+    this._scheduleSave();
   }
 
   /**
@@ -415,7 +423,7 @@ export class CapabilityGraph extends EventEmitter {
     const n = node.usageCount + 1;
     node.successRate = (node.successRate * (n - 1) + (success ? 1 : 0)) / n;
     node.usageCount = n;
-    this._save();
+    this._scheduleSave();
   }
 
   /**
@@ -468,7 +476,7 @@ export class CapabilityGraph extends EventEmitter {
       if (!existsSync(this.storageFile)) {
         // First init: pre-populate defaults
         this._populateDefaults();
-        this._save();
+        this._flushSave();
         return;
       }
       const raw = readFileSync(this.storageFile, "utf-8");
@@ -485,7 +493,7 @@ export class CapabilityGraph extends EventEmitter {
     } catch {
       // Non-fatal: start with defaults on corrupt/missing file
       this._populateDefaults();
-      this._save();
+      this._flushSave();
     }
   }
 
@@ -500,14 +508,21 @@ export class CapabilityGraph extends EventEmitter {
     }
   }
 
-  private _save(): void {
+  private _scheduleSave(): void {
+    if (this._saveTimer) return;
+    this._saveTimer = setTimeout(() => {
+      this._saveTimer = null;
+      this._flushSave();
+    }, 2000); // 2초 모았다가 한번에 저장
+  }
+
+  private _flushSave(): void {
     const tmpFile = `${this.storageFile}.tmp`;
     try {
       if (!existsSync(this.storageDir)) {
         mkdirSync(this.storageDir, { recursive: true });
       }
-      const data: GraphData = this.export();
-      writeFileSync(tmpFile, JSON.stringify(data, null, 2), "utf-8");
+      writeFileSync(tmpFile, JSON.stringify(this.export(), null, 2), "utf-8");
       renameSync(tmpFile, this.storageFile);
     } catch {
       // Non-fatal: storage failures should not crash the agent loop

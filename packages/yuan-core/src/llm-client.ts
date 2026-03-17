@@ -18,6 +18,13 @@ import {
 } from "./types.js";
 import { MODEL_DEFAULTS, PROVIDER_BASE_URLS } from "./constants.js";
 import { LLMError } from "./errors.js";
+import { dlog } from "./debug-logger.js";
+
+// ─── 메시지 변환 캐시 (WeakMap — GC friendly) ───
+// 같은 Message 객체 참조에 대해 변환 결과를 재사용.
+// Message 객체가 GC되면 캐시 엔트리도 자동 삭제됨.
+const _openAIMsgCache = new WeakMap<object, OpenAI.Chat.ChatCompletionMessageParam>();
+const _anthropicMsgCache = new WeakMap<object, Record<string, unknown>>();
 
 /** LLM 응답 결과 */
 export interface LLMResponse {
@@ -126,20 +133,25 @@ export class BYOKClient {
           : {}),
       };
 
+      dlog("LLM-CLIENT", `→ OpenAI request`, { model: this.model, provider: this.config.provider, messages: messages?.length ?? "?", tools: tools?.length ?? 0 });
       const response =
         await this.openaiClient.chat.completions.create(params);
       const choice = response.choices[0];
 
+      const finishReason = choice?.finish_reason ?? "stop";
+      const usage = { input: response.usage?.prompt_tokens ?? 0, output: response.usage?.completion_tokens ?? 0 };
+      const content = choice?.message?.content ?? null;
+      const toolCalls = this.parseOpenAIToolCalls(choice?.message?.tool_calls);
+      dlog("LLM-CLIENT", `← OpenAI response`, { finishReason, inputTokens: usage.input, outputTokens: usage.output, contentLength: content?.length ?? 0, toolCalls: toolCalls?.length ?? 0 });
+
       return {
-        content: choice?.message?.content ?? null,
-        toolCalls: this.parseOpenAIToolCalls(choice?.message?.tool_calls),
-        usage: {
-          input: response.usage?.prompt_tokens ?? 0,
-          output: response.usage?.completion_tokens ?? 0,
-        },
-        finishReason: choice?.finish_reason ?? "stop",
+        content,
+        toolCalls,
+        usage,
+        finishReason,
       };
     } catch (err) {
+      dlog("LLM-CLIENT", `✗ LLM error`, { provider: this.config.provider, error: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200) });
       throw this.wrapError(err);
     }
   }
@@ -181,6 +193,7 @@ export class BYOKClient {
           : {}),
       };
 
+      dlog("LLM-CLIENT", `→ OpenAI request`, { model: this.model, provider: this.config.provider, messages: messages?.length ?? "?", tools: tools?.length ?? 0 });
       const stream =
         await this.openaiClient.chat.completions.create(params, { signal: abortSignal });
 
@@ -257,7 +270,7 @@ export class BYOKClient {
           }
         } catch (chunkErr) {
           // Skip malformed chunks to preserve accumulated tool calls
-          console.warn("[BYOKClient] Skipping bad stream chunk:", chunkErr);
+          dlog("LLM-CLIENT", "Skipping bad stream chunk", chunkErr instanceof Error ? chunkErr.message : chunkErr);
         }
       }
 
@@ -273,11 +286,13 @@ export class BYOKClient {
         };
       }
 
+      dlog("LLM-CLIENT", `← OpenAI response`, { finishReason: "done", inputTokens, outputTokens, contentLength: 0, toolCalls: toolCallAccumulators.size });
       yield {
         type: "done",
         usage: { input: inputTokens, output: outputTokens },
       };
     } catch (err) {
+      dlog("LLM-CLIENT", `✗ LLM error`, { provider: this.config.provider, error: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200) });
       throw this.wrapError(err);
     }
   }
@@ -513,6 +528,16 @@ export class BYOKClient {
   private toOpenAIMessage(
     msg: Message,
   ): OpenAI.Chat.ChatCompletionMessageParam {
+    const cached = _openAIMsgCache.get(msg);
+    if (cached) return cached;
+    const result = this._toOpenAIMessageImpl(msg);
+    _openAIMsgCache.set(msg, result);
+    return result;
+  }
+
+  private _toOpenAIMessageImpl(
+    msg: Message,
+  ): OpenAI.Chat.ChatCompletionMessageParam {
     if (msg.role === "tool") {
       return {
         role: "tool",
@@ -601,6 +626,16 @@ export class BYOKClient {
   }
 
   private toAnthropicMessage(
+    msg: Message,
+  ): Record<string, unknown> {
+    const cached = _anthropicMsgCache.get(msg);
+    if (cached) return cached;
+    const result = this._toAnthropicMessageImpl(msg);
+    _anthropicMsgCache.set(msg, result);
+    return result;
+  }
+
+  private _toAnthropicMessageImpl(
     msg: Message,
   ): Record<string, unknown> {
     if (msg.role === "assistant" && msg.tool_calls?.length) {
@@ -776,6 +811,24 @@ export class BYOKClient {
    * Endpoint: https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent
    * Auth: API key via `?key=` query param
    */
+  /**
+   * Resolve the tool name for a tool-result message by searching backward
+   * through the conversation for the assistant message whose tool_calls
+   * contains the matching tool_call_id.
+   */
+  private resolveToolNameForGemini(messages: Message[], toolMsg: Message): string {
+    if (toolMsg.tool_call_id) {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i];
+        if (m.role === "assistant" && m.tool_calls) {
+          const match = m.tool_calls.find((tc) => tc.id === toolMsg.tool_call_id);
+          if (match) return match.name;
+        }
+      }
+    }
+    return "tool";
+  }
+
   private async *chatStreamGeminiNative(
     messages: Message[],
     tools?: ToolDefinition[],
@@ -808,6 +861,9 @@ export class BYOKClient {
       }
 
       if (msg.role === "tool") {
+        // Resolve tool name from the preceding assistant message's tool_calls
+        const resolvedToolName = this.resolveToolNameForGemini(messages, msg);
+
         // Tool results — may be plain text, functionResponse blocks, or image ContentBlocks
         if (Array.isArray(msg.content)) {
           const contentBlocks = msg.content as Array<{ type: string; [k: string]: unknown }>;
@@ -837,7 +893,7 @@ export class BYOKClient {
               .filter((b) => b.type === "tool_result")
               .map((b) => ({
                 functionResponse: {
-                  name: (b as Record<string, unknown>).name ?? "tool",
+                  name: (b as Record<string, unknown>).name ?? resolvedToolName,
                   response: { content: b.content ?? "" },
                 },
               }));
@@ -846,7 +902,16 @@ export class BYOKClient {
             }
           }
         } else if (typeof msg.content === "string" && msg.content) {
-          geminiContents.push({ role: "user", parts: [{ text: msg.content }] });
+          // Plain text tool result — wrap as functionResponse for Gemini
+          geminiContents.push({
+            role: "user",
+            parts: [{
+              functionResponse: {
+                name: resolvedToolName,
+                response: { content: msg.content },
+              },
+            }],
+          });
         }
         continue;
       }
@@ -924,14 +989,17 @@ export class BYOKClient {
       parameters: stripGeminiUnsupported(t.parameters as Record<string, unknown>),
     }));
 
+    const toolsArray: Array<Record<string, unknown>> = [];
+    if (functionDeclarations && functionDeclarations.length > 0) {
+      toolsArray.push({ functionDeclarations });
+    }
+
     const body: Record<string, unknown> = {
       contents: geminiContents,
       ...(systemParts.length > 0
         ? { systemInstruction: { parts: systemParts.map((t) => ({ text: t })) } }
         : {}),
-      ...(functionDeclarations && functionDeclarations.length > 0
-        ? { tools: [{ functionDeclarations }] }
-        : {}),
+      ...(toolsArray.length > 0 ? { tools: toolsArray } : {}),
       generationConfig: {
         maxOutputTokens: 8192,
         thinkingConfig: {
@@ -941,6 +1009,7 @@ export class BYOKClient {
       },
     };
 
+    dlog("LLM-CLIENT", `→ Gemini request`, { model: this.model, contents: geminiContents?.length ?? "?", tools: functionDeclarations?.length ?? 0 });
     const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -950,6 +1019,7 @@ export class BYOKClient {
 
     if (!response.ok) {
       const errText = await response.text().catch(() => "");
+      dlog("LLM-CLIENT", `✗ LLM error`, { provider: this.config.provider, error: `Gemini API error ${response.status}: ${errText}`.slice(0, 200) });
       throw new LLMError("google", `Gemini API error ${response.status}: ${errText}`);
     }
 
@@ -1038,6 +1108,7 @@ export class BYOKClient {
       };
     }
 
+    dlog("LLM-CLIENT", `← Gemini response`, { status: response.status, contentLength: 0 });
     yield { type: "done", usage: { input: inputTokens, output: outputTokens } };
   }
 
@@ -1186,19 +1257,23 @@ export class BYOKClient {
       parameters: stripGeminiUnsupported(t.parameters as Record<string, unknown>),
     }));
 
+    const toolsArrayNonStream: Array<Record<string, unknown>> = [];
+    if (functionDeclarations && functionDeclarations.length > 0) {
+      toolsArrayNonStream.push({ functionDeclarations });
+    }
+
     const body: Record<string, unknown> = {
       contents: geminiContents,
       ...(systemParts.length > 0
         ? { systemInstruction: { parts: systemParts.map((t) => ({ text: t })) } }
         : {}),
-      ...(functionDeclarations && functionDeclarations.length > 0
-        ? { tools: [{ functionDeclarations }] }
-        : {}),
+      ...(toolsArrayNonStream.length > 0 ? { tools: toolsArrayNonStream } : {}),
       generationConfig: {
         maxOutputTokens: 8192,
       },
     };
 
+    dlog("LLM-CLIENT", `→ Gemini request`, { model: this.model, contents: geminiContents?.length ?? "?", tools: functionDeclarations?.length ?? 0 });
     const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1207,6 +1282,7 @@ export class BYOKClient {
 
     if (!response.ok) {
       const errText = await response.text().catch(() => "");
+      dlog("LLM-CLIENT", `✗ LLM error`, { provider: this.config.provider, error: `Gemini API error ${response.status}: ${errText}`.slice(0, 200) });
       throw new LLMError("google", `Gemini API error ${response.status}: ${errText}`);
     }
 
@@ -1240,6 +1316,8 @@ export class BYOKClient {
 
     const firstCandidate = candidates[0] as Record<string, unknown> | undefined;
     const finishReason = (firstCandidate?.finishReason as string) ?? "STOP";
+
+    dlog("LLM-CLIENT", `← Gemini response`, { status: response.status, contentLength: typeof textContent === "string" ? textContent.length : 0 });
 
     return {
       content: textContent,

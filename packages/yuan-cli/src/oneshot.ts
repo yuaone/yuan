@@ -16,6 +16,7 @@ import {
   type BYOKConfig,
 } from "@yuaone/core";
 import { createDefaultRegistry } from "@yuaone/tools";
+import type { RegistryOptions } from "@yuaone/tools";
 import { CloudClient, type AgentEvent as CloudAgentEvent } from "./cloud-client.js";
 
 const ESC = "\x1b[";
@@ -70,8 +71,11 @@ export async function runOneshot(
     baseUrl: config.baseUrl,
   };
 
-  // Create tool registry and executor
-  const registry = createDefaultRegistry();
+  // Create tool registry and executor — inject Gemini native search when provider is Google
+  const registryOpts: RegistryOptions = config.provider === "google"
+    ? { geminiSearch: { apiKey: config.apiKey, model: options.model ?? config.model ?? "gemini-2.0-flash" } }
+    : {};
+  const registry = createDefaultRegistry(registryOpts);
   const workDir = process.cwd();
   const toolExecutor = registry.toExecutor(workDir);
 
@@ -105,7 +109,7 @@ export async function runOneshot(
     renderer.info("\nInterrupted.");
     process.exit(130);
   };
-  process.on("SIGINT", sigintHandler);
+  process.once("SIGINT", sigintHandler);
 
   const spinner = renderer.thinking();
   let isStreaming = false;
@@ -232,7 +236,7 @@ async function runOneshotCloud(
   const sigintHandler = (): void => {
     abortController.abort();
   };
-  process.on("SIGINT", sigintHandler);
+  process.once("SIGINT", sigintHandler);
 
   const spinner = renderer.thinking();
   let isStreaming = false;

@@ -376,11 +376,17 @@ Respond with ONLY a JSON object (no markdown, no explanation):
  * 두 가지 모드:
  * 1. `classify()` — 키워드 기반 휴리스틱 (LLM 호출 없이 빠름)
  * 2. `classifyWithLLM()` — LLM 강화 분류 (모호한 경우)
+ *
+ * @deprecated Use agentReason() from agent-reasoning-engine.ts instead.
+ * AgentReasoningEngine provides the same intent/complexity classification
+ * with deterministic heuristics (NO LLM required).
+ * This classifier is kept for backward compatibility when Decision Engine is unavailable.
  */
 export class TaskClassifier {
   /**
    * 휴리스틱 기반 태스크 분류 (LLM 호출 없음, 빠름).
    *
+   * @deprecated Use agentReason() from agent-reasoning-engine.ts instead.
    * @param message - 사용자 입력 메시지
    * @param projectContext - 프로젝트 컨텍스트 (선택, 예: 파일 구조 요약)
    * @returns 태스크 분류 결과

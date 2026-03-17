@@ -238,6 +238,8 @@ export type AgentEvent =
   | { kind: "agent:completed"; summary: string; filesChanged: string[] }
   | { kind: "agent:text_delta"; text: string }
   | { kind: "agent:token_usage"; input: number; output: number }
+  | { kind: "agent:search_start"; queries: string[] }
+  | { kind: "agent:search_result"; query: string; source: string; resultCount: number }
   | { kind: "agent:qa_result"; stage: "quick" | "thorough"; passed: boolean; issues: string[] }
   | {
       kind: "agent:evidence_report";
@@ -450,7 +452,17 @@ export type AgentEvent =
   | { kind: "agent:coordinator_task_complete"; taskId: string; role: string; outcome: string; tokenUsed: number; latencyMs: number; timestamp: number }
   | { kind: "agent:coordinator_conflict"; taskId: string; conflictedWith: string; resourceId: string; timestamp: number }
   // Phase 6 — Research Loop
-  | { kind: "agent:research_session_complete"; sessionId: string; problem: string; conclusion: string; recommendedStrategy: string; confidence: number; iterations: number; timestamp: number };
+  | { kind: "agent:research_session_complete"; sessionId: string; problem: string; conclusion: string; recommendedStrategy: string; confidence: number; iterations: number; timestamp: number }
+  // ─── Agent Decision Engine ─────────────────────────────────────────────────
+  | { kind: "agent:decision"; decision: { intent: string; complexity: string; taskStage: string; planRequired: boolean; nextAction: string } }
+  | { kind: "agent:interaction_mode"; mode: "CHAT" | "AGENT" | "HYBRID" }
+  | { kind: "agent:budget_warning"; tool: string; used: number; limit: number }
+  | { kind: "agent:budget_exceeded"; tool: string }
+  // ─── Patch Transaction Journal ───────────────────────────────────────────────
+  | { kind: "agent:rollback_point_created"; pointId: string; reason: string }
+  | { kind: "agent:rollback_applied"; restored: number; errors: string[] }
+  // ─── Dependency Guard ───────────────────────────────────────────────────────
+  | { kind: "agent:dependency_change_detected"; depKind: string; path: string; requiresApproval: boolean };
 
 // ─── Session ───
 
@@ -540,7 +552,9 @@ export type AgentTermination =
   | { reason: "BUDGET_EXHAUSTED"; tokensUsed: number }
   | { reason: "USER_CANCELLED" }
   | { reason: "ERROR"; error: string }
-  | { reason: "NEEDS_APPROVAL"; action: PendingAction };
+  | { reason: "NEEDS_APPROVAL"; action: PendingAction }
+  | { reason: "NEEDS_CLARIFICATION"; summary: string }
+  | { reason: "BLOCKED_EXTERNAL"; summary: string };
 
 // ─── Token Usage ───
 

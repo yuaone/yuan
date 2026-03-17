@@ -501,8 +501,7 @@ const model = mapTierToModel(this.routingResult?.tier ?? "NORMAL");
             maxIterations: this.config.maxIterations,
             maxTokensPerIteration: 16_384,
             totalTokenBudget:
-              this.config.totalTokenBudget ??
-              this.config.maxIterations * 16_384,
+              this.config.totalTokenBudget ?? loopBudget,
             tools: toolExecutor.definitions,
             systemPrompt,
             projectPath: this.config.projectPath,
@@ -516,7 +515,29 @@ const model = mapTierToModel(this.routingResult?.tier ?? "NORMAL");
       // (so ExecutionEngine / CLI can observe them)
       // ─────────────────────────────────────────
 
+      // Track emitted event IDs to prevent duplicate re-emission.
+      // The parent loop already handles its own events; sub-agent should
+      // only forward events originating from its own AgentLoop instance.
+      const emittedEventIds = new Set<string>();
+
       this.agentLoop.on("event", (event) => {
+        // Deduplicate by kind + tool_call_id (or kind + content hash for text events)
+        const dedupeKey =
+          (event as { tool_call_id?: string }).tool_call_id
+            ? `${event.kind}:${(event as { tool_call_id?: string }).tool_call_id}`
+            : (event as { tool?: string }).tool
+              ? `${event.kind}:${(event as { tool?: string }).tool}:${Date.now()}`
+              : null; // non-deduplicable events pass through
+        if (dedupeKey) {
+          if (emittedEventIds.has(dedupeKey)) return; // skip duplicate
+          emittedEventIds.add(dedupeKey);
+          // Cap set size to prevent unbounded growth
+          if (emittedEventIds.size > 500) {
+            const first = emittedEventIds.values().next().value;
+            if (first) emittedEventIds.delete(first);
+          }
+        }
+
         switch (event.kind) {
           case "agent:text_delta":
           case "agent:thinking":

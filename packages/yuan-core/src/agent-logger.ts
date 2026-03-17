@@ -1034,11 +1034,8 @@ export class AgentLogger {
   // defer file writes to flush()
   break;
         case "console":
- setImmediate(() => {
-   process.stderr.write(
-     (output.colorize ? this.formatEntryColor(entry) : this.formatEntry(entry)) + "\n"
-   );
- });
+ // Suppressed — process.stderr.write corrupts Ink TUI rendering.
+ // Use "file" output instead for debugging.
           break;
         case "callback":
           try {

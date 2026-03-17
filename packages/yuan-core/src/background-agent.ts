@@ -8,7 +8,7 @@
  */
 
 import { EventEmitter } from "node:events";
-import { exec } from "node:child_process";
+import { execFile } from "node:child_process";
 
 // ─── Types ───
 
@@ -184,8 +184,14 @@ export class BackgroundAgent extends EventEmitter<BackgroundAgentEvents> {
     return new Promise<void>((resolve) => {
       const cwd = this.config.cwd ?? process.cwd();
 
-      exec(
-        command,
+      // Split command into executable and args to avoid shell injection
+      const parts = command.split(/\s+/);
+      const executable = parts[0];
+      const args = parts.slice(1);
+
+      execFile(
+        executable,
+        args,
         { timeout: COMMAND_TIMEOUT_MS, cwd, maxBuffer: 1024 * 1024 },
         (error, stdout, stderr) => {
           if (error) {

@@ -822,19 +822,28 @@ export class CodebaseContext {
    *
    * @returns Aggregate stats
    */
-  getStats(): { totalFiles: number; totalSymbols: number; avgComplexity: number } {
-    let totalComplexity = 0;
+  getStats(): { totalFiles: number; totalSymbols: number; avgComplexity: number; avgCognitive: number; maxComplexity: number; avgLoc: number } {
+    let totalCyclomatic = 0;
+    let totalCognitive = 0;
+    let totalLoc = 0;
+    let maxComplexity = 0;
     for (const analysis of this.index.files.values()) {
-      totalComplexity += analysis.complexity.cyclomatic;
+      totalCyclomatic += analysis.complexity.cyclomatic;
+      totalCognitive += analysis.complexity.cognitive;
+      totalLoc += analysis.complexity.loc;
+      if (analysis.complexity.cyclomatic > maxComplexity) {
+        maxComplexity = analysis.complexity.cyclomatic;
+      }
     }
-    const avgComplexity = this.index.totalFiles > 0
-      ? totalComplexity / this.index.totalFiles
-      : 0;
+    const n = this.index.totalFiles || 1;
 
     return {
       totalFiles: this.index.totalFiles,
       totalSymbols: this.index.totalSymbols,
-      avgComplexity: Math.round(avgComplexity * 100) / 100,
+      avgComplexity: Math.round((totalCyclomatic / n) * 100) / 100,
+      avgCognitive: Math.round((totalCognitive / n) * 100) / 100,
+      maxComplexity,
+      avgLoc: Math.round(totalLoc / n),
     };
   }
 

@@ -46,6 +46,7 @@ export interface FooterBarProps {
 /** Format milliseconds to human-readable elapsed time */
 function formatElapsed(ms: number): string {
   const sec = ms / 1000;
+  if (sec < 0.1) return "0.1s";
   if (sec < 60) return `${sec.toFixed(1)}s`;
   const min = Math.floor(sec / 60);
   const remainSec = sec % 60;
@@ -78,7 +79,7 @@ const PHASE_ICON: Record<string, string> = {
   finalize:  "✦",
 };
 
-function Indicator({ agentState }: { agentState: AgentStreamState }): React.JSX.Element {
+export function Indicator({ agentState }: { agentState: AgentStreamState }): React.JSX.Element {
   const { status, elapsedMs, lastElapsedMs, currentToolName, lastError, totalTokensUsed, filesChangedCount, progressLabel, currentPhase } = agentState;
   const elapsed = formatElapsed(elapsedMs);
 
@@ -283,10 +284,7 @@ export const FooterBar = memo(function FooterBar({ agentState, slashMenuOpen, ha
   const { columns } = useTerminalSize();
 
   return (
-    <Box width={columns} height={1} flexShrink={0} justifyContent="space-between">
-      <Box minWidth={35}>
-        <Indicator agentState={agentState} />
-      </Box>
+    <Box width={columns} height={1} flexShrink={0} justifyContent="flex-end">
       <Box minWidth={30}>
         <KeybindHints agentState={agentState} slashMenuOpen={slashMenuOpen} hasReasoning={hasReasoning} />
       </Box>

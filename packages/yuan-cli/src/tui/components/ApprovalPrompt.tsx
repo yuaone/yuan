@@ -16,6 +16,7 @@ import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
 
 export type ApprovalChoice = "allow" | "allow_always" | "deny";
+export const APPROVAL_PROMPT_HEIGHT = 7;
 
 export interface ApprovalPromptProps {
   toolName: string;
@@ -62,29 +63,36 @@ export function ApprovalPrompt({
   const desc = toolDescription(toolName, args);
 
   return (
-    <Box flexDirection="column" paddingLeft={2} paddingRight={2} marginTop={1} marginBottom={1}>
+    <Box
+      flexDirection="column"
+      height={APPROVAL_PROMPT_HEIGHT}
+      flexShrink={0}
+      overflow="hidden"
+      paddingLeft={2}
+      paddingRight={2}
+    >
       {/* Tool name header */}
-      <Text bold color="white">{toolName}</Text>
+    <Text bold color="white" wrap="truncate">{toolName}</Text>
 
       {/* Args */}
       {args && (
         <Box paddingLeft={2}>
-          <Text color="cyan">{args}</Text>
+          <Text color="cyan" wrap="truncate">{args}</Text>
         </Box>
       )}
 
       {/* Description */}
       <Box paddingLeft={2}>
-        <Text dimColor>{desc}</Text>
+        <Text dimColor wrap="truncate">{desc}</Text>
       </Box>
 
-      {/* Spacer */}
-      <Box marginTop={1}>
+      {/* Prompt row */}
+      <Box height={1}>
         <Text dimColor>Do you want to allow this action?</Text>
       </Box>
 
       {/* Options */}
-      <Box flexDirection="column" marginTop={0}>
+      <Box flexDirection="column" flexShrink={0} overflow="hidden">
         {options.map((opt, i) => {
           const isSelected = i === selectedIndex;
           return (

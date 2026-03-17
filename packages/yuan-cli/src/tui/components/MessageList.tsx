@@ -1,56 +1,42 @@
 /**
- * MessageList — scrollable message area.
+ * MessageList — render-from-bottom scroll model (Claude Code style).
  *
- * Layout: web-page feel (content starts at top, grows down).
- * Banner: first RenderItem — permanent transcript header, scrolls up naturally.
- * Scroll: line-based (not message-based) — smooth without jumps.
- * Stable: estimateLines is frozen during streaming to prevent startIdx jitter.
+ * Scroll model:
+ *   scrollUp = 0, pinned=true  → auto-follow bottom (show newest)
+ *   scrollUp > 0, pinned=false → scrolled up by N lines (view frozen)
+ *
+ * Core idea: always render the LAST N messages that fit in the viewport.
+ * scrollUp > 0 means "also include N extra lines above the viewport",
+ * which pulls in older messages. The bottom is always accurate — only
+ * the top can be clipped by overflow="hidden".
+ *
+ * ONE render path. All hooks called unconditionally.
  */
 
-import React, { memo, useState, useEffect, useRef, useCallback, useMemo } from "react";
+import React, { memo, useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { Box, Text, useInput } from "ink";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
 import { MessageBubble } from "./MessageBubble.js";
-import { Spinner } from "./Spinner.js";
-import { TOKENS } from "../lib/tokens.js";
 import { useMouseScroll } from "../hooks/useMouseScroll.js";
 import type { TUIMessage } from "../types.js";
 import stringWidth from "string-width";
 
-// Re-export for backward compat with App.tsx
 export type { TUIMessage } from "../types.js";
-
-// ─── RenderItem union ────────────────────────────────────────────────────────
-
-type BannerItem = {
-  kind: "banner";
-  id: "__welcome_banner__";
-};
-
-type RenderItem = BannerItem | TUIMessage;
 
 // ─── Props ───────────────────────────────────────────────────────────────────
 
 export interface MessageListProps {
   messages: TUIMessage[];
   isThinking?: boolean;
-  maxHeight?: number;
-  pendingMessage?: string;
-  hasConversationMessages?: boolean;
-  welcomeBanner?: React.ReactNode;
-  welcomeBannerRows?: number;
+  width: number;
+  /** Extra rows consumed by fixed elements above MessageList (e.g. banner). */
+  reservedTopRows?: number;
 }
 
 // ─── Line estimation ─────────────────────────────────────────────────────────
 
 const DIFF_TOOL_NAMES = new Set(["file_write", "file_edit", "edit_file", "write_file"]);
 
-/**
- * Count how many terminal lines a string occupies, accounting for:
- * - Hard newlines (\n) in the text
- * - CJK double-width characters (using string-width)
- * - Word wrapping at maxWidth columns
- */
 function countWrappedLines(text: string, maxWidth: number): number {
   if (!text || maxWidth <= 0) return 1;
   const hardLines = text.split("\n");
@@ -58,7 +44,7 @@ function countWrappedLines(text: string, maxWidth: number): number {
   for (const line of hardLines) {
     const w = stringWidth(line);
     if (w === 0) {
-      total += 1; // empty line still occupies one row
+      total += 1;
     } else {
       total += Math.ceil(w / maxWidth);
     }
@@ -66,38 +52,50 @@ function countWrappedLines(text: string, maxWidth: number): number {
   return Math.max(1, total);
 }
 
-/**
- * Estimate how many terminal lines a message will occupy.
- * Uses real word-wrap line counting (CJK-aware) for accuracy.
- */
-function estimateLines(msg: TUIMessage, columns: number): number {
+function countMarkdownExtra(text: string): number {
+  let extra = 0;
+  const lines = text.split("\n");
+  let inCodeBlock = false;
+  for (const line of lines) {
+    if (line.startsWith("```")) {
+      inCodeBlock = !inCodeBlock;
+      extra += 1;
+      continue;
+    }
+    if (inCodeBlock) continue;
+    if (/^(\s*[-*+]|\s*\d+\.) /.test(line)) extra += 1;
+    if (/^#{1,6} /.test(line)) extra += 1;
+    if (/^[-*_]{3,}$/.test(line.trim())) extra += 1;
+  }
+  return extra;
+}
+
+function estimateMessageLines(msg: TUIMessage, columns: number): number {
   const content = msg.content ?? "";
 
   switch (msg.role) {
-    case "user": {
-      // MessageBubble user: "> " prefix + right pad = width - 5 effective content width
+    case "user":
+    case "queued_user": {
       const contentWidth = Math.max(20, columns - 5);
-      return countWrappedLines(content, contentWidth) + 2; // +2 for marginBottom={2}
+      return countWrappedLines(content, contentWidth) + 2; // +2 for marginBottom
     }
     case "assistant": {
-      // MessageBubble assistant: assistantContentWidth = width - 3
       const contentWidth = Math.max(20, columns - 3);
       const toolCalls = msg.toolCalls ?? [];
-      // Filter out task_complete — it's hidden from UI
       const visibleToolCalls = toolCalls.filter((tc) => tc.toolName !== "task_complete");
       const toolLines = visibleToolCalls.reduce((sum, tc) => {
         const hasDiff = DIFF_TOOL_NAMES.has(tc.toolName) && tc.status === "success";
-        return sum + 2 + (hasDiff ? 24 : 0);
+        return sum + 2 + (hasDiff ? 20 : 0);
       }, 0);
-      return Math.max(2, countWrappedLines(content, contentWidth)) + toolLines + 2;
+      const mdExtra = content ? countMarkdownExtra(content) : 0;
+      const baseLines = Math.max(1, countWrappedLines(content, contentWidth));
+      return baseLines + mdExtra + toolLines + 2; // +2 for marginBottom
     }
     case "tool":
       return 2;
     case "system": {
-      const isBanner = msg.content?.includes("YUAN v") && msg.content?.includes("Autonomous Coding Agent");
-      if (isBanner) return 16;
       const newlines = (msg.content?.match(/\n/g) ?? []).length;
-      return Math.max(1, newlines + 2);
+      return Math.max(1, newlines + 1) + 1; // +1 for marginBottom
     }
     default:
       return 2;
@@ -108,270 +106,173 @@ function estimateLines(msg: TUIMessage, columns: number): number {
 
 export const MessageList = memo(function MessageList({
   messages,
-  isThinking,
-  maxHeight,
-  pendingMessage,
-  hasConversationMessages = false,
-  welcomeBanner,
-  welcomeBannerRows = 0,
+  width,
+  reservedTopRows = 0,
 }: MessageListProps): React.JSX.Element {
   const { columns, rows } = useTerminalSize();
-  const height = maxHeight ?? rows - 4;
 
-  // Line-based scroll offset: 0 = pinned to bottom (latest), N = scrolled up N lines
-  const [lineOffset, setLineOffset] = useState(0);
-  const [pinned, setPinned] = useState(true);
+  // scrollUp=0 → pinned to bottom (auto-follow)
+  // scrollUp>0 → scrolled N logical lines above bottom
+  const [scrollUp, setScrollUp] = useState(0);
+  const pinned = scrollUp === 0;
 
-  // Inertia scroll
-  const velocityRef = useRef(0);
-  const inertiaTimerRef = useRef<NodeJS.Timeout | null>(null);
+  // Track last scroll interaction time for auto-repin
+  const lastScrollAtRef = useRef(0);
 
-  const runInertia = useCallback(function runInertia() {
-    if (Math.abs(velocityRef.current) < 0.5) {  // was 0.2, stop sooner
-      velocityRef.current = 0;
-      if (inertiaTimerRef.current) {
-        clearTimeout(inertiaTimerRef.current);
-        inertiaTimerRef.current = null;
-      }
-      return;
+  // Scroll accumulator for frame-throttled mouse scroll
+  const scrollAccRef = useRef(0);
+  const scrollRafRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ═══ VIEWPORT BUDGET ═══
+  // Fixed rows below MessageList: StatusLine(1) + InputBox(4) + FooterBar(1) = 6
+  // Banner rows above MessageList are passed in via reservedTopRows.
+  const availableHeight = Math.max(1, rows - 6 - reservedTopRows);
+
+  // Indicator takes 1 line when scrolled; content gets the rest.
+  const indicatorLines = scrollUp > 0 ? 1 : 0;
+  const contentHeight = Math.max(1, availableHeight - indicatorLines);
+
+  // ═══ VISIBLE MESSAGES — render-from-bottom ═══
+  const visibleMessages = useMemo(() => {
+    // We want to show messages that fill contentHeight + scrollUp lines.
+    // Start from the last message and work backwards.
+    // With justifyContent="flex-end" + overflow="hidden", the content box clips at
+    // the TOP (old messages), so including extra lines via scrollUp correctly reveals
+    // older content without hiding newest messages.
+    const targetLines = contentHeight + scrollUp;
+
+    let totalLines = 0;
+    let startIdx = messages.length;
+
+    while (startIdx > 0) {
+      const est = Math.max(1, estimateMessageLines(messages[startIdx - 1]!, columns));
+      if (totalLines + est > targetLines) break;
+      totalLines += est;
+      startIdx--;
     }
 
-    let hitBottom = false;
-    setLineOffset((prev) => {
-      const next = prev + velocityRef.current;
-      if (next <= 0) {
-        hitBottom = true;
-        return 0;
-      }
-      return next;
-    });
+    return messages.slice(startIdx);
+  }, [messages, scrollUp, contentHeight, columns]);
 
-    if (hitBottom) {
-      // Stop inertia immediately when hitting the bottom — prevents banner push jitter
-      velocityRef.current = 0;
-      if (inertiaTimerRef.current) {
-        clearTimeout(inertiaTimerRef.current);
-        inertiaTimerRef.current = null;
-      }
-      return;
-    }
+  // ═══ AUTO-FOLLOW when pinned ═══
+  // When pinned, new content arrives → scrollUp stays 0 → visibleMessages auto-updates.
+  // Nothing to do here — the useMemo above handles it.
 
-    velocityRef.current *= 0.82;  // was 0.85, more friction = less overshooting
-    inertiaTimerRef.current = setTimeout(() => runInertia(), 16);
-  }, []);
-
-  // Anchor scroll refs
-  const anchorMsgIdRef = useRef<string | null>(null);
-  const anchorOffsetRef = useRef<number>(0);
-
-  // ─── renderItems: banner (if provided) + messages ─────────────────────────
-  const renderItems = useMemo<RenderItem[]>(() => {
-    if (!welcomeBanner) return messages;
-    return [{ kind: "banner", id: "__welcome_banner__" } as BannerItem, ...messages];
-  }, [messages, welcomeBanner]);
-
-  // ─── lineCounts: one entry per renderItem ─────────────────────────────────
-  const lineCounts = useMemo(() => {
-    const msgCounts = messages.map((m) => {
-      const est = estimateLines(m, columns);
-      return m.isStreaming ? Math.max(est, 4) : est;
-    });
-    return welcomeBanner ? [welcomeBannerRows, ...msgCounts] : msgCounts;
-  }, [messages, columns, welcomeBanner, welcomeBannerRows]);
-
-  const totalLines = useMemo(
-    () => lineCounts.reduce((a, b) => a + b, 0),
-    [lineCounts],
-  );
-
-  // ─── Web-page feel: no synthetic top spacer ────────────────────────────────
-  const addTopSpacer = false;
-
-  // ─── Follow newest while pinned (streaming-aware) ─────────────────────────
+  // ═══ AUTO-REPIN after 3s of no scroll activity ═══
+  const prevMsgCountRef = useRef(messages.length);
   useEffect(() => {
-    if (!pinned) return;
-    if (!hasConversationMessages) return;
-    setLineOffset(0);
-  }, [pinned, totalLines, hasConversationMessages]);
-
-  // ─── Restore anchor scroll when not pinned and content grows ─────────────
-  useEffect(() => {
-    if (pinned) return;
-
-    const anchorId = anchorMsgIdRef.current;
-    if (!anchorId) return;
-
-    const idx = renderItems.findIndex((item) =>
-      "kind" in item ? item.id === anchorId : item.id === anchorId,
-    );
-    if (idx < 0) return;
-
-    let linesBefore = 0;
-    for (let i = 0; i < idx; i++) {
-      linesBefore += lineCounts[i] ?? 2;
+    const countChanged = messages.length !== prevMsgCountRef.current;
+    prevMsgCountRef.current = messages.length;
+    if (!pinned && countChanged) {
+      const timeSinceScroll = Date.now() - lastScrollAtRef.current;
+      if (timeSinceScroll > 3000) {
+        setScrollUp(0);
+      }
     }
+  }, [messages.length, pinned]);
 
-    // lineOffset is "lines from bottom"; convert top-based position to bottom-based
-    const anchorLines = lineCounts[idx] ?? 2;
-    const linesAfterAnchor = Math.max(0, totalLines - linesBefore - anchorLines);
-    setLineOffset(linesAfterAnchor);
-  }, [renderItems, lineCounts, totalLines, pinned]);
-
-  // ─── Viewport budget (reserve 2 lines for indicators) ────────────────────
-  const budget = Math.max(4, height - 2);
-
-  // ─── Windowing: walk newest→oldest (posFromBottom accumulates upward) ─────
-  const visibleIndices = useMemo(() => {
-    const maxOffset = Math.max(0, totalLines - budget);
-    const clampedOffset = Math.min(lineOffset, maxOffset);
-
-    const windowStart = clampedOffset;        // bottom edge of visible area
-    const windowEnd = clampedOffset + budget; // top edge of visible area
-
-    const indices: number[] = [];
-    let posFromBottom = 0;
-
-    for (let i = renderItems.length - 1; i >= 0; i--) {
-      const itemLines = lineCounts[i] ?? 2;
-      const itemBottom = posFromBottom;
-      const itemTop = posFromBottom + itemLines;
-
-      posFromBottom += itemLines;
-
-      // Item is entirely BELOW the visible window → skip
-      if (itemTop <= windowStart) continue;
-
-      // Item is entirely ABOVE the visible window → stop
-      if (itemBottom >= windowEnd) break;
-
-      // Item overlaps the window → include
-      indices.unshift(i);
-    }
-
-    return indices;
-  }, [lineCounts, lineOffset, renderItems.length, totalLines, budget]);
-
-  const startIdx = visibleIndices[0] ?? 0;
-
-  // ─── Capture anchor for stable scroll ─────────────────────────────────────
-  useEffect(() => {
-    if (!visibleIndices.length) return;
-    const firstVisibleIdx = visibleIndices[0];
-    const item = renderItems[firstVisibleIdx];
-    if (item) {
-      anchorMsgIdRef.current = "kind" in item ? item.id : item.id;
-      anchorOffsetRef.current = lineOffset;
-    }
-  }, [visibleIndices, renderItems, lineOffset]);
-
-  // ─── Keyboard scroll ──────────────────────────────────────────────────────
-  useInput((_input, key) => {
-    if (key.pageUp || (key.ctrl && key.upArrow)) {
-      setPinned(false);
-      setLineOffset((prev) => prev + Math.floor(height / 2));
-    } else if (key.pageDown || (key.ctrl && key.downArrow)) {
-      setLineOffset((prev) => {
-        const next = Math.max(0, prev - Math.floor(height / 2));
-        if (next === 0) setPinned(true);
-        return next;
-      });
-    }
-  });
-
-  // ─── Mouse wheel: 4 lines per tick ────────────────────────────────────────
-  const handleMouseUp = useCallback(() => {
-    setPinned(false);
-    velocityRef.current += 4;   // was 3, increase for faster response
-    if (!inertiaTimerRef.current) {
-      inertiaTimerRef.current = setTimeout(runInertia, 16);
-    }
-  }, [runInertia]);
-
-  const handleMouseDown = useCallback(() => {
-    if (pinned) return; // already at bottom, scroll-down does nothing
-    velocityRef.current -= 4;   // was -3
-    if (!inertiaTimerRef.current) {
-      inertiaTimerRef.current = setTimeout(runInertia, 16);
-    }
-  }, [runInertia, pinned]);
-
-  useMouseScroll(handleMouseUp, handleMouseDown);
-
+  // Cleanup scroll timer on unmount
   useEffect(() => {
     return () => {
-      if (inertiaTimerRef.current) {
-        clearTimeout(inertiaTimerRef.current);
-      }
+      if (scrollRafRef.current) clearTimeout(scrollRafRef.current);
     };
   }, []);
 
-  const hasScrolledUp = lineOffset > 0;
+  // ═══ KEYBOARD SCROLL ═══
+  useInput((_input, key) => {
+    if (key.pageUp || (key.ctrl && key.upArrow)) {
+      lastScrollAtRef.current = Date.now();
+      setScrollUp((prev) => prev + Math.floor(availableHeight / 2));
+    } else if (key.pageDown) {
+      lastScrollAtRef.current = Date.now();
+      setScrollUp((prev) => Math.max(0, prev - Math.floor(availableHeight / 2)));
+    } else if (key.ctrl && key.downArrow) {
+      // Ctrl+Down → snap to bottom
+      setScrollUp(0);
+    } else if (key.downArrow && !key.ctrl && !key.shift) {
+      // Plain down arrow while scrolled: nudge down 2 lines
+      if (scrollUp > 0) {
+        lastScrollAtRef.current = Date.now();
+        setScrollUp((prev) => Math.max(0, prev - 2));
+      }
+    } else if (key.upArrow && !key.ctrl && !key.shift) {
+      // Plain up arrow: nudge up 2 lines
+      lastScrollAtRef.current = Date.now();
+      setScrollUp((prev) => prev + 2);
+    }
+    // End key → snap to bottom
+    if ((key as { name?: string }).name === "end") {
+      setScrollUp(0);
+    }
+  });
 
+  // ═══ MOUSE SCROLL — frame-throttled ═══
+  const flushScroll = useCallback(() => {
+    scrollRafRef.current = null;
+    const delta = scrollAccRef.current;
+    scrollAccRef.current = 0;
+    if (delta === 0) return;
+    lastScrollAtRef.current = Date.now();
+    if (delta > 0) {
+      // Wheel up → scroll up (see older content)
+      setScrollUp((prev) => prev + delta);
+    } else {
+      // Wheel down → scroll down (see newer content)
+      setScrollUp((prev) => Math.max(0, prev + delta));
+    }
+  }, []);
+
+  const handleMouseUp = useCallback(() => {
+    scrollAccRef.current += 2;
+    if (!scrollRafRef.current) {
+      scrollRafRef.current = setTimeout(flushScroll, 32);
+    }
+  }, [flushScroll]);
+
+  const handleMouseDown = useCallback(() => {
+    if (scrollUp === 0) return; // already at bottom
+    scrollAccRef.current -= 2;
+    if (!scrollRafRef.current) {
+      scrollRafRef.current = setTimeout(flushScroll, 32);
+    }
+  }, [scrollUp, flushScroll]);
+
+  useMouseScroll(handleMouseUp, handleMouseDown);
+
+  // ═══ SINGLE JSX RETURN ═══
   return (
-    <Box flexDirection="column" height={height} flexShrink={0}>
-      {/* Top spacer — disabled (web-page feel: content starts at top) */}
-      {addTopSpacer && <Box flexGrow={1} />}
-
-      {/* Empty state */}
-      {visibleIndices.length === 0 && !isThinking && (
-        <Box justifyContent="center" flexGrow={1}>
-          <Text dimColor>Type a message to start...</Text>
+    <Box flexDirection="column" height={availableHeight}>
+      {/* Scroll indicator — outside the scrollable area (doesn't participate in clip) */}
+      {scrollUp > 0 && (
+        <Box>
+          <Text color="#555555">↑ {scrollUp} lines up  (End/↓ to return)</Text>
         </Box>
       )}
 
-      {/* Scroll-up indicator */}
-      {hasScrolledUp && startIdx > 0 && (
-        <Box flexShrink={0}>
-          <Text dimColor>  ↑ pgup/wheel for older messages</Text>
-        </Box>
-      )}
-
-      {/* Messages (and banner) */}
-      {visibleIndices.map((idx) => {
-        const item = renderItems[idx];
-        if (!item) return null;
-
-        // Banner item
-        if ("kind" in item && item.kind === "banner") {
-          return (
-            <Box key={item.id} marginBottom={1}>
-              {welcomeBanner}
-            </Box>
-          );
-        }
-
-        // Regular message
-        const msg = item as TUIMessage;
-        return (
+      {/* Content box:
+          justifyContent="flex-end" → messages pinned to bottom.
+          overflow="hidden"          → when content > contentHeight, clips at TOP (old msgs).
+          This means scrollUp > 0 intentionally overflows old content at the top,
+          revealing it while keeping newest messages always at the bottom. */}
+      <Box
+        flexDirection="column"
+        flexGrow={1}
+        overflow="hidden"
+        justifyContent="flex-end"
+      >
+        {visibleMessages.map((msg, i) => (
           <MessageBubble
             key={msg.id}
             message={msg}
             width={columns}
-            isLatest={idx === renderItems.length - 1}
+            isLatest={i === visibleMessages.length - 1}
           />
-        );
-      })}
-
-      {/* Pending queued message bubble */}
-      {pendingMessage && (
-        <Box flexShrink={0} marginBottom={1}>
-          <Text color="#4b5563">▶ </Text>
-          <Text color="#4b5563" wrap="truncate">
-            {pendingMessage.length > columns - 14
-              ? pendingMessage.slice(0, columns - 17) + "…"
-              : pendingMessage}
-          </Text>
-          <Text color="#374151"> ⏸queued</Text>
-        </Box>
-      )}
-
-      {/* Thinking indicator */}
-      {isThinking && !messages.some((m) => m.isStreaming) && (
-        <Box marginTop={0} flexShrink={0}>
-          <Text>  </Text>
-          <Spinner label={`${TOKENS.brand.name} ·····`} />
-        </Box>
-      )}
+        ))}
+      </Box>
     </Box>
   );
 });
+
+// Backward compat aliases
+export const HistoryPanel = MessageList;
+export type HistoryPanelProps = MessageListProps;

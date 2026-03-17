@@ -156,14 +156,14 @@ function truncateArgs(args: string | undefined, maxLen: number): string {
 }
 
 
-/** White↔gray blinking dot for running tool calls */
+/** Sky-blue blinking dot for running tool calls */
 function BlinkingDot(): React.JSX.Element {
   const [bright, setBright] = useState(true);
   useEffect(() => {
     const timer = setInterval(() => setBright((b) => !b), 500);
     return () => clearInterval(timer);
   }, []);
-  return <Text color={bright ? "white" : "#555555"}>●</Text>;
+  return <Text color={bright ? "#87CEEB" : "#2a6e8a"}>●</Text>;
 }
 
 /** Live elapsed timer — ticks every 1s while tool is running */
@@ -177,16 +177,8 @@ function LiveElapsed({ startedAt }: { startedAt: number }): React.JSX.Element {
   return <Text color="#555555">  {elapsed.toFixed(1)}s</Text>;
 }
 
-/** Get a short "verb" label for the tool call header */
+/** Display name for a tool call — uses actual tool name, no hardcoded mappings */
 function toolVerb(toolName: string): string {
-  const n = toolName.toLowerCase();
-  if (n.includes("read")) return "read";
-  if (n.includes("write")) return "write";
-  if (n.includes("edit")) return "edit";
-  if (n.includes("bash") || n.includes("shell") || n.includes("exec")) return "bash";
-  if (n.includes("grep") || n.includes("search")) return "search";
-  if (n.includes("glob") || n.includes("find")) return "find";
-  if (n.includes("git")) return "git";
   return toolName;
 }
 
@@ -216,6 +208,16 @@ const ToolCallLine = React.memo(function ToolCallLine({ tc, isLast, width }: { t
   // Left continuation gutter for diff (aligns under tool args)
   const diffGutter = isLast ? "   " : `${TOKENS.tree.pipe} `;
 
+  // bash: extract exit code for subline
+  const bashExitCode = tc.result?.kind === "bash_output" ? tc.result.meta?.exitCode : undefined;
+  const bashFailed = bashExitCode !== undefined && bashExitCode !== 0;
+
+  // grep: extract match count for subline
+  const grepMatchCount = tc.result?.kind === "grep_output" ? tc.result.meta?.matchCount : undefined;
+
+  // subline gutter (aligns under args)
+  const subGutter = isLast ? "    " : `${TOKENS.tree.pipe}   `;
+
   return (
     <Box flexDirection="column">
       <Box>
@@ -239,7 +241,7 @@ const ToolCallLine = React.memo(function ToolCallLine({ tc, isLast, width }: { t
         ) : (
           // Success: dim ✓ + dim verb + args + duration
           <>
-            <Text color="#3a7d44"> ✓</Text>
+            <Text color={bashFailed ? "red" : "#3a7d44"}> ✓</Text>
             <Text dimColor> {toolVerb(tc.toolName)}</Text>
             {argsTruncated ? <Text dimColor> {argsTruncated}</Text> : null}
             {tc.duration != null ? (
@@ -248,6 +250,27 @@ const ToolCallLine = React.memo(function ToolCallLine({ tc, isLast, width }: { t
           </>
         )}
       </Box>
+
+      {/* bash: exit code — only shown when exitCode is known, no output preview */}
+      {tc.status === "success" && tc.result?.kind === "bash_output" && bashExitCode !== undefined && (
+        <Box paddingLeft={subGutter.length}>
+          <Text dimColor>{subGutter}</Text>
+          <Text color={bashFailed ? "red" : "#3a7d44"}>exit {bashExitCode}</Text>
+        </Box>
+      )}
+
+      {/* grep: match count */}
+      {tc.status === "success" && tc.result?.kind === "grep_output" && (
+        <Box paddingLeft={subGutter.length}>
+          <Text dimColor>{subGutter}</Text>
+          {grepMatchCount !== undefined ? (
+            <Text dimColor>{grepMatchCount} match{grepMatchCount !== 1 ? "es" : ""}</Text>
+          ) : (
+            <Text dimColor>no matches</Text>
+          )}
+        </Box>
+      )}
+
       {displayDiff && (
         <Box flexDirection="column" paddingLeft={4}>
           <DiffView diff={displayDiff} width={width - 6} />
@@ -279,8 +302,13 @@ export const MessageBubble = React.memo(function MessageBubble({
         const words = rawLine.split(" ");
         let currentLine = "";
         let currentWidth = 0;
-        for (const word of words) {
-          const wordW = stringWidth(word);
+        for (let word of words) {
+          let wordW = stringWidth(word);
+          // Handle unbreakable words (URLs, hashes) that exceed column width
+          if (wordW > maxContentWidth) {
+            word = word.slice(0, maxContentWidth - 1) + "…";
+            wordW = maxContentWidth;
+          }
           if (currentWidth > 0 && currentWidth + 1 + wordW > maxContentWidth) {
             lines.push(currentLine);
             currentLine = word;
@@ -295,7 +323,7 @@ export const MessageBubble = React.memo(function MessageBubble({
       if (lines.length === 0) lines.push("");
       const fillWidth = width - 2;
       return (
-        <Box flexDirection="column" marginBottom={1}>
+        <Box flexDirection="column" marginBottom={2}>
           {lines.map((line, i) => {
             const prefix = i === 0 ? "> " : "  ";
             const full = `${prefix}${line}`;
@@ -320,8 +348,29 @@ export const MessageBubble = React.memo(function MessageBubble({
         const words = rawLine.split(" ");
         let currentLine = "";
         let currentWidth = 0;
-        for (const word of words) {
-          const wordW = stringWidth(word);
+        for (let word of words) {
+          let wordW = stringWidth(word);
+          /* M12 fix: force-break single words exceeding maxContentWidth */
+          if (wordW > maxContentWidth) {
+            // Flush current line first
+            if (currentLine) { lines.push(currentLine); currentLine = ""; currentWidth = 0; }
+            // Break character by character
+            let chunk = "";
+            let chunkW = 0;
+            for (const ch of word) {
+              const cw = stringWidth(ch);
+              if (chunkW + cw > maxContentWidth) {
+                lines.push(chunk);
+                chunk = ch;
+                chunkW = cw;
+              } else {
+                chunk += ch;
+                chunkW += cw;
+              }
+            }
+            word = chunk;
+            wordW = chunkW;
+          }
           if (currentWidth > 0 && currentWidth + 1 + wordW > maxContentWidth) {
             lines.push(currentLine);
             currentLine = word;
@@ -353,12 +402,25 @@ export const MessageBubble = React.memo(function MessageBubble({
 
     case "assistant": {
       const toolCalls = msg.toolCalls ?? [];
-      const hasTools = toolCalls.length > 0;
-      const hasText = !!msg.content;
+      // Filter out task_complete for display purposes
+      const visibleTools = toolCalls.filter(tc => tc.toolName !== "task_complete");
+      const hasTools = visibleTools.length > 0;
+      const hasText = !!msg.content?.trim();
       const hasThinking = !!msg.thinkingContent;
       const phaseEvents = msg.phaseEvents ?? [];
       const hasPhaseEvents = phaseEvents.length > 0;
       const assistantContentWidth = Math.max(12, width - 3);
+
+      // ── Empty bubble prevention (use empty Box, not null — avoids React hooks mismatch) ──
+      if (!hasText && !hasTools && !hasPhaseEvents && !hasThinking) {
+        return <Box />;
+      }
+
+      // ── Narration bubble — falls through to final bubble rendering ──
+      // narration and final are visually identical; no separate branch needed.
+
+      // ── Final / default assistant bubble (full markdown) ──────────────
+      const hasRenderableBody = hasText || hasTools || hasPhaseEvents;
 
       // Reasoning: only show while streaming, max 3 lines (keeps it out of the way)
       const showThinking = hasThinking && msg.isStreaming;
@@ -366,49 +428,54 @@ export const MessageBubble = React.memo(function MessageBubble({
         ? msg.thinkingContent!.split("\n").filter(Boolean).slice(-3)
         : [];
 
+      if (!hasRenderableBody && thinkingLines.length === 0) {
+        return <Box />;
+      }
+
       return (
         <Box flexDirection="column" marginBottom={2}>
           {/* Inline reasoning — dim, before main content, only while thinking */}
           {thinkingLines.map((line, i) => (
-            <Box key={`think-${i}`} paddingLeft={2}>
-              <Text dimColor color="#555555">~ {line}</Text>
+            <Box key={`think-${i}`} paddingLeft={2} width={assistantContentWidth}>
+              <Text dimColor color="#555555" wrap="truncate">~ {line}</Text>
             </Box>
           ))}
-          {/* Fixed 2-col gutter: ● in left column, content in right column */}
-          <Box
-            flexDirection="row"
-            alignItems="flex-start"
-            marginTop={thinkingLines.length > 0 ? 1 : 0}
-          >
-            <Box width={2} flexShrink={0}>
-              <Text dimColor>●</Text>
+          {hasRenderableBody && (
+            <Box
+              flexDirection="row"
+              alignItems="flex-start"
+              marginTop={thinkingLines.length > 0 ? 1 : 0}
+            >
+              <Box width={2} flexShrink={0}>
+                <Text color="#888888">●</Text>
+              </Box>
+              <Box flexDirection="column" flexGrow={1}>
+                {/* Full content — no firstLine/restContent split (breaks Korean particles) */}
+                {hasText && (
+                  <MarkdownRenderer content={msg.content} width={assistantContentWidth} />
+                )}
+                {/* Tool call tree */}
+                {hasTools && (
+                  <Box flexDirection="column" marginTop={0}>
+                    {visibleTools.map((tc, i) => (
+                      <ToolCallLine
+                        key={tc.id}
+                        tc={tc}
+                        isLast={i === visibleTools.length - 1}
+                        width={assistantContentWidth}
+                      />
+                    ))}
+                  </Box>
+                )}
+                {/* Phase 3: Autonomous event tree — inline below tools */}
+                {hasPhaseEvents && (
+                  <Box marginTop={hasText || hasTools ? 1 : 0}>
+                    <PhaseEventTree events={phaseEvents} width={assistantContentWidth} />
+                  </Box>
+                )}
+              </Box>
             </Box>
-            <Box flexDirection="column" flexGrow={1}>
-              {/* Full content — no firstLine/restContent split (breaks Korean particles) */}
-              {hasText && (
-                <MarkdownRenderer content={msg.content} width={assistantContentWidth} />
-              )}
-              {/* Tool call tree */}
-              {hasTools && (
-                <Box flexDirection="column" marginTop={hasText ? 1 : 0}>
-                  {toolCalls.map((tc, i) => (
-                    <ToolCallLine
-                      key={tc.id}
-                      tc={tc}
-                      isLast={i === toolCalls.length - 1}
-                      width={assistantContentWidth}
-                    />
-                  ))}
-                </Box>
-              )}
-              {/* Phase 3: Autonomous event tree — inline below tools */}
-              {hasPhaseEvents && (
-                <Box marginTop={hasText || hasTools ? 1 : 0}>
-                  <PhaseEventTree events={phaseEvents} width={assistantContentWidth} />
-                </Box>
-              )}
-            </Box>
-          </Box>
+          )}
         </Box>
       );
     }
@@ -451,12 +518,15 @@ export const MessageBubble = React.memo(function MessageBubble({
   if (pm.id !== nm.id) return false;
   if (pm.content !== nm.content) return false;
   if (pm.isStreaming !== nm.isStreaming) return false;
+  if (pm.streamKind !== nm.streamKind) return false;
   if (pm.thinkingContent !== nm.thinkingContent) return false;
-  if ((pm.toolCalls?.length ?? 0) !== (nm.toolCalls?.length ?? 0)) return false;
-  // Check if any tool call status changed
+  // Compare toolCalls by content (id + status), not reference
+  const prevToolIds = pm.toolCalls?.map(tc => `${tc.id}-${tc.status}`).join(',') ?? '';
+  const nextToolIds = nm.toolCalls?.map(tc => `${tc.id}-${tc.status}`).join(',') ?? '';
+  if (prevToolIds !== nextToolIds) return false;
+  // Check if any tool call duration changed
   if (pm.toolCalls && nm.toolCalls) {
     for (let i = 0; i < pm.toolCalls.length; i++) {
-      if (pm.toolCalls[i]?.status !== nm.toolCalls[i]?.status) return false;
       if (pm.toolCalls[i]?.duration !== nm.toolCalls[i]?.duration) return false;
     }
   }

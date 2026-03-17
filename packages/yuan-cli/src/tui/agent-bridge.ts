@@ -28,14 +28,17 @@ import {
   DEFAULT_LOOP_CONFIG,
   ExecutionEngine,
   buildSystemPrompt,
+  agentDecide,
   type ExecutionEngineConfig,
   type AgentConfig,
   type AgentEvent,
+  type AgentDecisionContext,
   type BYOKConfig,
   type ApprovalRequest,
   type ApprovalResponse,
 } from "@yuaone/core";
 import { createDefaultRegistry } from "@yuaone/tools";
+import type { RegistryOptions } from "@yuaone/tools";
 
 export interface AgentBridgeConfig {
   provider: string;
@@ -61,8 +64,12 @@ export class AgentBridge {
   private terminationCallback: TerminationCallback | null = null;
   private changedFiles: string[] = [];
   private isProcessing = false;
+  /** Generation counter — prevents stale finally blocks from clobbering event callbacks */
+  private _runGeneration = 0;
   /** Persistent loop instance — reused across messages to preserve conversation history */
   private persistentLoop: AgentLoop | null = null;
+  /** Previous decision — for continuation detection + stuck breaker */
+  private prevDecision: AgentDecisionContext | null = null;
 
   constructor(config: AgentBridgeConfig) {
     this.config = config;
@@ -137,7 +144,10 @@ export class AgentBridge {
   }
 
   async sendMessage(message: string): Promise<void> {
-    if (this.isProcessing) return;
+    if (this.isProcessing) {
+      this.eventCallback?.({ kind: "agent:error", message: "Agent is busy — message queued", retryable: true } as AgentEvent);
+      return;
+    }
     this.isProcessing = true;
     dbg("bridge", `sendMessage start msg="${message.slice(0, 60)}"`);
 
@@ -153,14 +163,38 @@ export class AgentBridge {
       baseUrl,
     };
 
-    // Create tool registry
-    const registry = createDefaultRegistry();
+    // Create tool registry — inject Gemini native search when provider is Google
+    const registryOpts: RegistryOptions = normalizedProvider === "google"
+      ? { geminiSearch: { apiKey: effectiveApiKey, model: model ?? "gemini-2.0-flash" } }
+      : {};
+    const registry = createDefaultRegistry(registryOpts);
     const toolExecutor = registry.toExecutor(workDir);
 
-    if (useExecutionEngine) {
-      await this.runWithExecutionEngine(message, byokConfig, toolExecutor, workDir);
-    } else {
-      await this.runWithAgentLoop(message, byokConfig, toolExecutor, workDir);
+    // Decision Engine — deterministic mode routing (no LLM call)
+    let decision: AgentDecisionContext | null = null;
+    try {
+      decision = agentDecide({
+        message,
+        prevDecision: this.prevDecision ?? undefined,
+      });
+      this.prevDecision = decision;
+      dbg("decision", `mode=${decision.core.interactionMode} intent=${decision.core.reasoning.intent} complexity=${decision.core.reasoning.complexity}`);
+    } catch (err) {
+      dbg("decision", `agentDecide failed, falling back: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // Route based on Decision Engine's interactionMode
+    const mode = decision?.core.interactionMode ?? (useExecutionEngine ? "AGENT" : "CHAT");
+
+    switch (mode) {
+      case "AGENT":
+        await this.runWithExecutionEngine(message, byokConfig, toolExecutor, workDir, decision ?? undefined);
+        break;
+      case "CHAT":
+      case "HYBRID":
+      default:
+        await this.runWithAgentLoop(message, byokConfig, toolExecutor, workDir);
+        break;
     }
   }
 
@@ -272,6 +306,8 @@ export class AgentBridge {
 
     let completedEmitted = false;
     const originalEventCallback = this.eventCallback;
+    // Capture generation so stale finally blocks don't clobber a newer callback
+    const gen = ++this._runGeneration;
     // Intercept event stream to track whether agent:completed is emitted
     this.eventCallback = (event: AgentEvent) => {
       if (event.kind === "agent:completed") completedEmitted = true;
@@ -282,7 +318,12 @@ export class AgentBridge {
       dbg("bridge", "loop.run() start");
       const result = await loop.run(message);
       const reason = String((result as {reason?:string}).reason ?? "");
-      dbg("bridge", `loop.run() done reason=${reason}`);
+      const errorDetail = String((result as {error?:string}).error ?? "");
+      dbg("bridge", `loop.run() done reason=${reason}${errorDetail ? ` error=${errorDetail.slice(0,120)}` : ""}`);
+      // If loop returned ERROR, emit agent:error so TUI shows the message
+      if (reason === "ERROR" && errorDetail && !completedEmitted) {
+        originalEventCallback?.({ kind: "agent:error", message: errorDetail, retryable: false } as unknown as AgentEvent);
+      }
       // If loop didn't emit agent:completed (e.g. BUDGET_EXHAUSTED), emit it now
       if (!completedEmitted) {
         dbg("bridge", "fallback agent:completed emit (loop didn't emit one)");
@@ -299,8 +340,11 @@ export class AgentBridge {
       });
       this.terminationCallback?.({ reason: "ERROR", error: errMsg });
     } finally {
-      // Restore original callback
-      this.eventCallback = originalEventCallback;
+      // Only restore callback if no newer runWithAgentLoop has started.
+      // If generation diverged, a new run already swapped the callback — skip restore.
+      if (this._runGeneration === gen) {
+        this.eventCallback = originalEventCallback;
+      }
       this.isProcessing = false;
       this.loop = null;
       // NOTE: do NOT null out persistentLoop — it holds conversation history
@@ -313,6 +357,7 @@ export class AgentBridge {
     byokConfig: BYOKConfig,
     toolExecutor: ReturnType<ReturnType<typeof createDefaultRegistry>["toExecutor"]>,
     workDir: string,
+    decision?: AgentDecisionContext,
   ): Promise<void> {
     const engine = new ExecutionEngine({
       byokConfig,
@@ -387,7 +432,7 @@ engine.on("token_usage", (usage: { input: number; output: number }) => {
     });
 
     try {
-      const result = await engine.execute(message);
+      const result = await engine.execute(message, decision);
       this.terminationCallback?.({
         reason: "COMPLETE",
         summary: result.summary,

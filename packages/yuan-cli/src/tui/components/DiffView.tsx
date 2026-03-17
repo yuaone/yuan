@@ -1,12 +1,13 @@
 /**
- * DiffView — inline diff with red/green highlighting and line numbers.
+ * DiffView — Claude Code style rectangular diff with full-width colored background lines.
  */
 
 import React from "react";
 import { Box, Text } from "ink";
-import { TOKENS } from "../lib/tokens.js";
 import type { ParsedDiff } from "../types.js";
 import { truncate } from "../lib/truncate.js";
+import stringWidth from "string-width";
+import path from "path";
 
 export interface DiffViewProps {
   diff: ParsedDiff;
@@ -14,27 +15,34 @@ export interface DiffViewProps {
 }
 
 export function DiffView({ diff, width }: DiffViewProps): React.JSX.Element {
-  const boxWidth = Math.max(20, width - 4);
+  const boxWidth = Math.max(20, width - 6);
   const lineNumWidth = 4;
-  const contentWidth = boxWidth - lineNumWidth - 5; // borders, padding, sign
+  // sign(1) + space(1) + lineNum(lineNumWidth) + space(2) + content
+  const prefixWidth = 1 + 1 + lineNumWidth + 2;
+  const contentWidth = boxWidth - prefixWidth;
+
+  const shortPath = diff.filePath
+    ? path.basename(diff.filePath)
+    : "";
+
+  function padLine(raw: string): string {
+    const rawWidth = stringWidth(raw);
+    const padding = Math.max(0, boxWidth - rawWidth);
+    return raw + " ".repeat(padding);
+  }
 
   return (
     <Box flexDirection="column">
-      {/* Top border */}
-      <Text dimColor>
-        {TOKENS.box.topLeft}{TOKENS.box.horizontal.repeat(boxWidth - 2)}{TOKENS.box.topRight}
-      </Text>
+      {/* File path header — dimmed, no border */}
+      <Text dimColor>{"  "}{shortPath}</Text>
 
       {/* Hunks */}
       {diff.hunks.map((hunk, hi) => (
         <Box key={hi} flexDirection="column">
           {diff.hunks.length > 1 && (
-            <Box>
-              <Text dimColor>{TOKENS.box.vertical} </Text>
-              <Text color="cyan">
-                @@ -{hunk.startOld} +{hunk.startNew} @@
-              </Text>
-            </Box>
+            <Text color="cyan">
+              {"  "}@@ -{hunk.startOld} +{hunk.startNew} @@
+            </Text>
           )}
           {hunk.lines.map((line, li) => {
             const lineNo =
@@ -47,37 +55,33 @@ export function DiffView({ diff, width }: DiffViewProps): React.JSX.Element {
             const sign = line.type === "add" ? "+" : line.type === "delete" ? "-" : " ";
             const content = truncate(line.content, contentWidth);
 
-            return (
-              <Box key={`${hi}-${li}`}>
-                <Text dimColor>{TOKENS.box.vertical} </Text>
-                <Text dimColor>{lineNo} </Text>
-                <Text dimColor>{TOKENS.box.vertical} </Text>
-                {line.type === "add" ? (
-                  <Text color="green" bold>{sign}</Text>
-                ) : line.type === "delete" ? (
-                  <Text color="red" bold>{sign}</Text>
-                ) : (
-                  <Text dimColor>{sign}</Text>
-                )}
-                {line.type === "add" ? (
-                  <Text color="green"> {content}</Text>
-                ) : line.type === "delete" ? (
-                  <Text color="red"> {content}</Text>
-                ) : (
-                  <Text dimColor> {content}</Text>
-                )}
-              </Box>
-            );
+            // Build raw string for width calculation: "sign lineNo  content"
+            const rawLine = `${sign} ${lineNo}  ${content}`;
+
+            if (line.type === "add") {
+              return (
+                <Text key={`${hi}-${li}`} backgroundColor="green" color="black">
+                  {padLine(rawLine)}
+                </Text>
+              );
+            } else if (line.type === "delete") {
+              return (
+                <Text key={`${hi}-${li}`} backgroundColor="red" color="black">
+                  {padLine(rawLine)}
+                </Text>
+              );
+            } else {
+              return (
+                <Text key={`${hi}-${li}`} dimColor>
+                  {rawLine}
+                </Text>
+              );
+            }
           })}
         </Box>
       ))}
 
-      {/* Bottom border with stats */}
-      <Box justifyContent="space-between">
-        <Text dimColor>
-          {TOKENS.box.bottomLeft}{TOKENS.box.horizontal.repeat(boxWidth - 2)}{TOKENS.box.bottomRight}
-        </Text>
-      </Box>
+      {/* Stats */}
       <Box paddingLeft={2}>
         <Text color="green">+{diff.additions}</Text>
         <Text> </Text>

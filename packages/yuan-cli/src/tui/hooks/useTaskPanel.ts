@@ -50,7 +50,8 @@ export function useTaskPanel(): UseTaskPanelReturn {
   }, []);
 
   const navigateDown = useCallback((taskCount: number) => {
-    setSelectedIndex((prev) => Math.min(taskCount - 1, prev + 1));
+    if (taskCount === 0) return;
+    setSelectedIndex((prev) => Math.min(prev + 1, taskCount - 1));
   }, []);
 
   const expandSelected = useCallback((tasks: Array<{ id: string }>) => {

@@ -10,7 +10,7 @@
   },
   "scripts": {
     "build": "pnpm -r build",
-    "dev": "pnpm --filter yuan-cli dev",
+    "dev": "pnpm --filter @yuaone/core dev & pnpm --filter @yuaone/cli dev",
     "lint": "pnpm -r lint",
     "clean": "pnpm -r clean"
   },

@@ -42,6 +42,7 @@ import type {
   SubAgentContext,
   ToolResult,
 } from "./types.js";
+import type { AgentDecisionContext } from "./agent-decision-types.js";
 
 import { BYOKClient } from "./llm-client.js";
 import { AgentLoop } from "./agent-loop.js";
@@ -258,6 +259,9 @@ interface ResolvedConfig {
   enableIntentInference: boolean;
   enableSpeculative: boolean;
   speculativeMaxApproaches: number;
+  enablePerfTracking: boolean;
+  enableSandbox: boolean;
+  sandboxTier: SandboxTier;
   governorConfig?: GovernorConfig;
   contextConfig?: Partial<ContextManagerConfig>;
   approvalConfig?: Partial<AutoApprovalConfig>;
@@ -422,11 +426,120 @@ private embeddingCache: EmbeddingCache;
    * - 병렬도 고려해서 전체 예산을 안전하게 분할
    */
   private getSubAgentTokenBudget(): number {
+    // Decision-aware budget: each sub-agent gets 1/parallelAgents of total budget, min 10K
+    if (this.decision) {
+      const policy = this.decision.core.computePolicy;
+      return Math.max(10_000, Math.floor(policy.maxTokenBudget / Math.max(1, policy.parallelAgents)));
+    }
+    // Legacy fallback
     const divisor = Math.max(1, this.config.maxParallelAgents + 1);
     return Math.max(
       5000,
       Math.floor(this.config.totalTokenBudget / divisor),
     );
+  }
+
+  /**
+   * Apply Decision Engine policy to ExecutionEngine config.
+   * Overrides iteration limits, token budgets, and feature flags
+   * based on the decision's compute policy and failure surface.
+   */
+  private applyDecisionPolicy(dec: AgentDecisionContext): void {
+    const core = dec.core;
+
+    // Compute policy → iteration and token budget overrides
+    this.config.maxIterations = core.computePolicy.maxIterations;
+    this.config.totalTokenBudget = core.computePolicy.maxTokenBudget;
+
+    // Affordance → deep verify activation
+    if (core.affordance.run_checks > 0.7) {
+      this.config.enableDeepVerify = true;
+    }
+
+    // Failure surface → security scan activation
+    if (core.failureSurface.patchRisk > 0.6) {
+      this.config.enableSecurityScan = true;
+    }
+
+    // Massive complexity → parallel execution
+    if (core.reasoning.complexity === "massive") {
+      this.config.enableParallelExecution = true;
+      this.config.maxParallelAgents = core.computePolicy.parallelAgents;
+    }
+
+    // Sub-agent plan from Decision (Phase I SSOT)
+    if (core.subAgentPlan.enabled) {
+      this.config.enableParallelExecution = true;
+      this.config.maxParallelAgents = Math.max(
+        this.config.maxParallelAgents,
+        core.subAgentPlan.maxAgents,
+      );
+    }
+
+    // Re-initialize DAGOrchestrator with Decision-derived parallel limit
+    if (this.dagOrchestrator) {
+      this.dagOrchestrator = new DAGOrchestrator({
+        maxParallelAgents: core.computePolicy.parallelAgents || this.config.maxParallelAgents,
+        maxRetries: 2,
+        tokenBudget: core.computePolicy.maxTokenBudget,
+        wallTimeLimit: 600000,
+        spawnAgent: this.spawnAgent.bind(this),
+      });
+    }
+
+    // Complexity-based design skip
+    const isSimpleOrTrivial =
+      core.reasoning.complexity === "trivial" || core.reasoning.complexity === "simple";
+    if (isSimpleOrTrivial) {
+      this.config.skipDesignForSimple = true;
+    }
+
+    // ── Module activations from decision ──
+
+    // Speculative execution: high inspect_more + complex task
+    if (core.affordance.inspect_more > 0.8 &&
+        (core.reasoning.complexity === "complex" || core.reasoning.complexity === "massive")) {
+      this.config.enableSpeculative = true;
+    }
+
+    // Security scan: any modify intent with non-trivial complexity (enhanced)
+    if (core.failureSurface.patchRisk > 0.5 ||
+        (core.reasoning.intent === "edit" && core.reasoning.complexity !== "trivial")) {
+      this.config.enableSecurityScan = true;
+    }
+
+    // Doc generation: refactor/plan intent at complex+ complexity
+    if ((core.reasoning.intent === "refactor" || core.reasoning.intent === "plan") &&
+        (core.reasoning.complexity === "complex" || core.reasoning.complexity === "massive")) {
+      this.config.enableDocGeneration = true;
+    }
+
+    // Sandbox: high blast radius or shell-heavy budget
+    if (core.failureSurface.blastRadius > 0.7 || core.toolBudget.maxShellExecs > 10) {
+      this.config.enableSandbox = true;
+    }
+
+    // Perf tracking: AGENT mode always, HYBRID for complex+
+    if (core.interactionMode === "AGENT" ||
+        (core.interactionMode === "HYBRID" && core.reasoning.complexity !== "simple")) {
+      this.config.enablePerfTracking = true;
+    }
+
+    // Set global complexity from decision
+    this.globalComplexity = core.reasoning.complexity;
+
+    // Log decision-driven module activations
+    const activated: string[] = [];
+    if (this.config.enableSpeculative) activated.push("speculative");
+    if (this.config.enableSecurityScan) activated.push("security-scan");
+    if (this.config.enableDocGeneration) activated.push("doc-gen");
+    if (this.config.enableSandbox) activated.push("sandbox");
+    if (this.config.enablePerfTracking) activated.push("perf-track");
+    if (this.config.enableDeepVerify) activated.push("deep-verify");
+    if (this.config.enableParallelExecution) activated.push("parallel");
+    if (activated.length > 0) {
+      this.emit("engine:modules_activated", activated);
+    }
   }
   /** Sandbox manager for tool call validation (null if disabled) */
   private sandboxManager: SandboxManager | null = null;
@@ -448,6 +561,9 @@ private embeddingCache: EmbeddingCache;
     | "moderate"
     | "complex"
     | "massive" = "moderate";
+
+  /** Decision context injected at execute() time (null if not provided) */
+  private decision: AgentDecisionContext | null = null;
   constructor(config: ExecutionEngineConfig) {
     super();
    this.setMaxListeners(200);
@@ -475,6 +591,9 @@ private embeddingCache: EmbeddingCache;
       enableIntentInference: config.enableIntentInference ?? true,
       enableSpeculative: config.enableSpeculative ?? false,
       speculativeMaxApproaches: config.speculativeMaxApproaches ?? 3,
+      enablePerfTracking: config.enablePerfTracking ?? false,
+      enableSandbox: config.enableSandbox ?? false,
+      sandboxTier: config.sandboxTier ?? 2,
       governorConfig: config.governorConfig,
       contextConfig: config.contextConfig,
       approvalConfig: config.approvalConfig,
@@ -535,6 +654,10 @@ this.embeddingCache = {
    wallTimeLimit: 600000,
    spawnAgent: this.spawnAgent.bind(this),
  });
+ // NOTE: Decision-aware DAG parallel limit is applied in applyDecisionPolicy()
+ // TODO: Consider using ParallelExecutor for fine-grained concurrency control
+ // ParallelExecutor provides fault isolation per sub-agent, currently unused
+ // Decision.core.subAgentPlan determines parallel strategy
 this.dagOrchestrator.on("dag:agent_reasoning", (e: { text: string; taskId: string; agentId: string }) => {
    this.emit("agent:event", {
      kind: "agent:reasoning_timeline",
@@ -612,7 +735,7 @@ this.dagOrchestrator.on("dag:agent_reasoning", (e: { text: string; taskId: strin
    * @param goal - 사용자의 실행 목표
    * @returns 실행 결과 (성공 여부, 변경 파일, 토큰 사용량 등)
    */
-  async execute(goal: string): Promise<ExecutionResult> {
+  async execute(goal: string, decision?: AgentDecisionContext): Promise<ExecutionResult> {
     const startTime = Date.now();
     this.abortController = new AbortController();
     this.changedFiles.clear();
@@ -626,6 +749,13 @@ this.dagOrchestrator.on("dag:agent_reasoning", (e: { text: string; taskId: strin
     this.activeSkillContext = {
       taskDescription: goal,
     };
+
+    // Apply Decision Engine policy if provided
+    this.decision = decision ?? null;
+    if (this.decision) {
+      this.applyDecisionPolicy(this.decision);
+    }
+
     this.emit("engine:start", goal);
     this._logger.logInput(goal);
     this.reflection.think("start", `Goal received: "${goal}"`);
@@ -682,17 +812,40 @@ this.dagOrchestrator.on("dag:agent_reasoning", (e: { text: string; taskId: strin
 
       // 1. Build codebase index (if enabled and not already built)
       if (this.config.enableCodebaseIndex && !this.codebaseContext) {
+        // TODO Phase D+: LanguageSupport could receive decision.core.reasoning to prioritize language-specific patterns
         const languageSupport = new LanguageSupport();
         this.codebaseContext = new CodebaseContext(this.config.projectPath, languageSupport);
         this._logger.info("system", "Building codebase index", { projectPath: this.config.projectPath });
         this.reflection.think("analyze", "Building codebase index...");
         await this.codebaseContext.buildIndex();
         const stats = this.codebaseContext.getStats();
-        this._logger.info("system", `Codebase indexed: ${stats.totalFiles} files, ${stats.totalSymbols} symbols`);
+        this._logger.info("system", `Codebase indexed: ${stats.totalFiles} files, ${stats.totalSymbols} symbols, avgComplexity: ${stats.avgComplexity}, maxComplexity: ${stats.maxComplexity}`);
         this.reflection.think(
           "analyze",
-          `Index built: ${stats.totalFiles} files, ${stats.totalSymbols} symbols`,
+          `Index built: ${stats.totalFiles} files, ${stats.totalSymbols} symbols, avgComplexity: ${stats.avgComplexity}`,
         );
+
+        // Apply codebase complexity to runtime policy (Decision is frozen, so adjust execution config directly)
+        if (stats.avgComplexity > 15) {
+          // High average complexity → force deeper verification
+          if (!this.config.enableDeepVerify) {
+            this.config.enableDeepVerify = true;
+            this._logger.info("system", `Codebase avgComplexity ${stats.avgComplexity} > 15 — enabling deep verify`);
+          }
+        }
+        if (stats.maxComplexity > 50) {
+          // Extremely complex file exists → enable security scan
+          if (!this.config.enableSecurityScan) {
+            this.config.enableSecurityScan = true;
+            this._logger.info("system", `Codebase maxComplexity ${stats.maxComplexity} > 50 — enabling security scan`);
+          }
+        }
+        if (stats.avgLoc > 300) {
+          // Large files → enable perf tracking
+          if (!this.config.enablePerfTracking) {
+            this.config.enablePerfTracking = true;
+          }
+        }
       }
 
       // 1b. VectorIndex initialization (pgvector or in-memory semantic search)
@@ -833,7 +986,7 @@ this.dagOrchestrator.on("dag:agent_reasoning", (e: { text: string; taskId: strin
         }
         // Checkpoint after each phase transition
         this.checkpoint().catch((err) => {
-          console.warn("[YUAN] Checkpoint failed:", err instanceof Error ? err.message : err);
+          // file-only — console.warn corrupts Ink TUI
         });
       });
       this.stateMachine.on("phase:exit", (phase: AgentPhase) => {
@@ -1653,9 +1806,12 @@ Exactly one approach should have recommended=true.`;
 
     const startMs = Date.now();
 
+ // TODO: routeSubAgent should accept decisionHint for deterministic routing
+ // When Decision is available, intent/complexity/affordance can guide model tier selection
  const routing = routeSubAgent({
    role: step.role ?? "coder",
   complexity:
+    (this.decision?.core.reasoning.complexity) ??
     (state.workingMemory.get("complexity") as
       | "trivial"
       | "simple"
@@ -1898,10 +2054,15 @@ const stepChangedFiles = new Set(
       `Deep verification: ${deepResult.verdict} (score: ${deepResult.overallScore}, confidence: ${deepResult.confidence})`,
     );
 
-    // ─── Debate Orchestrator (optional — auto-activates when complexity >= moderate) ───
+    // ─── Debate Orchestrator (optional — Decision-aware gating or auto-activates when complexity >= moderate) ───
     const debateComplexity = state.workingMemory.get("complexity") as string | undefined;
     const debateAutoActivate = ["moderate", "complex", "massive"].includes(debateComplexity ?? "");
-    const shouldDebate = (this.config.enableDebate || debateAutoActivate) && this.changedFiles.size > 0;
+    // Decision-aware: activate debate when run_checks is high and task is non-trivial
+    const shouldDebate = this.decision
+      ? this.decision.core.affordance.run_checks > 0.6 &&
+        this.decision.core.reasoning.complexity !== "trivial" &&
+        this.changedFiles.size > 0
+      : (this.config.enableDebate || debateAutoActivate) && this.changedFiles.size > 0;
     if (shouldDebate) {
       try {
         this._logger.info("system", "Running multi-agent debate verification...");
@@ -2357,9 +2518,11 @@ ${[...this.changedFiles].join(", ")}
   _signal?: AbortSignal
  ): Promise<TaskResult> {
 
+   // TODO: routeSubAgent should accept decisionHint for deterministic routing
+   // When Decision is available, use decision complexity over globalComplexity
    const routing = routeSubAgent({
      role: task.role ?? "coder",
-     complexity: this.globalComplexity,
+     complexity: this.decision?.core.reasoning.complexity ?? this.globalComplexity,
      fileCount: task.targetFiles.length,
      hasTests: task.tools?.includes("test_run") ?? false,
      isCriticalPath: false,
@@ -2384,9 +2547,22 @@ ${[...this.changedFiles].join(", ")}
      parentModelTier: routing.tier,
    });
 
+   // Pass decision-derived hints to sub-agent goal
+   let taskGoal = context.taskGoal ?? task.goal;
+   if (this.decision) {
+     const subBudget = this.getSubAgentTokenBudget();
+     // Sub-agents inherit parent's token budget (proportional) and interaction mode
+     taskGoal += `\n[Budget: max ${subBudget} tokens. Mode: ${this.decision.core.interactionMode}]`;
+     // Propagate code quality policy to sub-agents
+     if (this.decision.core.codeQuality.isCodeTask) {
+       const cq = this.decision.core.codeQuality;
+       taskGoal += `\n[Code Quality: ${cq.codeTaskType} mode. STRICT: no TODO/stub/placeholder. Risk: ${cq.primaryRisk}]`;
+     }
+   }
+
    const result = await subAgent.run({
      overallGoal: context.overallGoal,
-     taskGoal: context.taskGoal ?? task.goal,
+     taskGoal,
      targetFiles: context.targetFiles ?? task.targetFiles,
      readFiles: context.readFiles ?? task.readFiles,
      projectStructure: context.projectStructure,
